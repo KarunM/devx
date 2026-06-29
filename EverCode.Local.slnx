@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EverCode.Local.Cli/EverCode.Local.Cli.csproj" />
+    <Project Path="src/EverCode.Local.Engine/EverCode.Local.Engine.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/EverCode.Local.Tests/EverCode.Local.Tests.csproj" />
+  </Folder>
+</Solution>

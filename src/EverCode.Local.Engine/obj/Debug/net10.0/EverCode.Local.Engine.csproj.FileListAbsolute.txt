@@ -1,0 +1,12 @@
+/Users/karunamadu/repos/evercode.local/src/EverCode.Local.Engine/bin/Debug/net10.0/EverCode.Local.Engine.deps.json
+/Users/karunamadu/repos/evercode.local/src/EverCode.Local.Engine/bin/Debug/net10.0/EverCode.Local.Engine.dll
+/Users/karunamadu/repos/evercode.local/src/EverCode.Local.Engine/bin/Debug/net10.0/EverCode.Local.Engine.pdb
+/Users/karunamadu/repos/evercode.local/src/EverCode.Local.Engine/obj/Debug/net10.0/EverCode.Local.Engine.GeneratedMSBuildEditorConfig.editorconfig
+/Users/karunamadu/repos/evercode.local/src/EverCode.Local.Engine/obj/Debug/net10.0/EverCode.Local.Engine.AssemblyInfoInputs.cache
+/Users/karunamadu/repos/evercode.local/src/EverCode.Local.Engine/obj/Debug/net10.0/EverCode.Local.Engine.AssemblyInfo.cs
+/Users/karunamadu/repos/evercode.local/src/EverCode.Local.Engine/obj/Debug/net10.0/EverCode.Local.Engine.csproj.CoreCompileInputs.cache
+/Users/karunamadu/repos/evercode.local/src/EverCode.Local.Engine/obj/Debug/net10.0/EverCode.Local.Engine.sourcelink.json
+/Users/karunamadu/repos/evercode.local/src/EverCode.Local.Engine/obj/Debug/net10.0/EverCode.Local.Engine.dll
+/Users/karunamadu/repos/evercode.local/src/EverCode.Local.Engine/obj/Debug/net10.0/refint/EverCode.Local.Engine.dll
+/Users/karunamadu/repos/evercode.local/src/EverCode.Local.Engine/obj/Debug/net10.0/EverCode.Local.Engine.pdb
+/Users/karunamadu/repos/evercode.local/src/EverCode.Local.Engine/obj/Debug/net10.0/ref/EverCode.Local.Engine.dll
