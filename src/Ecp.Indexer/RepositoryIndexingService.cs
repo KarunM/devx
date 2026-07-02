@@ -1,6 +1,8 @@
 using System.Security.Cryptography;
 using Ecp.Domain;
 using Ecp.Infrastructure.Storage.SQLite;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using DomainFile = Ecp.Domain.File;
 
 namespace Ecp.Indexer;
@@ -63,9 +65,9 @@ public sealed class RepositoryIndexingService
                             $"{parsed.Namespace}.{type.Name}",
                             null), cancellationToken);
 
-                        foreach (var method in type.Methods)
-                        {
-                            await _repositoryStore.UpsertMethodAsync(new Method(new MethodId(StableId($"{typeId}:{method.Name}:{method.Signature}")), typeId, method.Name), cancellationToken);
+                    foreach (var method in type.Methods)
+                    {
+                        await _repositoryStore.UpsertMethodAsync(new Method(new MethodId(StableId($"{typeId}:{method.Name}:{method.Signature}")), typeId, method.Name), cancellationToken);
                             await _symbolStore.UpsertSymbolAsync(new Symbol(
                                 StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{method.Name}:{method.Signature}").ToString(),
                                 repository.Id.Value.ToString(),
@@ -76,10 +78,12 @@ public sealed class RepositoryIndexingService
                                 method.Name,
                                 $"{parsed.Namespace}.{type.Name}.{method.Name}",
                                 method.Signature), cancellationToken);
-                        }
+                    }
 
-                        foreach (var property in type.Properties)
-                        {
+                    await IndexCallersAsync(filePath, file.Id, parsed.Namespace, type.Name, type.Methods, cancellationToken);
+
+                    foreach (var property in type.Properties)
+                    {
                             await _repositoryStore.UpsertPropertyAsync(new Property(new PropertyId(StableId($"{typeId}:{property.Name}")), typeId, property.Name), cancellationToken);
                             await _symbolStore.UpsertSymbolAsync(new Symbol(
                                 StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{property.Name}").ToString(),
@@ -118,6 +122,61 @@ public sealed class RepositoryIndexingService
 
     private static string RelativePath(string root, string fullPath)
         => Path.GetRelativePath(root, fullPath).Replace(Path.DirectorySeparatorChar, '/');
+
+    private async Task IndexCallersAsync(string filePath, FileId fileId, string @namespace, string typeName, IReadOnlyList<ParsedMethod> methods, CancellationToken cancellationToken)
+    {
+        var sourceText = await System.IO.File.ReadAllTextAsync(filePath, cancellationToken);
+        var tree = CSharpSyntaxTree.ParseText(sourceText);
+        var root = tree.GetCompilationUnitRoot();
+
+        foreach (var methodNode in root.DescendantNodes().OfType<BaseMethodDeclarationSyntax>())
+        {
+            var callerName = methodNode switch
+            {
+                MethodDeclarationSyntax m => m.Identifier.ValueText,
+                ConstructorDeclarationSyntax c => c.Identifier.ValueText,
+                _ => string.Empty
+            };
+            var callerQualified = string.IsNullOrWhiteSpace(@namespace) ? $"{typeName}.{callerName}" : $"{@namespace}.{typeName}.{callerName}";
+            var callerSymbol = await FindCallerSymbolAsync(fileId, @namespace, typeName, callerName, cancellationToken);
+            if (callerSymbol is null)
+            {
+                continue;
+            }
+
+            foreach (var invocation in methodNode.DescendantNodes().OfType<InvocationExpressionSyntax>())
+            {
+                var targetName = invocation.Expression switch
+                {
+                    IdentifierNameSyntax id => id.Identifier.ValueText,
+                    MemberAccessExpressionSyntax member => member.Name.Identifier.ValueText,
+                    _ => null
+                };
+                if (string.IsNullOrWhiteSpace(targetName))
+                {
+                    continue;
+                }
+
+                var targetSymbols = await _symbolStore.FindSymbolsByNameAsync(targetName!, cancellationToken);
+                foreach (var target in targetSymbols.Where(symbol => symbol.Kind is "Method" or "Constructor"))
+                {
+                    await _repositoryStore.UpsertReferenceAsync(new Reference(
+                        new ReferenceId(StableId($"{callerSymbol.Id}:{target.Id}:{invocation.GetLocation().GetLineSpan().StartLinePosition.Line + 1}")),
+                        fileId,
+                        target.Id,
+                        callerSymbol.Id,
+                        invocation.GetLocation().GetLineSpan().StartLinePosition.Line + 1), cancellationToken);
+                }
+            }
+        }
+    }
+
+    private async Task<Symbol?> FindCallerSymbolAsync(FileId fileId, string @namespace, string typeName, string callerName, CancellationToken cancellationToken)
+    {
+        var qualified = string.IsNullOrWhiteSpace(@namespace) ? $"{typeName}.{callerName}" : $"{@namespace}.{typeName}.{callerName}";
+        var matches = await _symbolStore.FindSymbolsByQualifiedNameAsync(qualified, cancellationToken);
+        return matches.FirstOrDefault(symbol => symbol.FileId == fileId.Value.ToString() && symbol.Kind is "Method" or "Constructor");
+    }
 
     private static Guid StableId(string value)
     {

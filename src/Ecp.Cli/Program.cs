@@ -1,5 +1,7 @@
 using System.Text.Json;
+using System.Security.Cryptography;
 using Ecp.Domain;
+using Ecp.Cli;
 using Ecp.Infrastructure.Storage.SQLite;
 using Ecp.Indexer;
 using Ecp.Protocol;
@@ -53,6 +55,27 @@ static async Task<int> RunAsync(string[] args)
         case "diagnostics":
             return await DiagnosticsAsync(connectionString, args, format);
 
+        case "snapshot":
+            return await SnapshotAsync(connectionString, args, format);
+
+        case "method":
+            return await MethodAsync(connectionString, args, format);
+
+        case "type":
+            return await TypeAsync(connectionString, args, format);
+
+        case "callers":
+            return await CallersAsync(connectionString, args, format);
+
+        case "references":
+            return await ReferencesAsync(connectionString, args, format);
+
+        case "callees":
+            return await CalleesAsync(connectionString, args, format);
+
+        case "report":
+            return await ReportAsync(connectionString, args, format);
+
         default:
             Console.Error.WriteLine($"Unknown command '{command}'.");
             return 1;
@@ -61,9 +84,12 @@ static async Task<int> RunAsync(string[] args)
 
 static async Task IndexAsync(string connectionString, string repositoryPath)
 {
+    var started = DateTimeOffset.UtcNow;
     var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
     var indexer = new RepositoryIndexingService(store);
     await indexer.IndexAsync(repositoryPath);
+    await store.AddOperationMetricAsync(new OperationMetric("index", started, DateTimeOffset.UtcNow - started, true, null));
     Console.WriteLine("Indexed repository.");
 }
 
@@ -85,6 +111,7 @@ static async Task<int> SearchAsync(string connectionString, string[] args, strin
     }
 
     var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
     var request = new ProtocolRequest(
         "1.0",
@@ -92,7 +119,9 @@ static async Task<int> SearchAsync(string connectionString, string[] args, strin
         sessionId,
         JsonSerializer.SerializeToElement(new { query }));
 
+    var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric($"search {searchKind}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -106,18 +135,50 @@ static async Task<int> SessionAsync(string connectionString, string[] args, stri
     }
 
     var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
     var repositoryRoot = Path.GetFullPath(Environment.CurrentDirectory);
-    var repository = new Repository(new RepositoryId(Guid.NewGuid()), Path.GetFileName(repositoryRoot), repositoryRoot);
+    var repository = new Repository(new RepositoryId(StableId(repositoryRoot)), Path.GetFileName(repositoryRoot), repositoryRoot);
     await store.InitializeAsync();
     await store.UpsertRepositoryAsync(repository);
+    var started = DateTimeOffset.UtcNow;
     var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+    await store.AddOperationMetricAsync(new OperationMetric("session create", started, DateTimeOffset.UtcNow - started, true, session.Id.Value.ToString()));
     WriteResponse(new ProtocolResponse(true, JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString() }), [], []), format);
     return 0;
 }
 
+static Guid StableId(string value)
+{
+    var hash = SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value.ToLowerInvariant()));
+    Span<byte> guidBytes = stackalloc byte[16];
+    hash.AsSpan(0, 16).CopyTo(guidBytes);
+    return new Guid(guidBytes);
+}
+
 static async Task<int> PatchAsync(string connectionString, string[] args, string format)
 {
-    if (args.Length < 3 || args[1] != "apply")
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("Usage: ecp patch <apply|preview> <patch-file> --session <id>");
+        return 1;
+    }
+
+    if (args[1] == "validate")
+    {
+        return await PatchValidateAsync(connectionString, args, format);
+    }
+
+        if (args[1] == "rollback")
+        {
+            return await PatchRollbackAsync(connectionString, args, format);
+        }
+
+    if (args[1] == "preview")
+    {
+        return await PatchPreviewAsync(connectionString, args, format);
+    }
+
+    if (args[1] != "apply")
     {
         Console.Error.WriteLine("Usage: ecp patch apply <patch-file> --session <id>");
         return 1;
@@ -133,10 +194,100 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
 
     var patchJson = await IOFile.ReadAllTextAsync(patchPath);
     var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
     using var document = JsonDocument.Parse(patchJson);
     var request = new ProtocolRequest("1.0", ProtocolOperations.Patch, sessionId, document.RootElement.Clone());
+    var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("patch", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
+    WriteResponse(response, format);
+    return response.Success ? 0 : 1;
+}
+
+static async Task<int> PatchPreviewAsync(string connectionString, string[] args, string format)
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("Usage: ecp patch preview <patch-file> --session <id>");
+        return 1;
+    }
+
+    var patchPath = args[2];
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var patchJson = await IOFile.ReadAllTextAsync(patchPath);
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    using var document = JsonDocument.Parse(patchJson);
+    var request = new ProtocolRequest("1.0", "PATCH_PREVIEW", sessionId, document.RootElement.Clone());
+    var started = DateTimeOffset.UtcNow;
+    var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("patch preview", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
+    WriteResponse(response, format);
+    return response.Success ? 0 : 1;
+}
+
+static async Task<int> PatchValidateAsync(string connectionString, string[] args, string format)
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("Usage: ecp patch validate <patch-file> --session <id>");
+        return 1;
+    }
+
+    var patchPath = args[2];
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var patchJson = await IOFile.ReadAllTextAsync(patchPath);
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    using var document = JsonDocument.Parse(patchJson);
+    var request = new ProtocolRequest("1.0", "PATCH_VALIDATE", sessionId, document.RootElement.Clone());
+    var started = DateTimeOffset.UtcNow;
+    var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("patch validate", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
+    WriteResponse(response, format);
+    return response.Success ? 0 : 1;
+}
+
+static async Task<int> PatchRollbackAsync(string connectionString, string[] args, string format)
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("Usage: ecp patch rollback <patch-file> --session <id>");
+        return 1;
+    }
+
+    var patchPath = args[2];
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var patchJson = await IOFile.ReadAllTextAsync(patchPath);
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    using var document = JsonDocument.Parse(patchJson);
+    var request = new ProtocolRequest("1.0", ProtocolOperations.PatchRollback, sessionId, document.RootElement.Clone());
+    var started = DateTimeOffset.UtcNow;
+    var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("patch rollback", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -151,9 +302,12 @@ static async Task<int> RunBuildAsync(string connectionString, string[] args, str
     }
 
     var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
     var request = new ProtocolRequest("1.0", ProtocolOperations.RunBuild, sessionId, JsonSerializer.Deserialize<JsonElement>("{}"));
+    var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("build", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -168,9 +322,12 @@ static async Task<int> RunTestsAsync(string connectionString, string[] args, str
     }
 
     var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
     var request = new ProtocolRequest("1.0", ProtocolOperations.RunTests, sessionId, JsonSerializer.Deserialize<JsonElement>("{}"));
+    var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("test", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -185,11 +342,218 @@ static async Task<int> DiagnosticsAsync(string connectionString, string[] args, 
     }
 
     var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
     var request = new ProtocolRequest("1.0", ProtocolOperations.GetDiagnostics, sessionId, JsonSerializer.Deserialize<JsonElement>("{}"));
+    var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("diagnostics", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
+}
+
+static async Task<int> SnapshotAsync(string connectionString, string[] args, string format)
+{
+    if (args.Length < 2)
+    {
+        Console.Error.WriteLine("Usage: ecp snapshot <file> --session <id>");
+        return 1;
+    }
+
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var store = new SqliteStorageInitializer(connectionString);
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var request = new ProtocolRequest("1.0", ProtocolOperations.GetFileSnapshot, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
+    var started = DateTimeOffset.UtcNow;
+    var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("snapshot", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
+    WriteResponse(response, format);
+    return response.Success ? 0 : 1;
+}
+
+static async Task<int> MethodAsync(string connectionString, string[] args, string format)
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("Usage: ecp method <summary|get> <method> --session <id>");
+        return 1;
+    }
+
+    var action = args[1];
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var operation = action == "summary" ? ProtocolOperations.GetMethodSummary : action == "get" ? ProtocolOperations.GetMethod : null;
+    if (operation is null)
+    {
+        Console.Error.WriteLine("Usage: ecp method <summary|get> <method> --session <id>");
+        return 1;
+    }
+
+    var request = new ProtocolRequest("1.0", operation, sessionId, JsonSerializer.SerializeToElement(new { query = args[2] }));
+    var started = DateTimeOffset.UtcNow;
+    var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric($"method {action}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
+    WriteResponse(response, format);
+    return response.Success ? 0 : 1;
+}
+
+static async Task<int> TypeAsync(string connectionString, string[] args, string format)
+{
+    if (args.Length < 3 || args[1] != "get")
+    {
+        Console.Error.WriteLine("Usage: ecp type get <type> --session <id>");
+        return 1;
+    }
+
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var request = new ProtocolRequest("1.0", ProtocolOperations.GetTypeOperation, sessionId, JsonSerializer.SerializeToElement(new { query = args[2] }));
+    var started = DateTimeOffset.UtcNow;
+    var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("type get", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
+    WriteResponse(response, format);
+    return response.Success ? 0 : 1;
+}
+
+static async Task<int> ReferencesAsync(string connectionString, string[] args, string format)
+{
+    if (args.Length < 2)
+    {
+        Console.Error.WriteLine("Usage: ecp references <symbol> --session <id>");
+        return 1;
+    }
+
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var request = new ProtocolRequest("1.0", ProtocolOperations.GetReferences, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
+    var started = DateTimeOffset.UtcNow;
+    var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("get references", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
+    WriteResponse(response, format);
+    return response.Success ? 0 : 1;
+}
+
+static async Task<int> CallersAsync(string connectionString, string[] args, string format)
+{
+    if (args.Length < 2)
+    {
+        Console.Error.WriteLine("Usage: ecp callers <method> --session <id>");
+        return 1;
+    }
+
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var request = new ProtocolRequest("1.0", ProtocolOperations.GetCallers, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
+    var started = DateTimeOffset.UtcNow;
+    var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("get callers", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
+    WriteResponse(response, format);
+    return response.Success ? 0 : 1;
+}
+
+static async Task<int> CalleesAsync(string connectionString, string[] args, string format)
+{
+    if (args.Length < 2)
+    {
+        Console.Error.WriteLine("Usage: ecp callees <method> --session <id>");
+        return 1;
+    }
+
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var request = new ProtocolRequest("1.0", ProtocolOperations.GetCallees, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
+    var started = DateTimeOffset.UtcNow;
+    var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("get callees", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
+    WriteResponse(response, format);
+    return response.Success ? 0 : 1;
+}
+
+static async Task<int> ReportAsync(string connectionString, string[] args, string format)
+{
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var session = await store.GetSessionAsync(new GetSessionRequest(new SessionId(Guid.Parse(sessionId))));
+    if (session is null)
+    {
+        Console.Error.WriteLine("Session not found.");
+        return 1;
+    }
+
+    var metrics = await store.GetOperationMetricsAsync(session.Id);
+    var report = await new EcpReportComposer().ComposeAsync(session, metrics, store);
+
+    if (format == "json")
+    {
+        Console.WriteLine(JsonSerializer.Serialize(report));
+        return 0;
+    }
+
+    Console.WriteLine("Session Summary");
+    Console.WriteLine($"Session: {session.Id.Value}");
+    Console.WriteLine($"Repository: {session.RepositoryId.Value}");
+    Console.WriteLine($"Searches: {session.SearchHistory.Count}");
+    Console.WriteLine();
+    Console.WriteLine("ECP Operation Log");
+    foreach (var metric in report.OperationLog)
+    {
+        Console.WriteLine($"{metric.Operation} | {metric.Timestamp:O} | {metric.DurationMs}ms | {metric.Success}");
+    }
+
+    return 0;
 }
 
 static string? GetOption(string[] args, string name)
@@ -231,6 +595,7 @@ static void PrintHelp()
         ecp index <path>
         ecp search symbol <query> --session <id>
         ecp search text <query> --session <id>
+        ecp snapshot <file> --session <id>
         ecp session create
         """);
 }

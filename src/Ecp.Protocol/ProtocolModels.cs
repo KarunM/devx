@@ -22,6 +22,7 @@ public static class ProtocolOperations
     public const string GetTests = "GET_TESTS";
     public const string GetDiagnostics = "GET_DIAGNOSTICS";
     public const string Patch = "PATCH";
+    public const string PatchRollback = "PATCH_ROLLBACK";
     public const string RunBuild = "RUN_BUILD";
     public const string RunTests = "RUN_TESTS";
 }
@@ -32,4 +33,12 @@ public interface IProtocolEngine
 }
 
 public sealed record PatchRequest(string Version, string SessionId, PatchDocument Patch);
+public sealed record PatchPreviewResponse(bool PatchValid, IReadOnlyList<string> FilesAffected, IReadOnlyList<string> OperationsDetected, string UnifiedDiffPreview, IReadOnlyList<ProtocolDiagnostic> ValidationErrors);
+public sealed record PatchValidateResponse(bool Valid, IReadOnlyList<string> Warnings, IReadOnlyList<string> Errors, int Files, int Operations);
+public sealed record PatchRollbackResponse(bool Success, int FilesRestored, int OperationsReverted, IReadOnlyList<string> Warnings, IReadOnlyList<string> Errors);
 public sealed record DiagnosticsResponse(IReadOnlyList<DiagnosticRecord> Diagnostics);
+public sealed record FileSnapshotResponse(FileSnapshot Snapshot);
+public sealed record MethodResponse(MethodSource Method);
+public sealed record TypeResponse(TypeSummary Type);
+public sealed record CallersResponse(CallerSummaryResponse Callers);
+public sealed record CalleesResponse(CalleeSummaryResponse Callees);

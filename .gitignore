@@ -5,6 +5,9 @@
 
 # dotenv files
 .env
+.ecp/
+*.exp
+exp.db
 
 # User-specific files
 *.rsuser
@@ -480,4 +483,3 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
-

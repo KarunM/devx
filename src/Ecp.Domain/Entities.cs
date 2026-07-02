@@ -21,7 +21,7 @@ public sealed record Type(TypeId Id, NamespaceId NamespaceId, string Name);
 public sealed record Method(MethodId Id, TypeId TypeId, string Name);
 public sealed record Property(PropertyId Id, TypeId TypeId, string Name);
 public sealed record Field(FieldId Id, TypeId TypeId, string Name);
-public sealed record Reference(ReferenceId Id, FileId FileId, string TargetSymbolId);
+public sealed record Reference(ReferenceId Id, FileId FileId, string TargetSymbolId, string CallerSymbolId, int? CallSiteLine);
 public sealed record Diagnostic(DiagnosticId Id, string TargetKind, string Message);
 public sealed record Test(TestId Id, FileId FileId, string Name);
 public sealed record Session(SessionId Id, RepositoryId RepositoryId, string State);
@@ -44,6 +44,31 @@ public sealed record MarkSymbolExpandedRequest(SessionId SessionId, string Symbo
 public sealed record MarkFileExpandedRequest(SessionId SessionId, string FileId);
 public sealed record AddDiagnosticRequest(SessionId SessionId, DiagnosticRecord Diagnostic);
 public sealed record AddExecutionRequest(SessionId SessionId, ExecutionRecord Execution);
+public sealed record OperationMetric(
+    string Operation,
+    DateTimeOffset Timestamp,
+    TimeSpan Duration,
+    bool Success,
+    string? SessionId);
+public sealed record SessionMetricsSummary(
+    string? SessionId,
+    IReadOnlyList<OperationMetric> Operations,
+    int IndexedFiles,
+    int SearchedFiles,
+    int ExpandedFiles,
+    int SnapshotsRequested,
+    int MethodsExpanded,
+    int PatchesApplied,
+    int BuildCount,
+    int SuccessfulBuilds,
+    int FailedBuilds,
+    int Warnings,
+    int Errors,
+    int TestRuns,
+    int Passed,
+    int Failed,
+    int Skipped,
+    string LlmMetrics);
 
 public sealed record PatchDocument(string Version, IReadOnlyList<PatchOperation> Operations);
 public sealed record PatchOperation(string Operation, string Path, string? Content, string? MethodName, string? ReplacementText);
@@ -76,7 +101,126 @@ public sealed record SearchTextRequest(string Query);
 public sealed record SearchResult(IReadOnlyList<SymbolSearchResult> Symbols, IReadOnlyList<FileSearchResult> Files);
 public sealed record SymbolSearchResult(string Id, string Kind, string Name, string QualifiedName, string? FilePath);
 public sealed record FileSearchResult(string Id, string Path, string ProjectName, string RepositoryName);
+public sealed record FileSnapshot(
+    string Id,
+    string Project,
+    string Path,
+    string Language,
+    int ApproximateLoc,
+    IReadOnlyList<FileNamespaceSnapshot> Namespaces,
+    IReadOnlyList<FileTypeSnapshot> Types,
+    IReadOnlyList<FileMethodSnapshot> Methods,
+    IReadOnlyList<FilePropertySnapshot> Properties,
+    IReadOnlyList<FileFieldSnapshot> Fields,
+    IReadOnlyList<string> Dependencies);
 
+public sealed record FileNamespaceSnapshot(string Id, string Name);
+public sealed record FileTypeSnapshot(string Id, string Name, string Namespace);
+public sealed record FileMethodSnapshot(string Id, string Name, string TypeName, string Namespace);
+public sealed record FilePropertySnapshot(string Id, string Name, string TypeName, string Namespace);
+public sealed record FileFieldSnapshot(string Id, string Name, string TypeName, string Namespace);
+public sealed record MethodSummary(
+    string Id,
+    string RepositoryName,
+    string ProjectName,
+    string FilePath,
+    string Namespace,
+    string TypeName,
+    string Name,
+    string QualifiedName,
+    string Kind);
+
+public sealed record MethodSummaryResponse(
+    string Query,
+    string MatchKind,
+    MethodSummary? SelectedMethod,
+    IReadOnlyList<MethodSummary> Methods);
+
+public sealed record MethodSource(
+    string Id,
+    string QualifiedName,
+    string FilePath,
+    int StartLine,
+    int EndLine,
+    string Language,
+    string Source);
+
+public sealed record TypeSummary(
+    string Id,
+    string Name,
+    string QualifiedName,
+    string Kind,
+    string Namespace,
+    string Project,
+    string FilePath,
+    string? BaseType,
+    IReadOnlyList<string> ImplementedInterfaces,
+    IReadOnlyList<string> GenericParameters,
+    string Visibility,
+    IReadOnlyList<FileMethodSnapshot> Constructors,
+    IReadOnlyList<FilePropertySnapshot> Properties,
+    IReadOnlyList<FileFieldSnapshot> Fields,
+    IReadOnlyList<FileMethodSnapshot> Methods,
+    IReadOnlyList<string> NestedTypes,
+    int ApproximateLoc,
+    int StartLine,
+    int EndLine);
+
+public sealed record TypeSummaryResponse(
+    string Query,
+    string MatchKind,
+    TypeSummary? SelectedType,
+    IReadOnlyList<TypeSummary> Types);
+
+public sealed record CallerSummary(
+    string CallerMethodId,
+    string CallerMethodName,
+    string QualifiedName,
+    string Namespace,
+    string Project,
+    string FilePath,
+    string ContainingType,
+    int? CallSiteLine);
+
+public sealed record CallerSummaryResponse(
+    string Query,
+    string MatchKind,
+    MethodSummary? TargetMethod,
+    IReadOnlyList<CallerSummary> Callers);
+
+public sealed record CalleeSummary(
+    string CalleeMethodId,
+    string CalleeMethodName,
+    string QualifiedName,
+    string Namespace,
+    string Project,
+    string FilePath,
+    string ContainingType,
+    int? CallSiteLine);
+
+public sealed record CalleeSummaryResponse(
+    string Query,
+    string MatchKind,
+    MethodSummary? TargetMethod,
+    IReadOnlyList<CalleeSummary> Callees);
+
+public sealed record ReferenceSummary(
+    string ReferenceId,
+    string SymbolName,
+    string QualifiedName,
+    string SymbolKind,
+    string ReferencingMethod,
+    string ReferencingType,
+    string Namespace,
+    string Project,
+    string FilePath,
+    int? LineNumber);
+
+public sealed record ReferencesResponse(
+    string Query,
+    string MatchKind,
+    MethodSummary? TargetSymbol,
+    IReadOnlyList<ReferenceSummary> References);
 public interface ISearchService
 {
     Task<SearchResult> SearchSymbolAsync(SearchSymbolRequest request, CancellationToken cancellationToken = default);
@@ -139,7 +283,16 @@ public interface IRepositoryStore
     Task UpsertMethodAsync(Method method, CancellationToken cancellationToken = default);
     Task UpsertPropertyAsync(Property property, CancellationToken cancellationToken = default);
     Task UpsertFieldAsync(Field field, CancellationToken cancellationToken = default);
+    Task UpsertReferenceAsync(Reference reference, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<FileSearchResult>> SearchFilesAsync(string query, CancellationToken cancellationToken = default);
+    Task<FileSnapshot?> GetFileSnapshotAsync(string fileIdOrPath, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<MethodSummary>> FindMethodSummariesAsync(string query, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<MethodSource>> FindMethodSourcesAsync(string query, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<TypeSummary>> FindTypeSummariesAsync(string query, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<CallerSummary>> FindCallersAsync(string query, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<CalleeSummary>> FindCalleesAsync(string query, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ReferenceSummary>> FindReferencesAsync(string query, CancellationToken cancellationToken = default);
+    Task<int> CountIndexedFilesAsync(RepositoryId repositoryId, CancellationToken cancellationToken = default);
     Task<string?> GetRepositoryRootPathAsync(RepositoryId repositoryId, CancellationToken cancellationToken = default);
 }
 
@@ -163,4 +316,6 @@ public interface ISessionStore
     Task MarkFileExpandedAsync(MarkFileExpandedRequest request, CancellationToken cancellationToken = default);
     Task AddDiagnosticAsync(AddDiagnosticRequest request, CancellationToken cancellationToken = default);
     Task AddExecutionAsync(AddExecutionRequest request, CancellationToken cancellationToken = default);
+    Task AddOperationMetricAsync(OperationMetric metric, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<OperationMetric>> GetOperationMetricsAsync(SessionId sessionId, CancellationToken cancellationToken = default);
 }

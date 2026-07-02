@@ -42,11 +42,21 @@ public sealed class ProtocolEngine : IProtocolEngine
         {
             ProtocolOperations.SearchSymbol => await HandleSearchSymbolAsync(request, session, cancellationToken),
             ProtocolOperations.SearchText => await HandleSearchTextAsync(request, session, cancellationToken),
+            ProtocolOperations.GetFileSnapshot => await HandleGetFileSnapshotAsync(request, session, cancellationToken),
+            ProtocolOperations.GetMethodSummary => await HandleGetMethodSummaryAsync(request, session, cancellationToken),
+            ProtocolOperations.GetMethod => await HandleGetMethodAsync(request, session, cancellationToken),
+            ProtocolOperations.GetTypeOperation => await HandleGetTypeAsync(request, session, cancellationToken),
+            ProtocolOperations.GetCallers => await HandleGetCallersAsync(request, session, cancellationToken),
+            ProtocolOperations.GetCallees => await HandleGetCalleesAsync(request, session, cancellationToken),
+            ProtocolOperations.GetReferences => await HandleGetReferencesAsync(request, session, cancellationToken),
             ProtocolOperations.Patch => await HandlePatchAsync(request, session, cancellationToken),
+            "PATCH_PREVIEW" => await HandlePatchPreviewAsync(request, session, cancellationToken),
+            "PATCH_VALIDATE" => await HandlePatchValidateAsync(request, session, cancellationToken),
+            ProtocolOperations.PatchRollback => await HandlePatchRollbackAsync(request, session, cancellationToken),
             ProtocolOperations.RunBuild => await HandleRunBuildAsync(session, cancellationToken),
             ProtocolOperations.RunTests => await HandleRunTestsAsync(session, cancellationToken),
             ProtocolOperations.GetDiagnostics => await HandleGetDiagnosticsAsync(session, cancellationToken),
-            ProtocolOperations.GetFileSnapshot or ProtocolOperations.GetTypeOperation or ProtocolOperations.GetMethodSummary or ProtocolOperations.GetMethod or ProtocolOperations.GetCallers or ProtocolOperations.GetCallees or ProtocolOperations.GetReferences or ProtocolOperations.GetTests
+            ProtocolOperations.GetMethod or ProtocolOperations.GetCallers or ProtocolOperations.GetCallees or ProtocolOperations.GetTests
                 => Fail("HandlerNotImplemented", $"Operation '{request.Operation}' is not implemented yet."),
             _ => Fail("InvalidOperation", $"Unknown operation '{request.Operation}'.")
         };
@@ -78,6 +88,185 @@ public sealed class ProtocolEngine : IProtocolEngine
 
     private static ProtocolResponse Success(SearchResult result)
         => new(true, JsonSerializer.SerializeToElement(result), [], []);
+
+    private async Task<ProtocolResponse> HandleGetFileSnapshotAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        if (!TryGetQuery(request.Payload, out var fileIdOrPath))
+        {
+            return Fail("ValidationError", "Snapshot requests must include a string 'query' field.");
+        }
+
+        var snapshot = await _repositoryStore.GetFileSnapshotAsync(fileIdOrPath, cancellationToken);
+        if (snapshot is null)
+        {
+            return Fail("NotFound", $"File '{fileIdOrPath}' was not found.");
+        }
+
+        await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, fileIdOrPath), cancellationToken);
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new FileSnapshotResponse(snapshot)), [], []);
+    }
+
+    private async Task<ProtocolResponse> HandleGetMethodSummaryAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        if (!TryGetQuery(request.Payload, out var query))
+        {
+            return Fail("ValidationError", "Method summary requests must include a string 'query' field.");
+        }
+
+        var methods = await _repositoryStore.FindMethodSummariesAsync(query, cancellationToken);
+        if (methods.Count == 0)
+        {
+            return Fail("NotFound", $"Method '{query}' was not found.");
+        }
+
+        var exactMatch = methods.FirstOrDefault(method =>
+            string.Equals(method.Name, query, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(method.QualifiedName, query, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(method.Id, query, StringComparison.OrdinalIgnoreCase));
+
+        var matchKind = methods.Count == 1
+            ? "Exact"
+            : exactMatch is not null
+                ? "Ambiguous"
+                : "Partial";
+
+        var selected = exactMatch is not null && methods.Count == 1 ? exactMatch : null;
+        var workingSetItem = selected?.Id ?? methods[0].Id;
+        await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, workingSetItem), cancellationToken);
+        if (selected is not null)
+        {
+            await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, selected.Id), cancellationToken);
+        }
+
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new MethodSummaryResponse(query, matchKind, selected, methods)), [], []);
+    }
+
+    private async Task<ProtocolResponse> HandleGetMethodAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        if (!TryGetQuery(request.Payload, out var query))
+        {
+            return Fail("ValidationError", "Method requests must include a string 'query' field.");
+        }
+
+        var methods = await _repositoryStore.FindMethodSourcesAsync(query, cancellationToken);
+        if (methods.Count == 0)
+        {
+            return Fail("NotFound", $"Method '{query}' was not found.");
+        }
+
+        if (methods.Count > 1)
+        {
+            return Fail("AmbiguousMatch", $"Method '{query}' matched multiple implementations.");
+        }
+
+        var method = methods[0];
+        await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, method.Id), cancellationToken);
+        await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, method.Id), cancellationToken);
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new MethodResponse(method)), [], []);
+    }
+
+    private async Task<ProtocolResponse> HandleGetTypeAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        if (!TryGetQuery(request.Payload, out var query))
+        {
+            return Fail("ValidationError", "Type requests must include a string 'query' field.");
+        }
+
+        var types = await _repositoryStore.FindTypeSummariesAsync(query, cancellationToken);
+        if (types.Count == 0)
+        {
+            return Fail("NotFound", $"Type '{query}' was not found.");
+        }
+
+        if (types.Count > 1)
+        {
+            return Fail("AmbiguousMatch", $"Type '{query}' matched multiple implementations.");
+        }
+
+        var type = types[0];
+        await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, type.Id), cancellationToken);
+        await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, type.Id), cancellationToken);
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new TypeResponse(type)), [], []);
+    }
+
+    private async Task<ProtocolResponse> HandleGetCallersAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        if (!TryGetQuery(request.Payload, out var query))
+        {
+            return Fail("ValidationError", "Caller requests must include a string 'query' field.");
+        }
+
+        var callers = await _repositoryStore.FindCallersAsync(query, cancellationToken);
+        if (callers.Count == 0)
+        {
+            return Fail("NotFound", $"Method '{query}' was not found.");
+        }
+
+        var methods = await _repositoryStore.FindMethodSummariesAsync(query, cancellationToken);
+        var target = methods.Count == 1 ? methods[0] : null;
+        if (methods.Count > 1)
+        {
+            return Fail("AmbiguousMatch", $"Method '{query}' matched multiple implementations.");
+        }
+
+        foreach (var caller in callers)
+        {
+            await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, caller.CallerMethodId), cancellationToken);
+        }
+
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new CallersResponse(new CallerSummaryResponse(query, target is null ? "Unknown" : "Exact", target, callers))), [], []);
+    }
+
+    private async Task<ProtocolResponse> HandleGetReferencesAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        if (!TryGetQuery(request.Payload, out var query))
+        {
+            return Fail("ValidationError", "Reference requests must include a string 'query' field.");
+        }
+
+        var references = await _repositoryStore.FindReferencesAsync(query, cancellationToken);
+        if (references.Count == 0)
+        {
+            return Fail("NotFound", $"Symbol '{query}' was not found.");
+        }
+
+        var targetSearch = await _repositoryStore.FindMethodSummariesAsync(query, cancellationToken);
+
+        var response = new ReferencesResponse(
+            Query: query,
+            MatchKind: "Exact",
+            TargetSymbol: targetSearch.Count > 0 ? targetSearch[0] : null,
+            References: references);
+
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
+    }
+    private async Task<ProtocolResponse> HandleGetCalleesAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        if (!TryGetQuery(request.Payload, out var query))
+        {
+            return Fail("ValidationError", "Callee requests must include a string 'query' field.");
+        }
+
+        var callees = await _repositoryStore.FindCalleesAsync(query, cancellationToken);
+        if (callees.Count == 0)
+        {
+            return Fail("NotFound", $"Method '{query}' was not found.");
+        }
+
+        var methods = await _repositoryStore.FindMethodSummariesAsync(query, cancellationToken);
+        var target = methods.Count == 1 ? methods[0] : null;
+        if (methods.Count > 1)
+        {
+            return Fail("AmbiguousMatch", $"Method '{query}' matched multiple implementations.");
+        }
+
+        foreach (var callee in callees)
+        {
+            await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, callee.CalleeMethodId), cancellationToken);
+        }
+
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new CalleesResponse(new CalleeSummaryResponse(query, target is null ? "Unknown" : "Exact", target, callees))), [], []);
+    }
 
     private async Task<ProtocolResponse> HandleRunBuildAsync(SessionState session, CancellationToken cancellationToken)
     {
@@ -159,6 +348,121 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new { applied = patch.Operations.Count }), results, []);
+    }
+
+    private async Task<ProtocolResponse> HandlePatchPreviewAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        var patch = JsonSerializer.Deserialize<PatchDocument>(request.Payload.GetRawText(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (patch is null || patch.Version != "1.0")
+        {
+            return Fail("ValidationError", "Invalid patch document.");
+        }
+
+        var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return Fail("RepositoryNotIndexed", "Repository root was not found.");
+        }
+
+        var filesAffected = patch.Operations.Select(operation => operation.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var operationsDetected = patch.Operations.Select(operation => operation.Operation).ToArray();
+        var diffPreview = string.Join("\n", patch.Operations.Select(operation => $"--- {operation.Path}\n+++ {operation.Path}\n@@\n+{operation.Content}"));
+        var response = new PatchPreviewResponse(true, filesAffected, operationsDetected, diffPreview, []);
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
+    }
+
+    private async Task<ProtocolResponse> HandlePatchValidateAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        var patch = JsonSerializer.Deserialize<PatchDocument>(request.Payload.GetRawText(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (patch is null || patch.Version != "1.0")
+        {
+            return Fail("ValidationError", "Invalid patch document.");
+        }
+
+        var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return Fail("RepositoryNotIndexed", "Repository root was not found.");
+        }
+
+        var warnings = new List<string>();
+        var errors = new List<string>();
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenOperations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var operation in patch.Operations)
+        {
+            files.Add(operation.Path);
+            var operationKey = $"{operation.Operation}:{operation.Path}";
+            if (!seenOperations.Add(operationKey))
+            {
+                errors.Add($"Duplicate operation detected for '{operation.Operation}' on '{operation.Path}'.");
+            }
+
+            var absolutePath = Path.GetFullPath(Path.Combine(root, operation.Path));
+            if (!absolutePath.StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add($"Path '{operation.Path}' is outside the repository root.");
+            }
+
+            if (operation.Operation.Equals("CreateFile", StringComparison.OrdinalIgnoreCase) && System.IO.File.Exists(absolutePath))
+            {
+                errors.Add($"Target file '{operation.Path}' already exists.");
+            }
+
+            if (!operation.Operation.Equals("CreateFile", StringComparison.OrdinalIgnoreCase) && !System.IO.File.Exists(absolutePath))
+            {
+                errors.Add($"Target file '{operation.Path}' does not exist.");
+            }
+        }
+
+        var response = new PatchValidateResponse(errors.Count == 0, warnings, errors, files.Count, patch.Operations.Count);
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
+    }
+
+    private async Task<ProtocolResponse> HandlePatchRollbackAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        var patch = JsonSerializer.Deserialize<PatchDocument>(request.Payload.GetRawText(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (patch is null || patch.Version != "1.0")
+        {
+            return Fail("ValidationError", "Invalid patch document.");
+        }
+
+        var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return Fail("RepositoryNotIndexed", "Repository root was not found.");
+        }
+
+        var restoredFiles = 0;
+        var revertedOperations = 0;
+
+        foreach (var operation in patch.Operations.Reverse())
+        {
+            var absolutePath = Path.GetFullPath(Path.Combine(root, operation.Path));
+            if (!absolutePath.StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
+            {
+                return Fail("ValidationError", $"Path '{operation.Path}' is outside the repository root.");
+            }
+
+            if (operation.Operation.Equals("CreateFile", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!IOFile.Exists(absolutePath))
+                {
+                    return Fail("NotFound", $"File '{operation.Path}' was not found for rollback.");
+                }
+
+                IOFile.Delete(absolutePath);
+                restoredFiles++;
+                revertedOperations++;
+                continue;
+            }
+
+            return Fail("ValidationError", $"Rollback does not support operation '{operation.Operation}'.");
+        }
+
+        var response = new PatchRollbackResponse(true, restoredFiles, revertedOperations, [], []);
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
     }
 
     private static (bool Success, string Code, string Message) ApplyOperation(string root, PatchOperation operation)

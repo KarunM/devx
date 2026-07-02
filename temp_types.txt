@@ -1,0 +1,17 @@
+public sealed record ReferenceSummary(
+    string ReferenceId,
+    string SymbolName,
+    string QualifiedName,
+    string SymbolKind,
+    string ReferencingMethod,
+    string ReferencingType,
+    string Namespace,
+    string Project,
+    string FilePath,
+    int? LineNumber);
+
+public sealed record ReferencesResponse(
+    string Query,
+    string MatchKind,
+    MethodSummary? TargetSymbol,
+    IReadOnlyList<ReferenceSummary> References);

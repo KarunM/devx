@@ -37,4 +37,29 @@ public sealed class SqliteSessionStoreTests
         Assert.Contains("symbol-1", resumed.ExpandedSymbols);
         Assert.Contains("file-1", resumed.ExpandedFiles);
     }
+
+    [Fact]
+    public async Task OperationMetrics_ArePersistedPerSession()
+    {
+        var databasePath = Path.Combine(Path.GetTempPath(), $"ecp-session-metrics-{Guid.NewGuid():N}.db");
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
+        var repositoryStore = new SqliteStorageInitializer(connectionString);
+        var sessionStore = new SqliteSessionStore(connectionString);
+
+        await repositoryStore.InitializeAsync();
+        await sessionStore.InitializeAsync();
+
+        var repositoryId = new RepositoryId(Guid.NewGuid());
+        await repositoryStore.UpsertRepositoryAsync(new Repository(repositoryId, "sample", "/tmp/sample"));
+
+        var session = await sessionStore.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+        await sessionStore.AddOperationMetricAsync(new OperationMetric("search symbol", DateTimeOffset.UtcNow, TimeSpan.FromMilliseconds(12), true, session.Id.Value.ToString()));
+
+        var metrics = await sessionStore.GetOperationMetricsAsync(session.Id);
+
+        Assert.Single(metrics);
+        Assert.Equal("search symbol", metrics[0].Operation);
+        Assert.True(metrics[0].Success);
+        Assert.Equal(session.Id.Value.ToString(), metrics[0].SessionId);
+    }
 }

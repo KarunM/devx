@@ -73,4 +73,436 @@ public sealed class ProtocolEngineTests
         Assert.False(response.Success);
         Assert.Contains(response.Errors, error => error.Code == "InvalidOperation");
     }
+
+    [Fact]
+    public async Task ExecuteAsync_GetMethodSummary_ReturnsMetadataOnlyAndMarksSession()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("ecp-method-summary-test").FullName;
+        var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
+        Directory.CreateDirectory(projectDirectory);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Alpha.cs"), """
+            namespace Sample;
+            public class Alpha
+            {
+                public void Run() { }
+            }
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Beta.cs"), """
+            namespace Sample;
+            public class Beta
+            {
+                public void Run() { }
+            }
+            """);
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"ecp-method-{Guid.NewGuid():N}.db") }.ToString();
+        var store = new SqliteStorageInitializer(connectionString);
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(repositoryRoot);
+
+        var repositoryId = new RepositoryId(Guid.NewGuid());
+        await store.UpsertRepositoryAsync(new Repository(repositoryId, "sample", repositoryRoot));
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+        var response = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0",
+            ProtocolOperations.GetMethodSummary,
+            session.Id.Value.ToString(),
+            JsonSerializer.SerializeToElement(new { query = "Sample.Alpha.Run" })));
+
+        Assert.True(response.Success);
+        Assert.NotNull(response.Data);
+        Assert.DoesNotContain("public void Run()", response.Data!.Value.GetRawText(), StringComparison.OrdinalIgnoreCase);
+
+        var payload = response.Data!.Value.Deserialize<MethodSummaryResponse>();
+        Assert.NotNull(payload);
+        Assert.Equal("Exact", payload!.MatchKind);
+        Assert.NotNull(payload.SelectedMethod);
+        Assert.Single(payload.Methods);
+        Assert.Equal("Alpha.cs", Path.GetFileName(payload.SelectedMethod!.FilePath));
+        Assert.DoesNotContain("Signature", response.Data!.Value.GetRawText(), StringComparison.OrdinalIgnoreCase);
+
+        var resumed = await store.GetSessionAsync(new GetSessionRequest(session.Id));
+        Assert.NotNull(resumed);
+        Assert.Contains(payload.SelectedMethod.Id, resumed!.WorkingSet);
+        Assert.Contains(payload.SelectedMethod.Id, resumed.ExpandedSymbols);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_GetMethodSummary_ReturnsAmbiguousMatchForOverloads()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("ecp-method-summary-ambiguous").FullName;
+        var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
+        Directory.CreateDirectory(projectDirectory);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Alpha.cs"), """
+            namespace Sample;
+            public class Alpha
+            {
+                public void Run() { }
+            }
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Beta.cs"), """
+            namespace Sample;
+            public class Beta
+            {
+                public void Run() { }
+            }
+            """);
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"ecp-method-ambiguous-{Guid.NewGuid():N}.db") }.ToString();
+        var store = new SqliteStorageInitializer(connectionString);
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(repositoryRoot);
+
+        var repositoryId = new RepositoryId(Guid.NewGuid());
+        await store.UpsertRepositoryAsync(new Repository(repositoryId, "sample", repositoryRoot));
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+        var response = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0",
+            ProtocolOperations.GetMethodSummary,
+            session.Id.Value.ToString(),
+            JsonSerializer.SerializeToElement(new { query = "Run" })));
+
+        Assert.True(response.Success);
+        var payload = response.Data!.Value.Deserialize<MethodSummaryResponse>();
+        Assert.NotNull(payload);
+        Assert.Equal("Ambiguous", payload!.MatchKind);
+        Assert.Null(payload.SelectedMethod);
+        Assert.True(payload.Methods.Count >= 2);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_GetMethodSummary_ReturnsNotFoundForMissingMethod()
+    {
+        var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"ecp-method-missing-{Guid.NewGuid():N}.db") }.ToString());
+        await store.InitializeAsync();
+        var repositoryId = new RepositoryId(Guid.NewGuid());
+        await store.UpsertRepositoryAsync(new Repository(repositoryId, "sample", "/tmp/sample"));
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+        var response = await engine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.GetMethodSummary, session.Id.Value.ToString(), JsonSerializer.SerializeToElement(new { query = "Missing" })));
+
+        Assert.False(response.Success);
+        Assert.Contains(response.Errors, error => error.Code == "NotFound");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_GetMethod_ReturnsSingleImplementationOnly()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("ecp-method-get").FullName;
+        var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
+        Directory.CreateDirectory(projectDirectory);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Alpha.cs"), """
+            namespace Sample;
+            public class Alpha
+            {
+                public void Run() { }
+                public void Stop() { }
+            }
+            """);
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"ecp-method-get-{Guid.NewGuid():N}.db") }.ToString();
+        var store = new SqliteStorageInitializer(connectionString);
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(repositoryRoot);
+
+        var repositoryId = new RepositoryId(Guid.NewGuid());
+        await store.UpsertRepositoryAsync(new Repository(repositoryId, "sample", repositoryRoot));
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+        var response = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0",
+            ProtocolOperations.GetMethod,
+            session.Id.Value.ToString(),
+            JsonSerializer.SerializeToElement(new { query = "Sample.Alpha.Run" })));
+
+        Assert.True(response.Success);
+        var payload = response.Data!.Value.Deserialize<MethodResponse>();
+        Assert.NotNull(payload);
+        Assert.Contains("public void Run()", payload!.Method.Source, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Stop()", payload.Method.Source, StringComparison.OrdinalIgnoreCase);
+
+        var resumed = await store.GetSessionAsync(new GetSessionRequest(session.Id));
+        Assert.NotNull(resumed);
+        Assert.Contains(payload.Method.Id, resumed!.WorkingSet);
+        Assert.Contains(payload.Method.Id, resumed.ExpandedSymbols);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_GetMethod_ReturnsAmbiguousMatch()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("ecp-method-get-ambiguous").FullName;
+        var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
+        Directory.CreateDirectory(projectDirectory);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Alpha.cs"), """
+            namespace Sample;
+            public class Alpha
+            {
+                public void Run() { }
+            }
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Beta.cs"), """
+            namespace Sample;
+            public class Beta
+            {
+                public void Run() { }
+            }
+            """);
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"ecp-method-get-ambiguous-{Guid.NewGuid():N}.db") }.ToString();
+        var store = new SqliteStorageInitializer(connectionString);
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(repositoryRoot);
+
+        var repositoryId = new RepositoryId(Guid.NewGuid());
+        await store.UpsertRepositoryAsync(new Repository(repositoryId, "sample", repositoryRoot));
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+        var response = await engine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.GetMethod, session.Id.Value.ToString(), JsonSerializer.SerializeToElement(new { query = "Run" })));
+
+        Assert.False(response.Success);
+        Assert.Contains(response.Errors, error => error.Code == "AmbiguousMatch");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_GetType_ReturnsMetadataOnly()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("ecp-type-get").FullName;
+        var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
+        Directory.CreateDirectory(projectDirectory);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Alpha.cs"), """
+            namespace Sample;
+            public class Alpha
+            {
+                public void Run() { }
+                public int Value { get; }
+            }
+            """);
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"ecp-type-{Guid.NewGuid():N}.db") }.ToString();
+        var store = new SqliteStorageInitializer(connectionString);
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(repositoryRoot);
+
+        var repositoryId = new RepositoryId(Guid.NewGuid());
+        await store.UpsertRepositoryAsync(new Repository(repositoryId, "sample", repositoryRoot));
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+        var response = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0",
+            ProtocolOperations.GetTypeOperation,
+            session.Id.Value.ToString(),
+            JsonSerializer.SerializeToElement(new { query = "Sample.Alpha" })));
+
+        Assert.True(response.Success);
+        var payload = response.Data!.Value.Deserialize<TypeResponse>();
+        Assert.NotNull(payload);
+        Assert.Equal("Alpha", payload!.Type.Name);
+        Assert.Equal("Sample.Alpha", payload.Type.QualifiedName);
+        Assert.DoesNotContain("public void Run()", response.Data!.Value.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("class Alpha", response.Data!.Value.GetRawText(), StringComparison.OrdinalIgnoreCase);
+
+        var resumed = await store.GetSessionAsync(new GetSessionRequest(session.Id));
+        Assert.NotNull(resumed);
+        Assert.Contains(payload.Type.Id, resumed!.WorkingSet);
+        Assert.Contains(payload.Type.Id, resumed.ExpandedSymbols);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_GetType_ReturnsAmbiguousMatch()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("ecp-type-get-ambiguous").FullName;
+        var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
+        Directory.CreateDirectory(projectDirectory);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Alpha.cs"), """
+            namespace Sample;
+            public class Alpha { }
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Beta.cs"), """
+            namespace Sample;
+            public class Alpha { }
+            """);
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"ecp-type-ambiguous-{Guid.NewGuid():N}.db") }.ToString();
+        var store = new SqliteStorageInitializer(connectionString);
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(repositoryRoot);
+
+        var repositoryId = new RepositoryId(Guid.NewGuid());
+        await store.UpsertRepositoryAsync(new Repository(repositoryId, "sample", repositoryRoot));
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+        var response = await engine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.GetTypeOperation, session.Id.Value.ToString(), JsonSerializer.SerializeToElement(new { query = "Alpha" })));
+
+        Assert.False(response.Success);
+        Assert.Contains(response.Errors, error => error.Code == "AmbiguousMatch");
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_GetCallers_ReturnsCallerMetadataOnly()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("ecp-callers-get").FullName;
+        var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
+        Directory.CreateDirectory(projectDirectory);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Alpha.cs"), """
+            namespace Sample;
+            public class Alpha
+            {
+                public void Target() { }
+                public void Caller() { Target(); }
+            }
+            """);
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"ecp-callers-{Guid.NewGuid():N}.db") }.ToString();
+        var store = new SqliteStorageInitializer(connectionString);
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(repositoryRoot);
+
+        var repositoryId = new RepositoryId(Guid.NewGuid());
+        await store.UpsertRepositoryAsync(new Repository(repositoryId, "sample", repositoryRoot));
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+        var response = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0",
+            ProtocolOperations.GetCallers,
+            session.Id.Value.ToString(),
+            JsonSerializer.SerializeToElement(new { query = "Sample.Alpha.Target" })));
+
+        Assert.True(response.Success);
+        var payload = response.Data!.Value.Deserialize<CallersResponse>();
+        Assert.NotNull(payload);
+        Assert.NotEmpty(payload!.Callers.Callers);
+        Assert.DoesNotContain("Target()", response.Data!.Value.GetRawText(), StringComparison.OrdinalIgnoreCase);
+
+        var resumed = await store.GetSessionAsync(new GetSessionRequest(session.Id));
+        Assert.NotNull(resumed);
+        Assert.Contains(payload.Callers.Callers[0].CallerMethodId, resumed!.WorkingSet);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_GetCallees_ReturnsCalleeMetadataOnly()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("ecp-callees-get").FullName;
+        var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
+        Directory.CreateDirectory(projectDirectory);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Alpha.cs"), """
+            namespace Sample;
+            public class Alpha
+            {
+                public void Target() { }
+                public void Caller() { Target(); }
+            }
+            """);
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"ecp-callees-{Guid.NewGuid():N}.db") }.ToString();
+        var store = new SqliteStorageInitializer(connectionString);
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(repositoryRoot);
+
+        var repositoryId = new RepositoryId(Guid.NewGuid());
+        await store.UpsertRepositoryAsync(new Repository(repositoryId, "sample", repositoryRoot));
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+        var response = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0",
+            ProtocolOperations.GetCallees,
+            session.Id.Value.ToString(),
+            JsonSerializer.SerializeToElement(new { query = "Sample.Alpha.Caller" })));
+
+        Assert.True(response.Success);
+        var payload = response.Data!.Value.Deserialize<CalleesResponse>();
+        Assert.NotNull(payload);
+        Assert.NotEmpty(payload!.Callees.Callees);
+        Assert.DoesNotContain("Target()", response.Data!.Value.GetRawText(), StringComparison.OrdinalIgnoreCase);
+
+        var resumed = await store.GetSessionAsync(new GetSessionRequest(session.Id));
+        Assert.NotNull(resumed);
+        Assert.Contains(payload.Callees.Callees[0].CalleeMethodId, resumed!.WorkingSet);
+    }
 }

@@ -31,6 +31,15 @@ public sealed class SqliteSessionStore : ISessionStore
                 patch_history TEXT NOT NULL,
                 build_test_history TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS operation_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NULL,
+                operation TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                duration_ticks INTEGER NOT NULL,
+                success INTEGER NOT NULL
+            );
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -83,6 +92,50 @@ public sealed class SqliteSessionStore : ISessionStore
         var session = await RequireSessionAsync(request.SessionId, cancellationToken);
         var buildHistory = session.BuildTestHistory.Concat([JsonSerializer.Serialize(request.Execution)]).ToList();
         await SaveAsync(session with { BuildTestHistory = buildHistory }, cancellationToken);
+    }
+
+    public async Task AddOperationMetricAsync(OperationMetric metric, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO operation_metrics (session_id, operation, timestamp, duration_ticks, success)
+            VALUES ($session_id, $operation, $timestamp, $duration_ticks, $success);
+            """;
+        command.Parameters.AddWithValue("$session_id", (object?)metric.SessionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$operation", metric.Operation);
+        command.Parameters.AddWithValue("$timestamp", metric.Timestamp.ToString("O"));
+        command.Parameters.AddWithValue("$duration_ticks", metric.Duration.Ticks);
+        command.Parameters.AddWithValue("$success", metric.Success ? 1 : 0);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<OperationMetric>> GetOperationMetricsAsync(SessionId sessionId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT operation, timestamp, duration_ticks, success, session_id
+            FROM operation_metrics
+            WHERE session_id = $session_id
+            ORDER BY id;
+            """;
+        command.Parameters.AddWithValue("$session_id", sessionId.Value.ToString());
+        var results = new List<OperationMetric>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(new OperationMetric(
+                reader.GetString(0),
+                DateTimeOffset.Parse(reader.GetString(1)),
+                TimeSpan.FromTicks(reader.GetInt64(2)),
+                reader.GetInt64(3) == 1,
+                reader.IsDBNull(4) ? null : reader.GetString(4)));
+        }
+
+        return results;
     }
 
     private async Task<SessionState> RequireSessionAsync(SessionId sessionId, CancellationToken cancellationToken)
