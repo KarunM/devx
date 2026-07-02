@@ -5,6 +5,9 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>ecp</ToolCommandName>
+    <PackageId>Ecp.Cli</PackageId>
   </PropertyGroup>
 
   <ItemGroup>
