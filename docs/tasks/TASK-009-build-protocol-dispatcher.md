@@ -1,6 +1,6 @@
 # TASK-009: Build Protocol Dispatcher
 
-- **Status:** Ready
+- **Status:** Completed
 - **Plan:** PLAN-003 Context Protocol Engine
 - **Depends On:** TASK-008
 
@@ -87,3 +87,11 @@ dotnet test
 ## Definition of Done
 
 The ECP protocol engine can receive structured requests and dispatch them predictably to operation handlers.
+
+## Completion
+
+- **Completed:** 2026-07-02
+- **Implemented By:** Codex
+- **Verification:**
+  - `dotnet build`
+  - `dotnet test`

@@ -1,0 +1,149 @@
+using System.Text.Json;
+using Ecp.Domain;
+using Microsoft.Data.Sqlite;
+
+namespace Ecp.Infrastructure.Storage.SQLite;
+
+public sealed class SqliteSessionStore : ISessionStore
+{
+    private readonly string _connectionString;
+
+    public SqliteSessionStore(string connectionString)
+    {
+        _connectionString = connectionString;
+    }
+
+    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                repository_id TEXT NOT NULL,
+                working_set TEXT NULL,
+                search_history TEXT NOT NULL,
+                expanded_files TEXT NOT NULL,
+                expanded_symbols TEXT NOT NULL,
+                diagnostics_history TEXT NOT NULL,
+                patch_history TEXT NOT NULL,
+                build_test_history TEXT NOT NULL
+            );
+            """;
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<SessionState> CreateSessionAsync(CreateSessionRequest request, CancellationToken cancellationToken = default)
+    {
+        var session = new SessionState(new SessionId(Guid.NewGuid()), request.RepositoryId, null, [], [], [], [], [], []);
+        await SaveAsync(session, cancellationToken);
+        return session;
+    }
+
+    public Task<SessionState?> GetSessionAsync(GetSessionRequest request, CancellationToken cancellationToken = default)
+        => GetAsync(request.SessionId, cancellationToken);
+
+    public async Task SaveSearchAsync(SaveSearchRequest request, CancellationToken cancellationToken = default)
+    {
+        var session = await RequireSessionAsync(request.SessionId, cancellationToken);
+        var updated = session with { SearchHistory = session.SearchHistory.Concat([request.Query]).ToList() };
+        await SaveAsync(updated, cancellationToken);
+    }
+
+    public async Task AddWorkingSetItemAsync(AddWorkingSetItemRequest request, CancellationToken cancellationToken = default)
+    {
+        var session = await RequireSessionAsync(request.SessionId, cancellationToken);
+        var workingSet = string.IsNullOrWhiteSpace(session.WorkingSet) ? request.Item : $"{session.WorkingSet}\n{request.Item}";
+        await SaveAsync(session with { WorkingSet = workingSet }, cancellationToken);
+    }
+
+    public async Task MarkSymbolExpandedAsync(MarkSymbolExpandedRequest request, CancellationToken cancellationToken = default)
+    {
+        var session = await RequireSessionAsync(request.SessionId, cancellationToken);
+        await SaveAsync(session with { ExpandedSymbols = session.ExpandedSymbols.Concat([request.SymbolId]).Distinct().ToList() }, cancellationToken);
+    }
+
+    public async Task MarkFileExpandedAsync(MarkFileExpandedRequest request, CancellationToken cancellationToken = default)
+    {
+        var session = await RequireSessionAsync(request.SessionId, cancellationToken);
+        await SaveAsync(session with { ExpandedFiles = session.ExpandedFiles.Concat([request.FileId]).Distinct().ToList() }, cancellationToken);
+    }
+
+    public async Task AddDiagnosticAsync(AddDiagnosticRequest request, CancellationToken cancellationToken = default)
+    {
+        var session = await RequireSessionAsync(request.SessionId, cancellationToken);
+        var diagnostics = session.DiagnosticsHistory.Concat([JsonSerializer.Serialize(request.Diagnostic)]).ToList();
+        await SaveAsync(session with { DiagnosticsHistory = diagnostics }, cancellationToken);
+    }
+
+    public async Task AddExecutionAsync(AddExecutionRequest request, CancellationToken cancellationToken = default)
+    {
+        var session = await RequireSessionAsync(request.SessionId, cancellationToken);
+        var buildHistory = session.BuildTestHistory.Concat([JsonSerializer.Serialize(request.Execution)]).ToList();
+        await SaveAsync(session with { BuildTestHistory = buildHistory }, cancellationToken);
+    }
+
+    private async Task<SessionState> RequireSessionAsync(SessionId sessionId, CancellationToken cancellationToken)
+        => await GetAsync(sessionId, cancellationToken) ?? throw new InvalidOperationException("Session not found.");
+
+    private async Task SaveAsync(SessionState session, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO sessions (id, repository_id, working_set, search_history, expanded_files, expanded_symbols, diagnostics_history, patch_history, build_test_history)
+            VALUES ($id, $repository_id, $working_set, $search_history, $expanded_files, $expanded_symbols, $diagnostics_history, $patch_history, $build_test_history)
+            ON CONFLICT(id) DO UPDATE SET
+                repository_id = excluded.repository_id,
+                working_set = excluded.working_set,
+                search_history = excluded.search_history,
+                expanded_files = excluded.expanded_files,
+                expanded_symbols = excluded.expanded_symbols,
+                diagnostics_history = excluded.diagnostics_history,
+                patch_history = excluded.patch_history,
+                build_test_history = excluded.build_test_history;
+            """;
+        command.Parameters.AddWithValue("$id", session.Id.Value.ToString());
+        command.Parameters.AddWithValue("$repository_id", session.RepositoryId.Value.ToString());
+        command.Parameters.AddWithValue("$working_set", (object?)session.WorkingSet ?? DBNull.Value);
+        command.Parameters.AddWithValue("$search_history", JsonSerializer.Serialize(session.SearchHistory));
+        command.Parameters.AddWithValue("$expanded_files", JsonSerializer.Serialize(session.ExpandedFiles));
+        command.Parameters.AddWithValue("$expanded_symbols", JsonSerializer.Serialize(session.ExpandedSymbols));
+        command.Parameters.AddWithValue("$diagnostics_history", JsonSerializer.Serialize(session.DiagnosticsHistory));
+        command.Parameters.AddWithValue("$patch_history", JsonSerializer.Serialize(session.PatchHistory));
+        command.Parameters.AddWithValue("$build_test_history", JsonSerializer.Serialize(session.BuildTestHistory));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private async Task<SessionState?> GetAsync(SessionId sessionId, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, repository_id, working_set, search_history, expanded_files, expanded_symbols, diagnostics_history, patch_history, build_test_history
+            FROM sessions
+            WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$id", sessionId.Value.ToString());
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new SessionState(
+            new SessionId(Guid.Parse(reader.GetString(0))),
+            new RepositoryId(Guid.Parse(reader.GetString(1))),
+            reader.IsDBNull(2) ? null : reader.GetString(2),
+            JsonSerializer.Deserialize<List<string>>(reader.GetString(3)) ?? [],
+            JsonSerializer.Deserialize<List<string>>(reader.GetString(4)) ?? [],
+            JsonSerializer.Deserialize<List<string>>(reader.GetString(5)) ?? [],
+            JsonSerializer.Deserialize<List<string>>(reader.GetString(6)) ?? [],
+            JsonSerializer.Deserialize<List<string>>(reader.GetString(7)) ?? [],
+            JsonSerializer.Deserialize<List<string>>(reader.GetString(8)) ?? []);
+    }
+}

@@ -1,6 +1,6 @@
 # TASK-006: Index Symbols
 
-- **Status:** Ready
+- **Status:** Completed
 - **Plan:** PLAN-002 Roslyn Indexer
 - **Depends On:** TASK-005
 
@@ -77,3 +77,11 @@ dotnet test
 ## Definition of Done
 
 Indexed symbols can be reliably stored, identified, and retrieved by name or qualified name.
+
+## Completion
+
+- **Completed:** 2026-07-02
+- **Implemented By:** Codex
+- **Verification:**
+  - `dotnet build`
+  - `dotnet test`

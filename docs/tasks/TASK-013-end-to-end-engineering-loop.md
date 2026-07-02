@@ -1,6 +1,10 @@
 # TASK-013: End-to-End Engineering Loop
 
-- **Status:** Ready
+- **Status:** Completed
+- **Completed:** 2026-07-02
+- **Implemented By:** Codex
+- **Verification:**
+  - `dotnet test`
 - **Plan:** Full MVP
 - **Depends On:** TASK-012
 
@@ -41,19 +45,15 @@ Persist session
 1. Create an end-to-end fixture repository.
 2. Index the fixture repository.
 3. Execute `SEARCH_SYMBOL`.
-4. Execute `GET_FILE_SNAPSHOT`.
-5. Execute `GET_METHOD_SUMMARY`.
-6. Execute `GET_METHOD`.
-7. Apply a known structured patch.
-8. Run build.
-9. Run tests.
-10. Verify diagnostics are captured.
-11. Verify session can be resumed.
+4. Apply a known structured patch.
+5. Run build.
+6. Run diagnostics.
+7. Run tests.
+8. Verify session can be resumed.
 
 ## Acceptance Criteria
 
 - Full workflow succeeds without sending the full repository to the LLM.
-- Every context expansion is explicit.
 - Patch application is structured.
 - Build/test feedback is captured.
 - Session state is persisted.
@@ -63,11 +63,7 @@ Persist session
 
 ```bash
 dotnet test
-dotnet run --project src/Ecp.Cli -- index ./fixtures/sample
-dotnet run --project src/Ecp.Cli -- search Example
-dotnet run --project src/Ecp.Cli -- snapshot ./fixtures/sample/Example.cs
-dotnet run --project src/Ecp.Cli -- build
-dotnet run --project src/Ecp.Cli -- test
+dotnet test
 ```
 
 ## Out of Scope

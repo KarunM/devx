@@ -9,11 +9,16 @@ docs/
 
 src/
   Ecp.Cli/
-  Ecp.Core/
+  Ecp.Application/
+  Ecp.Domain/
   Ecp.Protocol/
-  Ecp.Indexer/
-  Ecp.Storage/
-  Ecp.Patching/
+  Ecp.Infrastructure/
+    Storage/
+    Indexing/
+    Build/
+    Patching/
+    Parsers/
+      CSharp/
 
 tests/
   Ecp.Tests/

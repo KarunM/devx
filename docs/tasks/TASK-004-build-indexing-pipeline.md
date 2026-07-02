@@ -1,6 +1,6 @@
 # TASK-004: Build Indexing Pipeline
 
-- **Status:** Ready
+- **Status:** Completed
 - **Plan:** PLAN-001 Indexing MVP
 - **Depends On:** TASK-003
 
@@ -14,6 +14,7 @@ This task creates the indexing flow before detailed C# symbol parsing is added.
 
 - SQLite schema exists
 - Storage initializer works
+- `Ecp.Indexer` project exists
 - `Ecp.Indexer` project exists
 
 ## Inputs
@@ -81,3 +82,11 @@ dotnet test
 ## Definition of Done
 
 The indexing pipeline can populate repository, project, and file metadata into SQLite from a local repository path.
+
+## Completion
+
+- **Completed:** 2026-07-02
+- **Implemented By:** Codex
+- **Verification:**
+  - `dotnet build`
+  - `dotnet test`

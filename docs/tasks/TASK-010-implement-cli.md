@@ -1,6 +1,6 @@
 # TASK-010: Implement CLI
 
-- **Status:** Ready
+- **Status:** Completed
 - **Plan:** PLAN-003 Context Protocol Engine
 - **Depends On:** TASK-009
 
@@ -92,3 +92,13 @@ dotnet run --project src/Ecp.Cli -- search Authentication --format json
 ## Definition of Done
 
 The MVP CLI can index and query repositories through the ECP protocol engine.
+
+## Completion
+
+- **Completed:** 2026-07-02
+- **Implemented By:** Codex
+- **Verification:**
+  - `dotnet build`
+  - `dotnet run --project src/Ecp.Cli -- index .`
+  - `dotnet run --project src/Ecp.Cli -- session create --format json`
+  - `dotnet run --project src/Ecp.Cli -- search symbol Run --session <id> --format json`

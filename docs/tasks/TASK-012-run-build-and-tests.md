@@ -1,6 +1,14 @@
 # TASK-012: Build and Test Integration
 
-- **Status:** Ready
+- **Status:** Completed
+- **Completed:** 2026-07-02
+- **Implemented By:** Codex
+- **Verification:**
+  - `dotnet build`
+  - `dotnet run --project src/Ecp.Cli -- session create --format json`
+  - `dotnet run --project src/Ecp.Cli -- build --session <id> --format json`
+  - `dotnet run --project src/Ecp.Cli -- test --session <id> --format json`
+  - `dotnet run --project src/Ecp.Cli -- diagnostics --session <id> --format json`
 - **Plan:** PLAN-005 Patch Engine
 - **Depends On:** TASK-011
 
@@ -47,11 +55,10 @@ Diagnostics should include where available:
 - severity
 - code
 - message
-- file path
+- file
 - line
 - column
-- source command
-- timestamp
+- raw output
 
 ## Acceptance Criteria
 

@@ -1,6 +1,6 @@
 # TASK-005: Implement Roslyn Parser
 
-- **Status:** Ready
+- **Status:** Completed
 - **Plan:** PLAN-002 Roslyn Indexer
 - **Depends On:** TASK-004
 
@@ -91,3 +91,11 @@ dotnet test
 ## Definition of Done
 
 The indexer can parse C# files and store structural symbol metadata using Roslyn.
+
+## Completion
+
+- **Completed:** 2026-07-02
+- **Implemented By:** Codex
+- **Verification:**
+  - `dotnet build`
+  - `dotnet test`

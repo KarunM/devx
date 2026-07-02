@@ -1,6 +1,6 @@
 # TASK-002: Create Projects
 
-- **Status:** Ready
+- **Status:** Completed
 - **Plan:** PLAN-001 Indexing MVP
 - **Depends On:** TASK-001
 
@@ -119,3 +119,11 @@ dotnet build
 ## Definition of Done
 
 The solution contains all initial ECP projects with clean project references and a successful build.
+
+## Completion
+
+- **Completed:** 2026-07-02
+- **Implemented By:** Codex
+- **Verification:**
+  - `dotnet sln Ecp.sln list`
+  - `dotnet build`

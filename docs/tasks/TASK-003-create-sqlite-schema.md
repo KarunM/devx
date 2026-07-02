@@ -1,23 +1,24 @@
 # TASK-003: Create SQLite Schema
 
-- **Status:** Ready
+- **Status:** Completed
 - **Plan:** PLAN-001 Indexing MVP
 - **Depends On:** TASK-002
 
 ## Objective
 
-Create the initial SQLite schema for the repository index.
+Create the initial repository storage foundation for the index.
 
-The schema should support structural indexing for the MVP without relying on embeddings or vector storage.
+The schema should persist the canonical engineering model without relying on embeddings or vector storage.
 
 ## Prerequisites
 
-- `Ecp.Storage` project exists
-- `Ecp.Core` project exists
+- `Ecp.Infrastructure` project exists
+- `Ecp.Domain` project exists
 - Solution builds successfully
 
 ## Inputs
 
+- `docs/specs/SPEC-006-storage-model.md`
 - `docs/specs/SPEC-002-repository-index.md`
 - `docs/adr/ADR-002-local-repository-discovery.md`
 - `docs/adr/ADR-003-progressive-context.md`
@@ -25,45 +26,47 @@ The schema should support structural indexing for the MVP without relying on emb
 ## Tables to Create
 
 ```text
-Repositories
-Projects
-Files
-Namespaces
-Types
-Methods
-Properties
-Fields
-References
-CallGraph
-Tests
-Diagnostics
+Repository
+Project
+File
+Namespace
+Type
+Method
+Property
+Field
+Reference
+Diagnostic
+Test
+Session
 ```
 
 ## Required Design Properties
 
-- Stable primary keys
+- Stable entity identifiers
 - Foreign keys between related entities
 - File paths stored relative to repository root
 - Symbol identity preserved across queries
 - Full source code should not be stored in the MVP schema
+- Session state separated from repository index data
 
 ## Implementation Steps
 
-1. Add SQLite package dependency to `Ecp.Storage`.
-2. Create a database initializer.
-3. Create schema migration or bootstrap SQL.
-4. Create indexes for common lookups:
+1. Define storage contracts in `Ecp.Domain`.
+2. Add SQLite package dependency to `Ecp.Infrastructure`.
+3. Create a database initializer and storage bootstrapper.
+4. Create schema migration or bootstrap SQL.
+5. Create indexes for common lookups:
    - file path
    - symbol name
    - type name
    - method name
    - reference target
-5. Add a basic integration test that initializes a new database.
+6. Add a basic integration test that initializes a new database.
 
 ## Acceptance Criteria
 
 - A new SQLite database can be created.
-- All MVP tables are created.
+- All MVP entities can be persisted.
 - Foreign keys are enabled.
 - Re-running initialization is safe.
 - Tests verify schema creation.
@@ -90,4 +93,12 @@ sqlite3 .ecp/index.db ".tables"
 
 ## Definition of Done
 
-`Ecp.Storage` can initialize an empty ECP repository index database with all required MVP tables.
+`Ecp.Infrastructure.Storage.SQLite` can initialize an empty ECP repository database with all required MVP entities.
+
+## Completion
+
+- **Completed:** 2026-07-02
+- **Implemented By:** Codex
+- **Verification:**
+  - `dotnet build`
+  - `dotnet test`

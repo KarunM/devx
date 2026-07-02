@@ -1,6 +1,6 @@
 # TASK-011: Build Patch Engine
 
-- **Status:** Ready
+- **Status:** Completed
 - **Plan:** PLAN-005 Patch Engine
 - **Depends On:** TASK-010
 
@@ -86,3 +86,12 @@ dotnet test
 ## Definition of Done
 
 The patch engine can validate and apply MVP structured patch operations safely.
+
+## Completion
+
+- **Completed:** 2026-07-02
+- **Implemented By:** Codex
+- **Verification:**
+  - `dotnet build`
+  - `dotnet test`
+  - `dotnet run --project src/Ecp.Cli -- patch apply <patch-file> --session <id>`

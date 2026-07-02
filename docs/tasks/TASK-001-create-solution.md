@@ -1,6 +1,6 @@
 # TASK-001: Create Solution Structure
 
-- **Status:** Ready
+- **Status:** Completed
 - **Plan:** PLAN-001 Indexing MVP
 - **Depends On:** None
 
@@ -72,3 +72,10 @@ ls tests
 ## Definition of Done
 
 The repository contains a valid .NET solution with empty `src/` and `tests/` directories ready for project creation.
+
+## Completion
+
+- **Completed:** 2026-07-02
+- **Implemented By:** Codex
+- **Verification:**
+  - `dotnet sln Ecp.sln list`
