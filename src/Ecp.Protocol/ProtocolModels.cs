@@ -42,3 +42,18 @@ public sealed record MethodResponse(MethodSource Method);
 public sealed record TypeResponse(TypeSummary Type);
 public sealed record CallersResponse(CallerSummaryResponse Callers);
 public sealed record CalleesResponse(CalleeSummaryResponse Callees);
+public sealed record SourceReadResponse(
+    string Kind,
+    string SymbolId,
+    string QualifiedName,
+    string Path,
+    int StartLine,
+    int EndLine,
+    int TotalLines,
+    int ReturnedLines,
+    bool Truncated,
+    bool SourceReturned,
+    string Source,
+    object Metadata);
+
+public sealed record ReadSourceRequest(string? Query, string? Id, string? Range, bool Full, bool Source);

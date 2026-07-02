@@ -1,0 +1,10 @@
+{
+  "version": "1.0",
+  "operations": [
+    {
+      "operation": "UpdateFile",
+      "path": "src/Ecp.Protocol/ProtocolEngine.cs",
+      "content": "whole-file replacement is unsafe"
+    }
+  ]
+}

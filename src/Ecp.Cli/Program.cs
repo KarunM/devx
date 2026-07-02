@@ -28,6 +28,11 @@ static async Task<int> RunAsync(string[] args)
     switch (command)
     {
         case "index":
+            if (args.Length >= 2 && args[1] == "status")
+            {
+                return await IndexStatusAsync(connectionString, args, format);
+            }
+
             if (args.Length < 2)
             {
                 Console.Error.WriteLine("Missing repository path.");
@@ -70,6 +75,9 @@ static async Task<int> RunAsync(string[] args)
         case "references":
             return await ReferencesAsync(connectionString, args, format);
 
+        case "read":
+            return await ReadAsync(connectionString, args, format);
+
         case "callees":
             return await CalleesAsync(connectionString, args, format);
 
@@ -91,6 +99,61 @@ static async Task IndexAsync(string connectionString, string repositoryPath)
     await indexer.IndexAsync(repositoryPath);
     await store.AddOperationMetricAsync(new OperationMetric("index", started, DateTimeOffset.UtcNow - started, true, null));
     Console.WriteLine("Indexed repository.");
+}
+
+static async Task<int> IndexStatusAsync(string connectionString, string[] args, string format)
+{
+    var sessionId = GetOption(args, "--session");
+    string? repositoryPath = null;
+
+    for (var index = 2; index < args.Length; index++)
+    {
+        var arg = args[index];
+        if (arg.StartsWith("--", StringComparison.Ordinal))
+        {
+            if (arg == "--session" || arg == "--format")
+            {
+                index++;
+            }
+            continue;
+        }
+
+        if (arg.Equals("json", StringComparison.OrdinalIgnoreCase) || arg.Equals("text", StringComparison.OrdinalIgnoreCase))
+        {
+            continue;
+        }
+
+        repositoryPath = arg;
+        break;
+    }
+
+    var started = DateTimeOffset.UtcNow;
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+
+    if (string.IsNullOrWhiteSpace(repositoryPath))
+    {
+        repositoryPath = Path.GetFullPath(Environment.CurrentDirectory);
+    }
+
+    var repositoryRoot = Path.GetFullPath(repositoryPath);
+    var repository = await store.GetRepositoryByRootPathAsync(repositoryRoot);
+    var indexedFiles = repository is null ? 0 : await store.CountIndexedFilesAsync(repository.Id);
+    var response = new IndexStatusResponse(
+        RepositoryIndexed: repository is not null,
+        RepositoryRoot: repositoryRoot,
+        IndexedFiles: indexedFiles,
+        IndexExists: repository is not null,
+        Status: repository is null ? "Missing" : "Current",
+        Reason: repository is null ? "Repository has not been indexed yet." : "No obvious stale-index signal detected.");
+
+    if (!string.IsNullOrWhiteSpace(sessionId))
+    {
+        await store.AddOperationMetricAsync(new OperationMetric("index status", started, DateTimeOffset.UtcNow - started, true, sessionId));
+    }
+
+    WriteResponse(new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []), format);
+    return 0;
 }
 
 static async Task<int> SearchAsync(string connectionString, string[] args, string format)
@@ -168,10 +231,10 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
         return await PatchValidateAsync(connectionString, args, format);
     }
 
-        if (args[1] == "rollback")
-        {
-            return await PatchRollbackAsync(connectionString, args, format);
-        }
+    if (args[1] == "rollback")
+    {
+        return await PatchRollbackAsync(connectionString, args, format);
+    }
 
     if (args[1] == "preview")
     {
@@ -461,6 +524,91 @@ static async Task<int> ReferencesAsync(string connectionString, string[] args, s
     await store.AddOperationMetricAsync(new OperationMetric("get references", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
+}
+
+static async Task<int> ReadAsync(string connectionString, string[] args, string format)
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("Usage: ecp read <file|method|type> <target> --session <id> [--range start:end|--full]");
+        return 1;
+    }
+
+    var action = args[1];
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    ProtocolRequest request;
+    var started = DateTimeOffset.UtcNow;
+
+    if (action == "file")
+    {
+        var full = HasFlag(args, "--full");
+        var range = GetOption(args, "--range");
+        if (!full && range is null)
+        {
+            Console.Error.WriteLine("Usage: ecp read file <file> --range start:end --session <id> | --full");
+            return 1;
+        }
+
+        request = new ProtocolRequest("1.0", "READ_FILE", sessionId, JsonSerializer.SerializeToElement(new { query = args[2], range, full }));
+    }
+    else if (action == "method")
+    {
+        var id = GetOption(args, "--id");
+        var query = GetOption(args, "--query");
+        if (id is null && query is null)
+        {
+            query = args[2];
+        }
+
+        request = id is not null
+            ? new ProtocolRequest("1.0", "READ_METHOD", sessionId, JsonSerializer.SerializeToElement(new { id }))
+            : new ProtocolRequest("1.0", "READ_METHOD", sessionId, JsonSerializer.SerializeToElement(new { query }));
+    }
+    else if (action == "type")
+    {
+        var id = GetOption(args, "--id");
+        var query = GetOption(args, "--query");
+        if (id is null && query is null)
+        {
+            query = args[2];
+        }
+
+        request = id is not null
+            ? new ProtocolRequest("1.0", "READ_TYPE", sessionId, JsonSerializer.SerializeToElement(new { id }))
+            : new ProtocolRequest("1.0", "READ_TYPE", sessionId, JsonSerializer.SerializeToElement(new { query }));
+    }
+    else
+    {
+        Console.Error.WriteLine("Usage: ecp read <file|method|type> <target> --session <id> [--range start:end|--full]");
+        return 1;
+    }
+
+    var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric($"read {action}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));
+    WriteResponse(response, format);
+    return response.Success ? 0 : 1;
+}
+
+static bool HasFlag(string[] args, string name)
+{
+    foreach (var arg in args)
+    {
+        if (arg == name)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static async Task<int> CallersAsync(string connectionString, string[] args, string format)

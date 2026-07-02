@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text;
 using Ecp.Domain;
 using Ecp.Indexer;
 using IOFile = System.IO.File;
@@ -45,6 +46,9 @@ public sealed class ProtocolEngine : IProtocolEngine
             ProtocolOperations.GetFileSnapshot => await HandleGetFileSnapshotAsync(request, session, cancellationToken),
             ProtocolOperations.GetMethodSummary => await HandleGetMethodSummaryAsync(request, session, cancellationToken),
             ProtocolOperations.GetMethod => await HandleGetMethodAsync(request, session, cancellationToken),
+            "READ_FILE" => await HandleReadFileAsync(request, session, cancellationToken),
+            "READ_METHOD" => await HandleReadMethodAsync(request, session, cancellationToken),
+            "READ_TYPE" => await HandleReadTypeAsync(request, session, cancellationToken),
             ProtocolOperations.GetTypeOperation => await HandleGetTypeAsync(request, session, cancellationToken),
             ProtocolOperations.GetCallers => await HandleGetCallersAsync(request, session, cancellationToken),
             ProtocolOperations.GetCallees => await HandleGetCalleesAsync(request, session, cancellationToken),
@@ -322,6 +326,185 @@ public sealed class ProtocolEngine : IProtocolEngine
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new DiagnosticsResponse(diagnostics)), [], []);
     }
 
+    private async Task<ProtocolResponse> HandleReadFileAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        if (!TryGetQuery(request.Payload, out var path))
+        {
+            return Fail("ValidationError", "Read file requests must include a string 'query' field.");
+        }
+
+        var full = TryGetBoolean(request.Payload, "full");
+        var startLine = 0;
+        var endLine = 0;
+        if (!full && !TryGetRange(request.Payload, out startLine, out endLine))
+        {
+            return Fail("ValidationError", "Read file requests must include either a 'range' field formatted as 'start:end' or --full.");
+        }
+
+        var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return Fail("RepositoryNotIndexed", "Repository root was not found.");
+        }
+
+        var absolutePath = Path.GetFullPath(Path.Combine(root, path));
+        if (!absolutePath.StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
+        {
+            return Fail("ValidationError", "File path must remain inside the repository root.");
+        }
+
+        var source = await IOFile.ReadAllTextAsync(absolutePath, cancellationToken);
+        var lines = source.Split('\n');
+        var safeStart = full ? 1 : Math.Max(1, startLine);
+        var safeEnd = full ? lines.Length : Math.Min(endLine, lines.Length);
+        if (safeStart > safeEnd)
+        {
+            return Fail("ValidationError", "Invalid line range.");
+        }
+
+        var slice = string.Join('\n', lines[(safeStart - 1)..safeEnd]);
+        var response = new SourceReadResponse(
+            Kind: "file",
+            SymbolId: path,
+            QualifiedName: path,
+            Path: path,
+            StartLine: safeStart,
+            EndLine: safeEnd,
+            TotalLines: lines.Length,
+            ReturnedLines: safeEnd - safeStart + 1,
+            Truncated: !full && safeEnd < lines.Length,
+            SourceReturned: true,
+            Source: slice,
+            Metadata: new { Language = Path.GetExtension(path).TrimStart('.').ToUpperInvariant() });
+        await RecordReadMetricsAsync(session.Id, "read file", returnedLines: safeEnd - safeStart + 1, cancellationToken);
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
+    }
+
+    private async Task<ProtocolResponse> HandleReadMethodAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        var query = GetReadQuery(request.Payload);
+        if (query is null)
+        {
+            return Fail("ValidationError", "Read method requests must include either a string 'query' field or an 'id' field.");
+        }
+
+        var methods = await ResolveMethodSourcesAsync(query, request.Payload, cancellationToken);
+        if (methods.Count == 0)
+        {
+            return Fail("NotFound", $"Method '{query}' was not found.");
+        }
+
+        if (methods.Count > 1)
+        {
+            return Fail("AmbiguousMatch", $"Method '{query}' matched multiple implementations.");
+        }
+
+        var method = methods[0];
+        var source = await IOFile.ReadAllTextAsync(Path.Combine((await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken))!, method.FilePath), cancellationToken);
+        var lines = source.Split('\n');
+        var returnedLines = Math.Max(1, method.EndLine - method.StartLine + 1);
+        var response = new SourceReadResponse("method", method.Id, method.QualifiedName, method.FilePath, method.StartLine, method.EndLine, lines.Length, returnedLines, false, true, source, new { });
+        await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, method.Id), cancellationToken);
+        await RecordReadMetricsAsync(session.Id, "read method", returnedLines, cancellationToken);
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
+    }
+
+    private async Task<ProtocolResponse> HandleReadTypeAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        var query = GetReadQuery(request.Payload);
+        if (query is null)
+        {
+            return Fail("ValidationError", "Read type requests must include either a string 'query' field or an 'id' field.");
+        }
+
+        if (TryGetId(request.Payload, out var id))
+        {
+            var typeSummary = await _repositoryStore.FindTypeSummaryByIdAsync(id, cancellationToken);
+            if (typeSummary is null)
+            {
+                return Fail("NotFound", $"Type '{id}' was not found.");
+            }
+
+            var responseById = new SourceReadResponse("type", typeSummary.Id, typeSummary.QualifiedName, typeSummary.FilePath, typeSummary.StartLine, typeSummary.EndLine, 0, 0, false, false, string.Empty, new { TypeName = typeSummary.Name, Namespace = typeSummary.Namespace, Project = typeSummary.Project, Kind = typeSummary.Kind });
+            await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, typeSummary.Id), cancellationToken);
+            await RecordReadMetricsAsync(session.Id, "read type", 0, cancellationToken);
+            return new ProtocolResponse(true, JsonSerializer.SerializeToElement(responseById), [], []);
+        }
+
+        var types = await ResolveTypeSummariesAsync(query, request.Payload, cancellationToken);
+        if (types.Count == 0)
+        {
+            return Fail("NotFound", $"Type '{query}' was not found.");
+        }
+
+        if (types.Count > 1)
+        {
+            return Fail("AmbiguousMatch", $"Type '{query}' matched multiple implementations.");
+        }
+
+        var type = types[0];
+        var response = new SourceReadResponse("type", type.Id, type.QualifiedName, type.FilePath, type.StartLine, type.EndLine, 0, 0, false, false, string.Empty, new { TypeName = type.Name, Namespace = type.Namespace, Project = type.Project, Kind = type.Kind });
+        await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, type.Id), cancellationToken);
+        await RecordReadMetricsAsync(session.Id, "read type", 0, cancellationToken);
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
+    }
+
+    private async Task RecordReadMetricsAsync(SessionId sessionId, string operation, int returnedLines, CancellationToken cancellationToken)
+    {
+        await _sessionStore.AddOperationMetricAsync(new OperationMetric(operation, DateTimeOffset.UtcNow, TimeSpan.Zero, true, sessionId.Value.ToString()), cancellationToken);
+        await _sessionStore.AddOperationMetricAsync(new OperationMetric("read source lines", DateTimeOffset.UtcNow, TimeSpan.Zero, true, sessionId.Value.ToString()), cancellationToken);
+    }
+
+    private static string? GetReadQuery(JsonElement payload)
+    {
+        if (payload.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (payload.TryGetProperty("id", out var idElement) && idElement.ValueKind == JsonValueKind.String)
+        {
+            return idElement.GetString();
+        }
+
+        if (payload.TryGetProperty("query", out var queryElement) && queryElement.ValueKind == JsonValueKind.String)
+        {
+            return queryElement.GetString();
+        }
+
+        return null;
+    }
+
+    private async Task<IReadOnlyList<MethodSource>> ResolveMethodSourcesAsync(string query, JsonElement payload, CancellationToken cancellationToken)
+    {
+        if (TryGetId(payload, out var id))
+        {
+            var methods = await _repositoryStore.FindMethodSourcesAsync(id, cancellationToken);
+            return methods.Where(method => string.Equals(method.Id, id, StringComparison.OrdinalIgnoreCase)).ToArray();
+        }
+
+        return await _repositoryStore.FindMethodSourcesAsync(query, cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<TypeSummary>> ResolveTypeSummariesAsync(string query, JsonElement payload, CancellationToken cancellationToken)
+    {
+        if (TryGetId(payload, out var id))
+        {
+            query = id;
+        }
+
+        return await _repositoryStore.FindTypeSummariesAsync(query, cancellationToken);
+    }
+
+    private static bool TryGetId(JsonElement payload, out string id)
+    {
+        id = string.Empty;
+        return payload.ValueKind == JsonValueKind.Object
+            && payload.TryGetProperty("id", out var idElement)
+            && idElement.ValueKind == JsonValueKind.String
+            && (id = idElement.GetString() ?? string.Empty).Length > 0;
+    }
+
     private async Task<ProtocolResponse> HandlePatchAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
     {
         var patch = JsonSerializer.Deserialize<PatchDocument>(request.Payload.GetRawText(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -364,10 +547,12 @@ public sealed class ProtocolEngine : IProtocolEngine
             return Fail("RepositoryNotIndexed", "Repository root was not found.");
         }
 
+        var warnings = new List<ProtocolDiagnostic>();
+        var validation = ValidatePatch(root, patch, warnings);
         var filesAffected = patch.Operations.Select(operation => operation.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var operationsDetected = patch.Operations.Select(operation => operation.Operation).ToArray();
-        var diffPreview = string.Join("\n", patch.Operations.Select(operation => $"--- {operation.Path}\n+++ {operation.Path}\n@@\n+{operation.Content}"));
-        var response = new PatchPreviewResponse(true, filesAffected, operationsDetected, diffPreview, []);
+        var diffPreview = string.Join("\n", patch.Operations.Select(operation => BuildPreview(operation)));
+        var response = new PatchPreviewResponse(validation.Count == 0, filesAffected, operationsDetected, diffPreview, validation);
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
     }
 
@@ -385,38 +570,11 @@ public sealed class ProtocolEngine : IProtocolEngine
             return Fail("RepositoryNotIndexed", "Repository root was not found.");
         }
 
-        var warnings = new List<string>();
-        var errors = new List<string>();
-        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var seenOperations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var operation in patch.Operations)
-        {
-            files.Add(operation.Path);
-            var operationKey = $"{operation.Operation}:{operation.Path}";
-            if (!seenOperations.Add(operationKey))
-            {
-                errors.Add($"Duplicate operation detected for '{operation.Operation}' on '{operation.Path}'.");
-            }
-
-            var absolutePath = Path.GetFullPath(Path.Combine(root, operation.Path));
-            if (!absolutePath.StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
-            {
-                errors.Add($"Path '{operation.Path}' is outside the repository root.");
-            }
-
-            if (operation.Operation.Equals("CreateFile", StringComparison.OrdinalIgnoreCase) && System.IO.File.Exists(absolutePath))
-            {
-                errors.Add($"Target file '{operation.Path}' already exists.");
-            }
-
-            if (!operation.Operation.Equals("CreateFile", StringComparison.OrdinalIgnoreCase) && !System.IO.File.Exists(absolutePath))
-            {
-                errors.Add($"Target file '{operation.Path}' does not exist.");
-            }
-        }
-
-        var response = new PatchValidateResponse(errors.Count == 0, warnings, errors, files.Count, patch.Operations.Count);
+        var validation = ValidatePatch(root, patch, []);
+        var files = patch.Operations.Select(operation => operation.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        var warnings = validation.Where(error => error.Code == "Warning").Select(error => error.Message).ToArray();
+        var errors = validation.Where(error => error.Code != "Warning").Select(error => error.Message).ToArray();
+        var response = new PatchValidateResponse(errors.Length == 0, warnings, errors, files, patch.Operations.Count);
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
     }
 
@@ -458,6 +616,18 @@ public sealed class ProtocolEngine : IProtocolEngine
                 continue;
             }
 
+            if (operation.Operation.Equals("DeleteFile", StringComparison.OrdinalIgnoreCase))
+            {
+                return Fail("ValidationError", "Rollback for DeleteFile requires a backup and is unsupported here.");
+            }
+
+            if (operation.Operation.Equals("ReplaceMethod", StringComparison.OrdinalIgnoreCase)
+                || operation.Operation.Equals("InsertMethod", StringComparison.OrdinalIgnoreCase)
+                || operation.Operation.Equals("AddUsing", StringComparison.OrdinalIgnoreCase))
+            {
+                return Fail("ValidationError", $"Rollback does not support operation '{operation.Operation}' without stored before-state.");
+            }
+
             return Fail("ValidationError", $"Rollback does not support operation '{operation.Operation}'.");
         }
 
@@ -474,11 +644,18 @@ public sealed class ProtocolEngine : IProtocolEngine
             return (false, "ValidationError", "Patch targets must remain inside the repository root.");
         }
 
+        if (IsUnsafeUpdateFile(operation, targetPath))
+        {
+            return (false, "UnsafeOperation", "Whole-file replacement is not permitted for source files.");
+        }
+
         return operation.Operation switch
         {
             "CreateFile" => ApplyCreateFile(targetPath, operation.Content),
             "DeleteFile" => ApplyDeleteFile(targetPath),
             "ReplaceMethod" => ApplyReplaceMethod(targetPath, operation.MethodName, operation.ReplacementText),
+            "InsertMethod" => ApplyInsertMethod(targetPath, operation.ContainingType, operation.TypeId, operation.MethodText, operation.Position),
+            "AddUsing" => ApplyAddUsing(targetPath, operation.Namespace),
             _ => (false, "InvalidOperation", $"Unsupported patch operation '{operation.Operation}'.")
         };
     }
@@ -519,20 +696,203 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var text = IOFile.ReadAllText(targetPath);
-        var matches = System.Text.RegularExpressions.Regex.Matches(text, $@"[^\n]*\b{System.Text.RegularExpressions.Regex.Escape(methodName)}\b[^\n]*\{{[\s\S]*?\}}");
-        if (matches.Count != 1)
+        var methodPattern = $@"(?m)^[ \t]*(?:public|private|protected|internal|static|async|sealed|override|partial|virtual|extern|unsafe|new|readonly|ref|internal\s+static|private\s+static|public\s+static|protected\s+static)[^\n]*\b{System.Text.RegularExpressions.Regex.Escape(methodName)}\b[^\n]*$";
+        var signatureMatches = System.Text.RegularExpressions.Regex.Matches(text, methodPattern);
+        if (signatureMatches.Count != 1)
         {
             return (false, "ValidationError", "Target method must be unambiguous.");
         }
 
-        var match = matches[0];
-        var updated = text[..match.Index] + replacementText + text[(match.Index + match.Length)..];
+        var signatureMatch = signatureMatches[0];
+        var bodyStart = text.IndexOf('{', signatureMatch.Index + signatureMatch.Length);
+        if (bodyStart < 0)
+        {
+            return (false, "ValidationError", "Target method body was not found.");
+        }
+
+        var bodyEnd = FindMatchingBrace(text, bodyStart);
+        if (bodyEnd < 0)
+        {
+            return (false, "ValidationError", "Target method body was not balanced.");
+        }
+
+        var matchStart = signatureMatch.Index;
+        var matchLength = bodyEnd + 1 - matchStart;
+        var updated = text[..matchStart] + replacementText + text[(matchStart + matchLength)..];
         IOFile.WriteAllText(targetPath, updated);
         return (true, string.Empty, string.Empty);
     }
 
+    private static int FindMatchingBrace(string text, int openBraceIndex)
+    {
+        var depth = 0;
+        for (var index = openBraceIndex; index < text.Length; index++)
+        {
+            if (text[index] == '{')
+            {
+                depth++;
+            }
+            else if (text[index] == '}')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return index;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    private static (bool Success, string Code, string Message) ApplyInsertMethod(string targetPath, string? containingType, string? typeId, string? methodText, string? position)
+    {
+        if (!IOFile.Exists(targetPath))
+        {
+            return (false, "NotFound", "Target file does not exist.");
+        }
+
+        if (string.IsNullOrWhiteSpace(methodText) || string.IsNullOrWhiteSpace(position))
+        {
+            return (false, "ValidationError", "InsertMethod requires containingType or typeId, methodText, and position.");
+        }
+
+        var text = IOFile.ReadAllText(targetPath);
+        var typeMatch = !string.IsNullOrWhiteSpace(containingType)
+            ? System.Text.RegularExpressions.Regex.Match(text, $@"class\s+{System.Text.RegularExpressions.Regex.Escape(containingType)}[\s\S]*?\{{")
+            : typeId is null ? System.Text.RegularExpressions.Regex.Match(text, @"class\s+[A-Za-z_][A-Za-z0-9_]*[\s\S]*?\{") : System.Text.RegularExpressions.Regex.Match(text, @"class\s+[A-Za-z_][A-Za-z0-9_]*[\s\S]*?\{");
+
+        if (!typeMatch.Success)
+        {
+            return (false, "ValidationError", "Target type must exist and be unambiguous.");
+        }
+
+        var insertAt = position.StartsWith("Before:", StringComparison.OrdinalIgnoreCase) || position.StartsWith("After:", StringComparison.OrdinalIgnoreCase)
+            ? text.IndexOf(position[(position.IndexOf(':') + 1)..], StringComparison.Ordinal)
+            : text.LastIndexOf('}');
+
+        if (insertAt < 0)
+        {
+            return (false, "ValidationError", "Insertion point was not found.");
+        }
+
+        var updated = position.StartsWith("Before:", StringComparison.OrdinalIgnoreCase)
+            ? text[..insertAt] + methodText + Environment.NewLine + text[insertAt..]
+            : position.StartsWith("After:", StringComparison.OrdinalIgnoreCase)
+                ? text[..(insertAt + position[(position.IndexOf(':') + 1)..].Length)] + Environment.NewLine + methodText + text[(insertAt + position[(position.IndexOf(':') + 1)..].Length)..]
+                : text[..insertAt] + Environment.NewLine + methodText + Environment.NewLine + text[insertAt..];
+
+        IOFile.WriteAllText(targetPath, updated);
+        return (true, string.Empty, string.Empty);
+    }
+
+    private static (bool Success, string Code, string Message) ApplyAddUsing(string targetPath, string? @namespace)
+    {
+        if (!IOFile.Exists(targetPath))
+        {
+            return (false, "NotFound", "Target file does not exist.");
+        }
+
+        if (string.IsNullOrWhiteSpace(@namespace))
+        {
+            return (false, "ValidationError", "AddUsing requires namespace.");
+        }
+
+        var text = IOFile.ReadAllText(targetPath);
+        var usingLine = $"using {@namespace};";
+        if (text.Contains(usingLine, StringComparison.Ordinal))
+        {
+            return (false, "ValidationError", "Duplicate using is not allowed.");
+        }
+
+        var insertAt = text.StartsWith("using ", StringComparison.Ordinal) ? text.LastIndexOf("using ", StringComparison.OrdinalIgnoreCase) : 0;
+        var updated = insertAt <= 0
+            ? usingLine + Environment.NewLine + text
+            : text.Insert(insertAt, usingLine + Environment.NewLine);
+
+        IOFile.WriteAllText(targetPath, updated);
+        return (true, string.Empty, string.Empty);
+    }
+
+    private static IReadOnlyList<ProtocolDiagnostic> ValidatePatch(string root, PatchDocument patch, List<ProtocolDiagnostic> warnings)
+    {
+        var normalizedRoot = Path.GetFullPath(root);
+        var errors = new List<ProtocolDiagnostic>();
+        var seenOperations = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var operation in patch.Operations)
+        {
+            var operationKey = $"{operation.Operation}:{operation.Path}";
+            if (!seenOperations.Add(operationKey))
+            {
+                errors.Add(new ProtocolDiagnostic("ValidationError", $"Duplicate operation detected for '{operation.Operation}' on '{operation.Path}'."));
+            }
+
+            var absolutePath = Path.GetFullPath(Path.Combine(normalizedRoot, operation.Path));
+            if (!absolutePath.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add(new ProtocolDiagnostic("ValidationError", $"Path '{operation.Path}' is outside the repository root."));
+                continue;
+            }
+
+            if (IsUnsafeUpdateFile(operation, absolutePath))
+            {
+                errors.Add(new ProtocolDiagnostic("ValidationError", "Whole-file replacement is not permitted for source files."));
+            }
+
+            if (operation.Operation.Equals("CreateFile", StringComparison.OrdinalIgnoreCase) && IOFile.Exists(absolutePath))
+            {
+                errors.Add(new ProtocolDiagnostic("ValidationError", $"Target file '{operation.Path}' already exists."));
+            }
+
+            if (!operation.Operation.Equals("CreateFile", StringComparison.OrdinalIgnoreCase) && !IOFile.Exists(absolutePath))
+            {
+                errors.Add(new ProtocolDiagnostic("ValidationError", $"Target file '{operation.Path}' does not exist."));
+            }
+
+            if (operation.Operation.Equals("ReplaceMethod", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(operation.ReplacementText))
+            {
+                errors.Add(new ProtocolDiagnostic("ValidationError", "ReplaceMethod requires replacementText."));
+            }
+
+            if (operation.Operation.Equals("InsertMethod", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(operation.MethodText))
+            {
+                errors.Add(new ProtocolDiagnostic("ValidationError", "InsertMethod requires methodText."));
+            }
+
+            if (operation.Operation.Equals("AddUsing", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(operation.Namespace))
+            {
+                errors.Add(new ProtocolDiagnostic("ValidationError", "AddUsing requires namespace."));
+            }
+
+            if (operation.Operation.Equals("UpdateFile", StringComparison.OrdinalIgnoreCase))
+            {
+                errors.Add(new ProtocolDiagnostic("ValidationError", "UpdateFile remains blocked for source files."));
+            }
+        }
+
+        return errors;
+    }
+
+    private static string BuildPreview(PatchOperation operation)
+        => operation.Operation switch
+        {
+            "CreateFile" => $"--- /dev/null\n+++ {operation.Path}\n@@\n+{operation.Content}",
+            "DeleteFile" => $"--- {operation.Path}\n+++ /dev/null\n@@",
+            "ReplaceMethod" => $"--- {operation.Path}\n+++ {operation.Path}\n@@\n-{operation.MethodName}\n+{operation.ReplacementText}",
+            "InsertMethod" => $"--- {operation.Path}\n+++ {operation.Path}\n@@\n+{operation.MethodText}",
+            "AddUsing" => $"--- {operation.Path}\n+++ {operation.Path}\n@@\n+using {operation.Namespace};",
+            _ => $"--- {operation.Path}\n+++ {operation.Path}\n@@\n+unsupported operation {operation.Operation}"
+        };
+
     private static ProtocolResponse Fail(string code, string message)
         => new(false, null, [], [new ProtocolError(code, message)]);
+
+    private static bool IsUnsafeUpdateFile(PatchOperation operation, string targetPath)
+        => operation.Operation.Equals("UpdateFile", StringComparison.OrdinalIgnoreCase)
+            && (targetPath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
+                || targetPath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
+                || targetPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase));
 
     private static SessionId ParseSessionId(string sessionId) => new(Guid.Parse(sessionId));
 
@@ -544,4 +904,32 @@ public sealed class ProtocolEngine : IProtocolEngine
             && queryElement.ValueKind == JsonValueKind.String
             && (query = queryElement.GetString() ?? string.Empty).Length > 0;
     }
+
+    private static bool TryGetRange(JsonElement payload, out int startLine, out int endLine)
+    {
+        startLine = 0;
+        endLine = 0;
+        if (payload.ValueKind != JsonValueKind.Object || !payload.TryGetProperty("range", out var rangeElement) || rangeElement.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var range = rangeElement.GetString();
+        if (string.IsNullOrWhiteSpace(range))
+        {
+            return false;
+        }
+
+        var parts = range.Split(':', 2);
+        return parts.Length == 2
+            && int.TryParse(parts[0], out startLine)
+            && int.TryParse(parts[1], out endLine)
+            && startLine > 0
+            && endLine >= startLine;
+    }
+
+    private static bool TryGetBoolean(JsonElement payload, string propertyName)
+        => payload.ValueKind == JsonValueKind.Object
+            && payload.TryGetProperty(propertyName, out var element)
+            && element.ValueKind == JsonValueKind.True;
 }

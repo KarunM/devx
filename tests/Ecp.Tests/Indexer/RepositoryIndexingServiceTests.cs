@@ -77,6 +77,46 @@ public sealed class RepositoryIndexingServiceTests
         Assert.Contains(qualifiedMatches, symbol => symbol.Name == "Demo");
     }
 
+    [Fact]
+    public async Task IndexAsync_CanBeReRunWithoutChangingRepositoryId()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("ecp-indexer-repeat").FullName;
+        var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
+        Directory.CreateDirectory(projectDirectory);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Program.cs"), """
+            namespace Sample;
+
+            public static class Program
+            {
+                public static void Main() { }
+            }
+            """);
+
+        var databasePath = Path.Combine(Path.GetTempPath(), $"ecp-index-repeat-{Guid.NewGuid():N}.db");
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
+        var store = new SqliteStorageInitializer(connectionString);
+        var indexer = new RepositoryIndexingService(store);
+
+        await indexer.IndexAsync(repositoryRoot);
+        await indexer.IndexAsync(repositoryRoot);
+
+        await using var connection = new SqliteConnection(connectionString);
+        await connection.OpenAsync();
+
+        Assert.Equal(1, await CountAsync(connection, "repositories"));
+        Assert.Equal(1, await CountAsync(connection, "projects"));
+        Assert.Equal(1, await CountAsync(connection, "files"));
+    }
+
     private static async Task<int> CountAsync(SqliteConnection connection, string tableName)
         => await CountAsync(connection, tableName, null, null);
 

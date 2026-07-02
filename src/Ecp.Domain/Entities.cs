@@ -71,7 +71,17 @@ public sealed record SessionMetricsSummary(
     string LlmMetrics);
 
 public sealed record PatchDocument(string Version, IReadOnlyList<PatchOperation> Operations);
-public sealed record PatchOperation(string Operation, string Path, string? Content, string? MethodName, string? ReplacementText);
+public sealed record PatchOperation(
+    string Operation,
+    string Path,
+    string? Content,
+    string? MethodName,
+    string? ReplacementText,
+    string? ContainingType,
+    string? TypeId,
+    string? MethodText,
+    string? Position,
+    string? Namespace);
 public sealed record DiagnosticRecord(
     string Severity,
     string Code,
@@ -129,6 +139,20 @@ public sealed record MethodSummary(
     string Name,
     string QualifiedName,
     string Kind);
+
+public sealed record ReadSourceResponse(
+    string Kind,
+    string SymbolId,
+    string QualifiedName,
+    string Path,
+    int StartLine,
+    int EndLine,
+    int TotalLines,
+    int ReturnedLines,
+    bool Truncated,
+    string Source,
+    bool SourceReturned,
+    object? Metadata);
 
 public sealed record MethodSummaryResponse(
     string Query,
@@ -221,6 +245,15 @@ public sealed record ReferencesResponse(
     string MatchKind,
     MethodSummary? TargetSymbol,
     IReadOnlyList<ReferenceSummary> References);
+
+public sealed record IndexStatusResponse(
+    bool RepositoryIndexed,
+    string RepositoryRoot,
+    int IndexedFiles,
+    bool IndexExists,
+    string Status,
+    string Reason);
+
 public interface ISearchService
 {
     Task<SearchResult> SearchSymbolAsync(SearchSymbolRequest request, CancellationToken cancellationToken = default);
@@ -292,6 +325,7 @@ public interface IRepositoryStore
     Task<IReadOnlyList<CallerSummary>> FindCallersAsync(string query, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<CalleeSummary>> FindCalleesAsync(string query, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ReferenceSummary>> FindReferencesAsync(string query, CancellationToken cancellationToken = default);
+    Task<TypeSummary?> FindTypeSummaryByIdAsync(string typeId, CancellationToken cancellationToken = default);
     Task<int> CountIndexedFilesAsync(RepositoryId repositoryId, CancellationToken cancellationToken = default);
     Task<string?> GetRepositoryRootPathAsync(RepositoryId repositoryId, CancellationToken cancellationToken = default);
 }

@@ -650,6 +650,59 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
         return results;
     }
 
+    public async Task<TypeSummary?> FindTypeSummaryByIdAsync(string typeId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT s.id, s.name, s.qualified_name, s.kind, n.name, p.name, f.path, r.root_path
+            FROM symbols s
+            INNER JOIN files f ON f.id = s.file_id
+            INNER JOIN projects p ON p.id = f.project_id
+            INNER JOIN repositories r ON r.id = p.repository_id
+            LEFT JOIN types t ON t.id = s.container_id
+            LEFT JOIN namespaces n ON n.id = COALESCE(t.namespace_id, (SELECT namespace_id FROM types WHERE id = s.container_id))
+            WHERE lower(s.id) = lower($type_id)
+              AND s.kind IN ('Type', 'Class', 'Record', 'Struct', 'Interface', 'Enum', 'Delegate');
+            """;
+        command.Parameters.AddWithValue("$type_id", typeId);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        var row = (
+            reader.GetString(0),
+            reader.GetString(1),
+            reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
+            reader.GetString(6),
+            reader.GetString(5),
+            reader.GetString(7),
+            reader.GetString(7));
+
+        var fullPath = Path.Combine(row.Item7, row.Item4.Replace('/', Path.DirectorySeparatorChar));
+        if (!System.IO.File.Exists(fullPath))
+        {
+            return null;
+        }
+
+        var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, cancellationToken);
+        var tree = CSharpSyntaxTree.ParseText(sourceText);
+        var root = await tree.GetRootAsync(cancellationToken);
+        var typeNode = root.DescendantNodes().OfType<TypeDeclarationSyntax>()
+            .FirstOrDefault(node => string.Equals(node.Identifier.ValueText, row.Item2, StringComparison.Ordinal));
+
+        if (typeNode is null)
+        {
+            return null;
+        }
+
+        return await BuildTypeSummaryAsync((row.Item1, row.Item2, row.Item3, row.Item4, row.Item5, row.Item6, row.Item7), typeNode, sourceText, cancellationToken);
+    }
+
     public async Task<IReadOnlyList<CallerSummary>> FindCallersAsync(string query, CancellationToken cancellationToken = default)
     {
         var targets = await FindMethodsForCallersAsync(query, cancellationToken);
@@ -962,6 +1015,31 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
         command.Parameters.AddWithValue("$repository_id", repositoryId.Value.ToString());
         var result = await command.ExecuteScalarAsync(cancellationToken);
         return Convert.ToInt32(result);
+    }
+
+    public async Task<Repository?> GetRepositoryByRootPathAsync(string rootPath, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, name, root_path
+            FROM repositories
+            WHERE root_path = $root_path
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$root_path", rootPath);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new Repository(
+            new RepositoryId(Guid.Parse(reader.GetString(0))),
+            reader.GetString(1),
+            reader.GetString(2));
     }
 
     public async Task<string?> GetRepositoryRootPathAsync(RepositoryId repositoryId, CancellationToken cancellationToken = default)

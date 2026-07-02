@@ -19,7 +19,7 @@ Rules:
 
 Do not edit repository files directly.
 
-Generate changes as an ECP patch and apply them only through:
+Generate changes as an ECP patch and apply them only through (in case of single file area patch):
 
 ```bash
 ./ecp patch preview
