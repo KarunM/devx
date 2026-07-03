@@ -1058,6 +1058,16 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
         return result?.ToString();
     }
 
+    public async Task DeleteFileAsync(FileId fileId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM files WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", fileId.Value.ToString());
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private async Task<IReadOnlyList<Symbol>> FindSymbolsAsync(string columnName, string value, CancellationToken cancellationToken)
     {
         await using var connection = new SqliteConnection(_connectionString);
