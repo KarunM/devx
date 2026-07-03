@@ -782,7 +782,7 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
         new SearchService(effectiveStore, (ISymbolStore)effectiveStore),
         (ISessionStore)effectiveStore,
         effectiveStore);
-    var orchestrator = new AskOrchestrator(llm, engine, llmConfig);
+    var orchestrator = new AskOrchestrator(llm, engine, llmConfig, useSandbox ? sandbox?.SandboxRoot : null);
     var started = DateTimeOffset.UtcNow;
 
     Console.WriteLine("═══════════════════════════════════════════════════");

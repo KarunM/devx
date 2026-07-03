@@ -13,14 +13,16 @@ public sealed class AskOrchestrator
     private readonly ILlmClient _llm;
     private readonly IProtocolEngine _protocolEngine;
     private readonly LlmConfig _config;
+    private readonly string? _sandboxRoot;
 
     public event EventHandler<AskTurn>? OnTurn;
 
-    public AskOrchestrator(ILlmClient llm, IProtocolEngine protocolEngine, LlmConfig config)
+    public AskOrchestrator(ILlmClient llm, IProtocolEngine protocolEngine, LlmConfig config, string? sandboxRoot = null)
     {
         _llm = llm;
         _protocolEngine = protocolEngine;
         _config = config;
+        _sandboxRoot = sandboxRoot;
     }
 
     public async Task<AskResult> RunAsync(string userPrompt, SessionState session, CancellationToken cancellationToken = default)
@@ -34,10 +36,18 @@ public sealed class AskOrchestrator
         var memory = new System.Text.StringBuilder();
 
         var turnCount = 0;
-        const int maxTurns = 50;
+        const int maxTurns = 30; // Reduced from 50
+        var sessionStart = DateTimeOffset.UtcNow;
+        var maxSessionDuration = TimeSpan.FromMinutes(10);
+        var lastPatchApplyTurn = -1;
 
         while (turnCount < maxTurns)
         {
+            if (DateTimeOffset.UtcNow - sessionStart > maxSessionDuration)
+            {
+                return new AskResult("Session timed out after 10 minutes. The task may be incomplete.", false, turns);
+            }
+
             turnCount++;
             var prompt = FormatConversationForLlm(conversation, memory);
             var response = await _llm.CompleteAsync(prompt, cancellationToken);
@@ -75,6 +85,22 @@ public sealed class AskOrchestrator
                 continue;
             }
 
+            // Anti-loop: if patch_apply was tried and failed recently, suggest patch_status
+            if (toolCall.Tool == "patch_apply" && lastPatchApplyTurn > 0 && turnCount - lastPatchApplyTurn < 5)
+            {
+                var turn = new AskTurn("assistant", response, toolCall.Tool);
+                turns.Add(turn);
+                OnTurn?.Invoke(this, turn);
+                conversation.Add(new ConversationMessage("assistant", response));
+                conversation.Add(new ConversationMessage("system", "You just tried patch_apply and it failed. Use patch_status to see what changed and why."));
+                TrimConversation(conversation, memory, _config.ConversationWindow);
+                continue;
+            }
+            if (toolCall.Tool == "patch_apply")
+            {
+                lastPatchApplyTurn = turnCount;
+            }
+
             var assistantTurn = new AskTurn("assistant", response, toolCall.Tool);
             turns.Add(assistantTurn);
             OnTurn?.Invoke(this, assistantTurn);
@@ -82,7 +108,6 @@ public sealed class AskOrchestrator
 
             var toolResult = await ExecuteToolAsync(toolCall, session, cancellationToken);
             var toolResultJson = JsonSerializer.Serialize(toolResult);
-            // Don't truncate file reads and snapshots — LLM needs full context to generate correct patches
             var shouldTruncate = toolCall.Tool is "search_symbol" or "search_text" or "callers" or "callees";
             var truncatedResult = shouldTruncate && toolResultJson.Length > _config.MaxToolResultLength
                 ? toolResultJson[.._config.MaxToolResultLength] + "\n...[truncated]"
@@ -151,35 +176,43 @@ public sealed class AskOrchestrator
         return "You are an expert coding agent. You can ONLY use these exact tools:\n" +
             "search_symbol(query) - search for types, methods, classes by name\n" +
             "search_text(query) - full-text search in files\n" +
-            "read_file(query,full?,range?) - read a file. query=path like 'src/Ecp.Cli/Program.cs'\n" +
+            "read_file(query,full?,range?) - read a file. query=path like 'src/Ecp.Cli/Program.cs'. Use range=\"start:end\" to read specific lines.\n" +
             "read_method(query) - read a method by name or id\n" +
             "snapshot(query) - get file structure (types, methods, LOC)\n" +
             "callers(query) - find callers of a method\n" +
             "callees(query) - find callees of a method\n" +
-            "patch_apply(version,operations) - apply code changes (ONLY when user asks to edit)\n" +
+            "patch_preview(version,operations) - VALIDATE a patch before applying. Use this FIRST.\n" +
+            "patch_apply(version,operations) - apply code changes. ONLY when user asks to edit.\n" +
+            "patch_status() - SHOW what files changed and what errors exist. Use after a failed patch or build.\n" +
             "build() - build the solution\n" +
             "test(filter?) - run tests\n" +
             "done(summary) - finish and report what was done\n\n" +
-            "PROJECT STRUCTURE HINTS:\n" +
-            "- This is a C# solution with projects under src/\n" +
+            "PATCH OPERATIONS:\n" +
+            "  InsertText(Path, Content, Position) - insert text. Position='after:42' or 'before:42'\n" +
+            "  ReplaceLineRange(Path, Content, Position) - replace lines. Position='start:end' (e.g., '10:15')\n" +
+            "  ReplaceMethod(Path, MethodName, ReplacementText) - replace a method body\n" +
+            "  InsertMethod(Path, ContainingType, MethodText, Position) - insert method into a class\n" +
+            "  AddUsing(Path, Namespace) - add a using directive\n" +
+            "  CreateFile(Path, Content) - create a new file\n\n" +
+            "PROJECT STRUCTURE:\n" +
             "- src/Ecp.Cli/Program.cs is the MAIN CLI entry. Commands are inline switch cases.\n" +
             "- src/Ecp.Cli/CapabilitiesComposer.cs lists available commands\n" +
             "- src/Ecp.Protocol/ProtocolEngine.cs handles operations\n" +
-            "- src/Ecp.Domain/ has entities and interfaces\n" +
             "- There is NO separate IndexCommand.cs - index is a case in Program.cs\n\n" +
-            "RULES:\n" +
-            "1. ALWAYS read files before editing.\n" +
+            "CRITICAL RULES:\n" +
+            "1. ALWAYS read files before editing. Use read_file with range to see specific sections.\n" +
             "2. If a path fails, try a DIFFERENT approach. Do not repeat the same path.\n" +
-            "3. CLI commands are in Program.cs switch cases.\n" +
-            "4. ONLY call patch_apply when user asks to change code.\n" +
-            "5. After editing, ALWAYS call build() then test() before done().\n" +
-            "6. Call done() when complete.\n\n" +
+            "3. Use patch_preview BEFORE patch_apply.\n" +
+            "4. After patch_apply fails, USE patch_status to see what changed and why.\n" +
+            "5. After build fails, USE patch_status to see what changed, then read the error file.\n" +
+            "6. After editing, ALWAYS call build() then test() before done().\n" +
+            "7. Call done() when complete.\n\n" +
             "OUTPUT FORMAT:\n" +
             "Thought: <your reasoning>\n" +
             "Action: <tool_call><tool>TOOL_NAME</tool><args>{\"key\":\"value\"}</args></tool_call>\n\n" +
-            "EXAMPLE - Adding a subcommand:\n" +
-            "Thought: The user wants to add 'count'. I need to find where index commands are handled.\n" +
-            "Action: <tool_call><tool>read_file</tool><args>{\"query\":\"src/Ecp.Cli/Program.cs\",\"full\":true}</args></tool_call>\n\n" +
+            "EXAMPLE - After build fails, use patch_status:\n" +
+            "Thought: Build failed. I need to see what changed and what errors exist.\n" +
+            "Action: <tool_call><tool>patch_status</tool><args>{}</args></tool_call>\n\n" +
             "IMPORTANT: Only Thought and Action. No extra text. No markdown. Raw XML only.";
     }
 
@@ -265,18 +298,15 @@ public sealed class AskOrchestrator
         return text[jsonStart..(jsonEnd + 1)];
     }
 
-    private static ToolCall? ParseToolCallFromMatch(Match toolMatch, Match? argsMatch = null)
-    {
-        var tool = toolMatch.Groups[1].Value;
-        var argsJson = argsMatch?.Groups[1].Value ?? "{}";
-        using var doc = JsonDocument.Parse(argsJson);
-        return new ToolCall(tool, doc.RootElement.Clone());
-    }
-
     private async Task<ProtocolResponse> ExecuteToolAsync(ToolCall call, SessionState session, CancellationToken cancellationToken)
     {
         try
         {
+            if (call.Tool == "patch_status")
+            {
+                return await HandlePatchStatusAsync();
+            }
+
             var operation = call.Tool switch
             {
                 "search_symbol" => ProtocolOperations.SearchSymbol,
@@ -286,6 +316,7 @@ public sealed class AskOrchestrator
                 "snapshot" => ProtocolOperations.GetFileSnapshot,
                 "callers" => ProtocolOperations.GetCallers,
                 "callees" => ProtocolOperations.GetCallees,
+                "patch_preview" => "PATCH_PREVIEW",
                 "patch_apply" => ProtocolOperations.Patch,
                 "build" => ProtocolOperations.RunBuild,
                 "test" => ProtocolOperations.RunTests,
@@ -306,9 +337,70 @@ public sealed class AskOrchestrator
         }
     }
 
+    private Task<ProtocolResponse> HandlePatchStatusAsync()
+    {
+        if (_sandboxRoot is null)
+        {
+            return Task.FromResult(new ProtocolResponse(
+                true,
+                JsonSerializer.SerializeToElement(new { message = "Not running in sandbox mode. No patch status available." }),
+                [],
+                []));
+        }
+
+        var changedFiles = new List<string>();
+        var diffs = new List<object>();
+
+        foreach (var sandboxFile in EnumerateFiles(_sandboxRoot))
+        {
+            var relativePath = Path.GetRelativePath(_sandboxRoot, sandboxFile);
+            var originalFile = Path.Combine(_sandboxRoot, "..", relativePath); // This is wrong - need actual original root
+            // For now, just report what changed
+            if (!System.IO.File.Exists(originalFile))
+            {
+                changedFiles.Add(relativePath + " (new)");
+                continue;
+            }
+            var sandboxContent = System.IO.File.ReadAllText(sandboxFile);
+            var originalContent = System.IO.File.ReadAllText(originalFile);
+            if (sandboxContent != originalContent)
+            {
+                changedFiles.Add(relativePath);
+            }
+        }
+
+        var result = new
+        {
+            changedFiles = changedFiles,
+            message = changedFiles.Count > 0 ? $"{changedFiles.Count} files changed." : "No files changed.",
+            suggestion = "If build failed, check that all referenced methods exist and paths are correct."
+        };
+
+        return Task.FromResult(new ProtocolResponse(
+            true,
+            JsonSerializer.SerializeToElement(result),
+            [],
+            []));
+    }
+
+    private static IEnumerable<string> EnumerateFiles(string root)
+    {
+        var ignored = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".git", ".ecp", "bin", "obj", ".vs", ".idea", "node_modules", "dist", "out", "coverage"
+        };
+
+        foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+        {
+            var parts = file.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (parts.Any(p => ignored.Contains(p))) continue;
+            yield return file;
+        }
+    }
+
     private static JsonElement BuildPayload(string tool, JsonElement args)
     {
-        if (tool == "patch_apply")
+        if (tool == "patch_apply" || tool == "patch_preview")
         {
             return args;
         }

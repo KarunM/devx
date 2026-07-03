@@ -31,7 +31,7 @@ public sealed class OllamaClient : ILlmClient, IDisposable
         _httpClient = new HttpClient
         {
             BaseAddress = new Uri(config.Endpoint.TrimEnd('/') + '/'),
-            Timeout = System.Threading.Timeout.InfiniteTimeSpan
+            Timeout = TimeSpan.FromSeconds(60)
         };
         _jsonOptions = new JsonSerializerOptions
         {
@@ -81,7 +81,7 @@ public sealed class OpenAiClient : ILlmClient, IDisposable
         _httpClient = new HttpClient
         {
             BaseAddress = new Uri(config.Endpoint.TrimEnd('/') + '/'),
-            Timeout = System.Threading.Timeout.InfiniteTimeSpan
+            Timeout = TimeSpan.FromSeconds(60)
         };
         _jsonOptions = new JsonSerializerOptions
         {

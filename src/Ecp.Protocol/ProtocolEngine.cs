@@ -656,6 +656,8 @@ public sealed class ProtocolEngine : IProtocolEngine
             "ReplaceMethod" => ApplyReplaceMethod(targetPath, operation.MethodName, operation.ReplacementText),
             "InsertMethod" => ApplyInsertMethod(targetPath, operation.ContainingType, operation.TypeId, operation.MethodText, operation.Position),
             "AddUsing" => ApplyAddUsing(targetPath, operation.Namespace),
+            "InsertText" => ApplyInsertText(targetPath, operation.Content, operation.Position),
+            "ReplaceLineRange" => ApplyReplaceLineRange(targetPath, operation.Content, operation.Position),
             _ => (false, "InvalidOperation", $"Unsupported patch operation '{operation.Operation}'.")
         };
     }
@@ -811,6 +813,62 @@ public sealed class ProtocolEngine : IProtocolEngine
             : text.Insert(insertAt, usingLine + Environment.NewLine);
 
         IOFile.WriteAllText(targetPath, updated);
+        return (true, string.Empty, string.Empty);
+    }
+
+    private static (bool Success, string Code, string Message) ApplyInsertText(string targetPath, string? content, string? position)
+    {
+        if (!IOFile.Exists(targetPath))
+        {
+            return (false, "NotFound", "Target file does not exist.");
+        }
+
+        if (string.IsNullOrWhiteSpace(content) || string.IsNullOrWhiteSpace(position))
+        {
+            return (false, "ValidationError", "InsertText requires Content and Position (e.g., 'after:42').");
+        }
+
+        var lines = IOFile.ReadAllLines(targetPath);
+        var match = System.Text.RegularExpressions.Regex.Match(position, @"(after|before):(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!match.Success || !int.TryParse(match.Groups[2].Value, out var lineNumber) || lineNumber < 1 || lineNumber > lines.Length)
+        {
+            return (false, "ValidationError", "Position must be 'after:N' or 'before:N' where N is a valid line number.");
+        }
+
+        var insertIndex = match.Groups[1].Value.Equals("after", StringComparison.OrdinalIgnoreCase) ? lineNumber : lineNumber - 1;
+        var contentLines = content.Split('\n');
+        var newLines = lines.Take(insertIndex).Concat(contentLines).Concat(lines.Skip(insertIndex)).ToArray();
+        IOFile.WriteAllLines(targetPath, newLines);
+        return (true, string.Empty, string.Empty);
+    }
+
+    private static (bool Success, string Code, string Message) ApplyReplaceLineRange(string targetPath, string? content, string? position)
+    {
+        if (!IOFile.Exists(targetPath))
+        {
+            return (false, "NotFound", "Target file does not exist.");
+        }
+
+        if (string.IsNullOrWhiteSpace(content) || string.IsNullOrWhiteSpace(position))
+        {
+            return (false, "ValidationError", "ReplaceLineRange requires Content and Position (e.g., '10:15').");
+        }
+
+        var rangeMatch = System.Text.RegularExpressions.Regex.Match(position, @"(\d+):(\d+)");
+        if (!rangeMatch.Success || !int.TryParse(rangeMatch.Groups[1].Value, out var startLine) || !int.TryParse(rangeMatch.Groups[2].Value, out var endLine))
+        {
+            return (false, "ValidationError", "Position must be 'start:end' line range.");
+        }
+
+        var lines = IOFile.ReadAllLines(targetPath);
+        if (startLine < 1 || endLine > lines.Length || startLine > endLine)
+        {
+            return (false, "ValidationError", "Invalid line range.");
+        }
+
+        var contentLines = content.Split('\n');
+        var newLines = lines.Take(startLine - 1).Concat(contentLines).Concat(lines.Skip(endLine)).ToArray();
+        IOFile.WriteAllLines(targetPath, newLines);
         return (true, string.Empty, string.Empty);
     }
 
