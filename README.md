@@ -1,20 +1,45 @@
-# Introduction 
-TODO: Give a short introduction of your project. Let this section explain the objectives or the motivation behind this project. 
+# ECP
 
-# Getting Started
-TODO: Guide users through getting your code up and running on their own system. In this section you can talk about:
-1.	Installation process
-2.	Software dependencies
-3.	Latest releases
-4.	API references
+ECP is a local code intelligence and engineering loop tool. On macOS, the simplest way to update an existing install is to rebuild the CLI tool from this repo and reinstall it.
 
-# Build and Test
-TODO: Describe and show how to build your code and run the tests. 
+## Install Or Update On Mac
 
-# Contribute
-TODO: Explain how other users and developers can contribute to make your code better. 
+From the repository root:
 
-If you want to learn more about creating good readme files then refer the following [guidelines](https://docs.microsoft.com/en-us/azure/devops/repos/git/create-a-readme?view=azure-devops). You can also seek inspiration from the below readme files:
-- [ASP.NET Core](https://github.com/aspnet/Home)
-- [Visual Studio Code](https://github.com/Microsoft/vscode)
-- [Chakra Core](https://github.com/Microsoft/ChakraCore)
+```bash
+dotnet tool uninstall --tool-path ./.tools ecp 2>/dev/null || true
+dotnet pack src/Ecp.Cli -c Release -o ./artifacts/tools
+dotnet tool install --tool-path ./.tools --add-source ./artifacts/tools Ecp.Cli
+./.tools/ecp --help
+```
+
+If you want to update a local repo install, rerun the pack and install commands above. If you previously installed the tool globally from a published NuGet feed, update it with:
+
+```bash
+dotnet tool update --global Ecp.Cli
+```
+
+That global update command will fail unless `Ecp.Cli` has been published to a NuGet feed available on your machine. For this repo today, the supported path is the local tool install shown above. If the installed tool still looks unchanged, uninstall it first and reinstall from the freshly packed local artifact.
+
+```bash
+dotnet tool uninstall --global ecp.cli
+dotnet pack src/Ecp.Cli -c Release -o ./artifacts/tools
+dotnet tool install --global --add-source ./artifacts/tools ecp.cli
+```
+
+If you want to run the CLI directly from the repo without installing a tool, use:
+
+```bash
+dotnet run --project src/Ecp.Cli -- --help
+```
+
+## Build And Test
+
+```bash
+dotnet build
+dotnet test
+```
+
+## Contribute
+
+Please keep changes focused and follow the existing solution structure under `src/` and `tests/`.

@@ -36,10 +36,9 @@ public sealed class AskOrchestrator
         var memory = new System.Text.StringBuilder();
 
         var turnCount = 0;
-        const int maxTurns = 30; // Reduced from 50
+        const int maxTurns = 30;
         var sessionStart = DateTimeOffset.UtcNow;
         var maxSessionDuration = TimeSpan.FromMinutes(10);
-        var lastPatchApplyTurn = -1;
 
         while (turnCount < maxTurns)
         {
@@ -78,27 +77,11 @@ public sealed class AskOrchestrator
                 var rawMsg = SafeGetString(toolCall.Args, "raw") ?? "";
                 var turn = new AskTurn("assistant", response);
                 conversation.Add(new ConversationMessage("assistant", response));
-                conversation.Add(new ConversationMessage("system", $"Your JSON was malformed: {errorMsg}. Raw: {rawMsg}. Fix and retry with: Action: <tool_call><tool>TOOL_NAME</tool><args>{{\"key\":\"value\"}}</args></tool_call>"));
+                conversation.Add(new ConversationMessage("system", $"Your tool call was malformed: {errorMsg}. Raw: {rawMsg}. Fix and retry."));
                 turns.Add(turn);
                 OnTurn?.Invoke(this, turn);
                 TrimConversation(conversation, memory, _config.ConversationWindow);
                 continue;
-            }
-
-            // Anti-loop: if patch_apply was tried and failed recently, suggest patch_status
-            if (toolCall.Tool == "patch_apply" && lastPatchApplyTurn > 0 && turnCount - lastPatchApplyTurn < 5)
-            {
-                var turn = new AskTurn("assistant", response, toolCall.Tool);
-                turns.Add(turn);
-                OnTurn?.Invoke(this, turn);
-                conversation.Add(new ConversationMessage("assistant", response));
-                conversation.Add(new ConversationMessage("system", "You just tried patch_apply and it failed. Use patch_status to see what changed and why."));
-                TrimConversation(conversation, memory, _config.ConversationWindow);
-                continue;
-            }
-            if (toolCall.Tool == "patch_apply")
-            {
-                lastPatchApplyTurn = turnCount;
             }
 
             var assistantTurn = new AskTurn("assistant", response, toolCall.Tool);
@@ -134,7 +117,7 @@ public sealed class AskOrchestrator
         for (var i = dropStart; i < dropStart + dropCount && i < conversation.Count; i++)
         {
             var msg = conversation[i];
-            if (msg.Role == "assistant" && msg.Content.Contains("<tool>"))
+            if (msg.Role == "assistant" && msg.Content.Contains("<tool_call>"))
             {
                 var toolName = ExtractToolName(msg.Content);
                 if (!string.IsNullOrEmpty(toolName)) sb.Append($"called {toolName}, ");
@@ -153,7 +136,7 @@ public sealed class AskOrchestrator
 
     private static string? ExtractToolName(string content)
     {
-        var match = Regex.Match(content, @"<tool>(\w+)</tool>");
+        var match = Regex.Match(content, @"<tool_call>\s*\{\s*""name""\s*:\s*""(\w+)""");
         return match.Success ? match.Groups[1].Value : null;
     }
 
@@ -162,7 +145,7 @@ public sealed class AskOrchestrator
         var sb = new System.Text.StringBuilder();
         if (memory.Length > 0)
         {
-            sb.Append($"\n<system>\nMemory of earlier turns: {memory}\n</system>\n");
+            sb.Append($"\n<system>\nMemory: {memory}\n</system>\n");
         }
         foreach (var msg in conversation)
         {
@@ -173,129 +156,80 @@ public sealed class AskOrchestrator
 
     private static string BuildSystemPrompt()
     {
-        return "You are an expert coding agent. You can ONLY use these exact tools:\n" +
-            "search_symbol(query) - search for types, methods, classes by name\n" +
-            "search_text(query) - full-text search in files\n" +
-            "read_file(query,full?,range?) - read a file. query=path like 'src/Ecp.Cli/Program.cs'. Use range=\"start:end\" to read specific lines.\n" +
-            "read_method(query) - read a method by name or id\n" +
-            "snapshot(query) - get file structure (types, methods, LOC)\n" +
-            "callers(query) - find callers of a method\n" +
-            "callees(query) - find callees of a method\n" +
-            "patch_preview(version,operations) - VALIDATE a patch before applying. Use this FIRST.\n" +
-            "patch_apply(version,operations) - apply code changes. ONLY when user asks to edit.\n" +
-            "patch_status() - SHOW what files changed and what errors exist. Use after a failed patch or build.\n" +
-            "build() - build the solution\n" +
-            "test(filter?) - run tests\n" +
-            "done(summary) - finish and report what was done\n\n" +
-            "PATCH OPERATIONS:\n" +
-            "  InsertText(Path, Content, Position) - insert text. Position='after:42' or 'before:42'\n" +
-            "  ReplaceLineRange(Path, Content, Position) - replace lines. Position='start:end' (e.g., '10:15')\n" +
-            "  ReplaceMethod(Path, MethodName, ReplacementText) - replace a method body\n" +
-            "  InsertMethod(Path, ContainingType, MethodText, Position) - insert method into a class\n" +
-            "  AddUsing(Path, Namespace) - add a using directive\n" +
-            "  CreateFile(Path, Content) - create a new file\n\n" +
-            "PROJECT STRUCTURE:\n" +
-            "- src/Ecp.Cli/Program.cs is the MAIN CLI entry. Commands are inline switch cases.\n" +
-            "- src/Ecp.Cli/CapabilitiesComposer.cs lists available commands\n" +
-            "- src/Ecp.Protocol/ProtocolEngine.cs handles operations\n" +
-            "- There is NO separate IndexCommand.cs - index is a case in Program.cs\n\n" +
-            "CRITICAL RULES:\n" +
-            "1. ALWAYS read files before editing. Use read_file with range to see specific sections.\n" +
-            "2. If a path fails, try a DIFFERENT approach. Do not repeat the same path.\n" +
-            "3. Use patch_preview BEFORE patch_apply.\n" +
-            "4. After patch_apply fails, USE patch_status to see what changed and why.\n" +
-            "5. After build fails, USE patch_status to see what changed, then read the error file.\n" +
-            "6. After editing, ALWAYS call build() then test() before done().\n" +
-            "7. Call done() when complete.\n\n" +
-            "OUTPUT FORMAT:\n" +
-            "Thought: <your reasoning>\n" +
-            "Action: <tool_call><tool>TOOL_NAME</tool><args>{\"key\":\"value\"}</args></tool_call>\n\n" +
-            "EXAMPLE - After build fails, use patch_status:\n" +
-            "Thought: Build failed. I need to see what changed and what errors exist.\n" +
-            "Action: <tool_call><tool>patch_status</tool><args>{}</args></tool_call>\n\n" +
-            "IMPORTANT: Only Thought and Action. No extra text. No markdown. Raw XML only.";
+        return "You are a coding agent with tools. Do not think. Immediately output the tool call.\n\n" +
+            "Tools:\n" +
+            "- search_symbol(query): find code by name\n" +
+            "- search_text(query): search files\n" +
+            "- read_file(query): read file\n" +
+            "- build(): build project\n" +
+            "- test(): run tests\n" +
+            "- done(summary): finish\n\n" +
+            "Format:\n" +
+            "<tool_call>\n" +
+            "{\"name\": \"TOOL_NAME\", \"arguments\": {\"key\": \"value\"}}\n" +
+            "</tool_call>\n\n" +
+            "Example:\n" +
+            "<tool_call>\n" +
+            "{\"name\": \"search_symbol\", \"arguments\": {\"query\": \"Foo\"}}\n" +
+            "</tool_call>";
     }
 
     private static ToolCall? ParseToolCall(string response)
     {
-        var cleaned = Regex.Replace(response, @"```(?:xml|json)?\s*", string.Empty, RegexOptions.Singleline);
+        // Extract content after thinking markers
+        var cleaned = response;
+        
+        // Remove thinking sections (Qwen3 style)
+        var thinkEnd = cleaned.LastIndexOf("</think>");
+        if (thinkEnd >= 0)
+        {
+            cleaned = cleaned[(thinkEnd + "</think>".Length)..];
+        }
+        
+        // Remove code blocks
+        cleaned = Regex.Replace(cleaned, @"```(?:xml|json)?\s*", string.Empty, RegexOptions.Singleline);
         cleaned = cleaned.Replace("```", string.Empty);
         cleaned = cleaned.Trim();
 
-        var actionMatch = Regex.Match(cleaned, @"Action:\s*(<tool_call>.*?</tool_call>)", RegexOptions.Singleline);
-        if (actionMatch.Success)
+        // Find <tool_call> tag
+        var toolCallMatch = Regex.Match(cleaned, @"<tool_call>\s*(\{.*?\})\s*</tool_call>", RegexOptions.Singleline);
+        if (!toolCallMatch.Success)
         {
-            cleaned = actionMatch.Groups[1].Value;
+            // Try without XML tags
+            toolCallMatch = Regex.Match(cleaned, @"\{\s*""name""\s*:\s*""([^""]+)""\s*,\s*""arguments""\s*:\s*(\{.*?\})\s*\}", RegexOptions.Singleline);
+            if (!toolCallMatch.Success) return null;
+            
+            try
+            {
+                var toolName = toolCallMatch.Groups[1].Value;
+                var argsJson = toolCallMatch.Groups[2].Value;
+                using var doc = JsonDocument.Parse(argsJson);
+                return new ToolCall(toolName, doc.RootElement.Clone());
+            }
+            catch { return null; }
         }
-
-        var toolMatch = Regex.Match(cleaned, @"<tool>(\w+)</tool>", RegexOptions.Singleline);
-        if (!toolMatch.Success) return null;
-
-        var argsContent = ExtractBalancedJson(cleaned);
-        if (argsContent is null) return null;
 
         try
         {
-            using var doc = JsonDocument.Parse(argsContent);
-            return new ToolCall(toolMatch.Groups[1].Value, doc.RootElement.Clone());
+            var json = toolCallMatch.Groups[1].Value;
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            
+            if (root.TryGetProperty("name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String)
+            {
+                var toolName = nameProp.GetString()!;
+                var args = root.TryGetProperty("arguments", out var argsProp) 
+                    ? argsProp.Clone() 
+                    : JsonDocument.Parse("{}").RootElement.Clone();
+                return new ToolCall(toolName, args);
+            }
         }
         catch (JsonException)
         {
-            using var errorDoc = JsonDocument.Parse(JsonSerializer.Serialize(new { raw = argsContent, error = "Invalid JSON. Check your braces and quotes." }));
-            return new ToolCall("__json_error", errorDoc.RootElement.Clone());
-        }
-    }
-
-    private static string? ExtractBalancedJson(string text)
-    {
-        var argsStart = text.IndexOf("<args>", StringComparison.OrdinalIgnoreCase);
-        if (argsStart < 0) return null;
-
-        var jsonStart = text.IndexOf('{', argsStart + "<args>".Length);
-        if (jsonStart < 0) return null;
-
-        var depth = 0;
-        var inString = false;
-        var escaped = false;
-        var jsonEnd = -1;
-
-        for (var i = jsonStart; i < text.Length; i++)
-        {
-            var c = text[i];
-            if (escaped)
-            {
-                escaped = false;
-                continue;
-            }
-            if (c == '\\')
-            {
-                escaped = true;
-                continue;
-            }
-            if (c == '"')
-            {
-                inString = !inString;
-                continue;
-            }
-            if (inString) continue;
-            if (c == '{')
-            {
-                depth++;
-                continue;
-            }
-            if (c == '}')
-            {
-                depth--;
-                if (depth == 0)
-                {
-                    jsonEnd = i;
-                    break;
-                }
-            }
+            return null;
         }
 
-        if (jsonEnd < 0) return null;
-        return text[jsonStart..(jsonEnd + 1)];
+        return null;
     }
 
     private async Task<ProtocolResponse> ExecuteToolAsync(ToolCall call, SessionState session, CancellationToken cancellationToken)
@@ -343,37 +277,22 @@ public sealed class AskOrchestrator
         {
             return Task.FromResult(new ProtocolResponse(
                 true,
-                JsonSerializer.SerializeToElement(new { message = "Not running in sandbox mode. No patch status available." }),
+                JsonSerializer.SerializeToElement(new { message = "Not in sandbox mode." }),
                 [],
                 []));
         }
 
         var changedFiles = new List<string>();
-        var diffs = new List<object>();
-
         foreach (var sandboxFile in EnumerateFiles(_sandboxRoot))
         {
             var relativePath = Path.GetRelativePath(_sandboxRoot, sandboxFile);
-            var originalFile = Path.Combine(_sandboxRoot, "..", relativePath); // This is wrong - need actual original root
-            // For now, just report what changed
-            if (!System.IO.File.Exists(originalFile))
-            {
-                changedFiles.Add(relativePath + " (new)");
-                continue;
-            }
-            var sandboxContent = System.IO.File.ReadAllText(sandboxFile);
-            var originalContent = System.IO.File.ReadAllText(originalFile);
-            if (sandboxContent != originalContent)
-            {
-                changedFiles.Add(relativePath);
-            }
+            changedFiles.Add(relativePath);
         }
 
         var result = new
         {
             changedFiles = changedFiles,
-            message = changedFiles.Count > 0 ? $"{changedFiles.Count} files changed." : "No files changed.",
-            suggestion = "If build failed, check that all referenced methods exist and paths are correct."
+            message = changedFiles.Count > 0 ? $"{changedFiles.Count} files changed." : "No files changed."
         };
 
         return Task.FromResult(new ProtocolResponse(
@@ -387,7 +306,7 @@ public sealed class AskOrchestrator
     {
         var ignored = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            ".git", ".ecp", "bin", "obj", ".vs", ".idea", "node_modules", "dist", "out", "coverage"
+            ".git", ".ecp", "bin", "obj", ".vs", ".idea", "node_modules"
         };
 
         foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
@@ -419,41 +338,13 @@ public sealed class AskOrchestrator
                     builder["query"] = builder["symbol"];
                     builder.Remove("symbol");
                 }
-                if (!builder.ContainsKey("query") && builder.ContainsKey("name"))
-                {
-                    builder["query"] = builder["name"];
-                    builder.Remove("name");
-                }
                 break;
-
             case "read_file":
             case "snapshot":
                 if (!builder.ContainsKey("query") && builder.ContainsKey("path"))
                 {
                     builder["query"] = builder["path"];
                     builder.Remove("path");
-                }
-                break;
-
-            case "read_method":
-                if (!builder.ContainsKey("query") && !builder.ContainsKey("id") && builder.ContainsKey("name"))
-                {
-                    builder["query"] = builder["name"];
-                    builder.Remove("name");
-                }
-                break;
-
-            case "callers":
-            case "callees":
-                if (!builder.ContainsKey("query") && builder.ContainsKey("method"))
-                {
-                    builder["query"] = builder["method"];
-                    builder.Remove("method");
-                }
-                if (!builder.ContainsKey("query") && builder.ContainsKey("name"))
-                {
-                    builder["query"] = builder["name"];
-                    builder.Remove("name");
                 }
                 break;
         }
