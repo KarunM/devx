@@ -43,3 +43,8 @@ dotnet test
 ## Contribute
 
 Please keep changes focused and follow the existing solution structure under `src/` and `tests/`.
+
+
+## Ask Session
+SESSION_ID=$(ecp session create --format json | jq -r '.sessionId')
+ecp ask "say hello and finish" --session "$SESSION_ID"

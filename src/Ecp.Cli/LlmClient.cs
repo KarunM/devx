@@ -1,8 +1,11 @@
 using System.Net.Http.Json;
+using System.Diagnostics;
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using System.Collections.Concurrent;
 
 namespace Ecp.Cli;
 
@@ -20,6 +23,228 @@ public sealed record LlmConfig(
     int ContextWindow = 8192,
     int MaxToolResultLength = 4000,
     int ConversationWindow = 8);
+
+public sealed record LlmServerLaunchConfig(
+    string ServerCommand,
+    string[] ServerArguments,
+    string ReadyPath = "v1/models",
+    int ReadyTimeoutSeconds = 120,
+    int ReadyPollMilliseconds = 1000);
+
+public sealed record LlmServerReadinessAttempt(int Attempt, string Url, int? StatusCode, string? Error);
+
+public sealed record LlmServerStartupDiagnostics(
+    string ResolvedCommand,
+    bool ExecutableExists,
+    int? ProcessId,
+    string ReadinessUrl,
+    IReadOnlyList<LlmServerReadinessAttempt> ReadinessAttempts,
+    string? FinalFailureReason);
+
+public sealed class LlmServerStartupException : InvalidOperationException
+{
+    public LlmServerStartupDiagnostics Diagnostics { get; }
+
+    public LlmServerStartupException(string message, LlmServerStartupDiagnostics diagnostics, Exception? innerException = null)
+        : base(message, innerException)
+    {
+        Diagnostics = diagnostics;
+    }
+}
+
+public sealed class LlmServerManager : IDisposable
+{
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Locks = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly LlmConfig _config;
+    private readonly LlmServerLaunchConfig _launchConfig;
+    private readonly HttpClient _probeClient;
+    private readonly List<LlmServerReadinessAttempt> _attempts = new();
+    private Process? _process;
+
+    public LlmServerManager(LlmConfig config, LlmServerLaunchConfig launchConfig)
+    {
+        _config = config;
+        _launchConfig = launchConfig;
+        _probeClient = new HttpClient
+        {
+            BaseAddress = new Uri(config.Endpoint.TrimEnd('/') + '/'),
+            Timeout = TimeSpan.FromSeconds(5)
+        };
+    }
+
+    public async Task EnsureRunningAsync(CancellationToken cancellationToken = default)
+    {
+        if (await IsReadyAsync(cancellationToken))
+        {
+            return;
+        }
+
+        var gate = Locks.GetOrAdd(_config.Endpoint, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            if (await IsReadyAsync(cancellationToken))
+            {
+                return;
+            }
+
+            if (!ExecutableExists())
+            {
+                throw CreateStartupException($"Executable '{_launchConfig.ServerCommand}' was not found on PATH.");
+            }
+
+            StartServer();
+            await WaitForReadyAsync(cancellationToken);
+        }
+        catch
+        {
+            TryStop();
+            throw;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private void StartServer()
+    {
+        if (_process is { HasExited: false })
+        {
+            return;
+        }
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = _launchConfig.ServerCommand,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        foreach (var argument in _launchConfig.ServerArguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        _process = Process.Start(startInfo) ?? throw new InvalidOperationException($"Failed to start {_launchConfig.ServerCommand}.");
+    }
+
+    private async Task WaitForReadyAsync(CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(_launchConfig.ReadyTimeoutSeconds);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            var attemptNumber = _attempts.Count + 1;
+            var attempt = await ProbeAsync(attemptNumber, cancellationToken);
+            _attempts.Add(attempt);
+
+            if (attempt.StatusCode is >= 200 and < 300)
+            {
+                return;
+            }
+
+            if (_process is { HasExited: true })
+            {
+                throw CreateStartupException("The LLM server exited before it became ready.");
+            }
+
+            await Task.Delay(_launchConfig.ReadyPollMilliseconds, cancellationToken);
+        }
+
+        throw CreateStartupException($"The LLM server did not become ready within {_launchConfig.ReadyTimeoutSeconds} seconds.");
+    }
+
+    private async Task<bool> IsReadyAsync(CancellationToken cancellationToken)
+    {
+        var attempt = await ProbeAsync(0, cancellationToken);
+        if (attempt.Attempt > 0)
+        {
+            _attempts.Add(attempt);
+        }
+
+        return attempt.StatusCode is >= 200 and < 300;
+    }
+
+    private async Task<LlmServerReadinessAttempt> ProbeAsync(int attempt, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var response = await _probeClient.GetAsync(_launchConfig.ReadyPath, cancellationToken);
+            return new LlmServerReadinessAttempt(attempt, _probeClient.BaseAddress + _launchConfig.ReadyPath, (int)response.StatusCode, null);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return new LlmServerReadinessAttempt(attempt, _probeClient.BaseAddress + _launchConfig.ReadyPath, null, ex.Message);
+        }
+    }
+
+    private void TryStop()
+    {
+        try
+        {
+            if (_process is { HasExited: false })
+            {
+                _process.Kill(entireProcessTree: true);
+                _process.WaitForExit(5000);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private bool ExecutableExists()
+    {
+        if (Path.IsPathRooted(_launchConfig.ServerCommand))
+        {
+            return File.Exists(_launchConfig.ServerCommand);
+        }
+
+        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        foreach (var segment in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var candidate = Path.Combine(segment, _launchConfig.ServerCommand);
+            if (File.Exists(candidate))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private LlmServerStartupException CreateStartupException(string reason)
+    {
+        var diagnostics = new LlmServerStartupDiagnostics(
+            _launchConfig.ServerCommand,
+            ExecutableExists(),
+            _process?.Id,
+            _probeClient.BaseAddress + _launchConfig.ReadyPath,
+            _attempts.ToArray(),
+            reason);
+
+        return new LlmServerStartupException(reason, diagnostics);
+    }
+
+    public LlmServerStartupDiagnostics GetDiagnostics()
+    {
+        return new LlmServerStartupDiagnostics(
+            _launchConfig.ServerCommand,
+            ExecutableExists(),
+            _process?.Id,
+            _probeClient.BaseAddress + _launchConfig.ReadyPath,
+            _attempts.ToArray(),
+            _process is { HasExited: true } ? "Process exited." : null);
+    }
+
+    public void Dispose()
+    {
+        _probeClient.Dispose();
+    }
+}
 
 public static class LlmMessageFormatter
 {
@@ -184,6 +409,12 @@ public sealed class OpenAiClient : ILlmClient, IDisposable
 
     public async Task<string> CompleteAsync(string prompt, CancellationToken cancellationToken = default)
     {
+        var completion = await CompleteWithMetadataAsync(prompt, cancellationToken);
+        return completion.Text;
+    }
+
+    public async Task<OpenAiCompletionResult> CompleteWithMetadataAsync(string prompt, CancellationToken cancellationToken = default)
+    {
         var messages = LlmMessageFormatter.ParseTaggedPrompt(prompt);
 
         var request = new OpenAiRequest(
@@ -211,14 +442,9 @@ public sealed class OpenAiClient : ILlmClient, IDisposable
             throw new InvalidOperationException("LLM returned no choices.");
         }
 
-        var message = result.Choices[0].Message;
-        var text = LlmMessageFormatter.FormatAssistantResponse(message);
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            throw new InvalidOperationException("LLM returned an empty response.");
-        }
-
-        return text;
+        var choice = result.Choices[0];
+        var text = LlmMessageFormatter.FormatAssistantResponse(choice.Message);
+        return new OpenAiCompletionResult(text, choice.Message, result.Usage);
     }
 
     public void Dispose() => _httpClient.Dispose();
@@ -231,15 +457,27 @@ public sealed class OpenAiClient : ILlmClient, IDisposable
         int? MaxTokens);
 
     private sealed record OpenAiResponse(
-        IReadOnlyList<OpenAiChoice> Choices);
+        IReadOnlyList<OpenAiChoice> Choices,
+        OpenAiUsage? Usage = null);
 
     private sealed record OpenAiChoice(OpenAiMessage Message);
+
+    private sealed record OpenAiUsage(
+        [property: JsonPropertyName("prompt_tokens")] int? PromptTokens,
+        [property: JsonPropertyName("completion_tokens")] int? CompletionTokens,
+        [property: JsonPropertyName("total_tokens")] int? TotalTokens);
 }
+
+public sealed record OpenAiCompletionResult(
+    string Text,
+    OpenAiMessage AssistantMessage,
+    object? Usage);
 
 public sealed record OpenAiMessage(
     string Role,
     string? Content,
-    [property: JsonPropertyName("tool_calls")] List<OpenAiToolCall>? ToolCalls = null);
+    [property: JsonPropertyName("tool_calls")] List<OpenAiToolCall>? ToolCalls = null,
+    [property: JsonPropertyName("reasoning")] string? Reasoning = null);
 
 public sealed record OpenAiToolCall(OpenAiFunction Function);
 

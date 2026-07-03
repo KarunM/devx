@@ -34,7 +34,12 @@ static async Task<int> RunAsync(string[] args)
                 return await IndexStatusAsync(connectionString, args, format);
             }
 
-            if (args.Length < 2)
+            if (args.Length >= 2 && args[1] == "update")
+            {
+                return await IndexUpdateAsync(connectionString, args, format);
+            }
+
+            if (args.Length < 2 || args[1].StartsWith("--", StringComparison.Ordinal))
             {
                 Console.Error.WriteLine("Missing repository path.");
                 return 1;
@@ -106,6 +111,50 @@ static async Task IndexAsync(string connectionString, string repositoryPath)
     await indexer.IndexAsync(repositoryPath);
     await store.AddOperationMetricAsync(new OperationMetric("index", started, DateTimeOffset.UtcNow - started, true, null));
     Console.WriteLine("Indexed repository.");
+}
+
+static async Task<int> IndexUpdateAsync(string connectionString, string[] args, string format)
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("Usage: ecp index update <file> --session <id>");
+        return 1;
+    }
+
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var filePath = args[2];
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var session = await store.GetSessionAsync(new GetSessionRequest(new SessionId(Guid.Parse(sessionId))));
+    if (session is null)
+    {
+        Console.Error.WriteLine("Session not found.");
+        return 1;
+    }
+
+    var root = await store.GetRepositoryRootPathAsync(session.RepositoryId);
+    var repositoryRoot = root ?? Environment.CurrentDirectory;
+    var indexer = new RepositoryIndexingService(store);
+    var started = DateTimeOffset.UtcNow;
+    await indexer.ReindexFileAsync(repositoryRoot, filePath);
+    await store.AddOperationMetricAsync(new OperationMetric("index update", started, DateTimeOffset.UtcNow - started, true, sessionId));
+
+    if (format == "json")
+    {
+        Console.WriteLine(JsonSerializer.Serialize(new { Success = true, File = filePath }));
+    }
+    else
+    {
+        Console.WriteLine("Updated file index.");
+    }
+
+    return 0;
 }
 
 static async Task<int> IndexStatusAsync(string connectionString, string[] args, string format)
@@ -254,11 +303,17 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
         return 1;
     }
 
-    var patchPath = args[2];
+    var patchPath = GetPatchPath(args);
     var sessionId = GetOption(args, "--session");
     if (sessionId is null)
     {
         Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    if (patchPath is null)
+    {
+        Console.Error.WriteLine("Missing patch file.");
         return 1;
     }
 
@@ -283,11 +338,17 @@ static async Task<int> PatchPreviewAsync(string connectionString, string[] args,
         return 1;
     }
 
-    var patchPath = args[2];
+    var patchPath = GetPatchPath(args);
     var sessionId = GetOption(args, "--session");
     if (sessionId is null)
     {
         Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    if (patchPath is null)
+    {
+        Console.Error.WriteLine("Missing patch file.");
         return 1;
     }
 
@@ -312,11 +373,17 @@ static async Task<int> PatchValidateAsync(string connectionString, string[] args
         return 1;
     }
 
-    var patchPath = args[2];
+    var patchPath = GetPatchPath(args);
     var sessionId = GetOption(args, "--session");
     if (sessionId is null)
     {
         Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    if (patchPath is null)
+    {
+        Console.Error.WriteLine("Missing patch file.");
         return 1;
     }
 
@@ -341,11 +408,17 @@ static async Task<int> PatchRollbackAsync(string connectionString, string[] args
         return 1;
     }
 
-    var patchPath = args[2];
+    var patchPath = GetPatchPath(args);
     var sessionId = GetOption(args, "--session");
     if (sessionId is null)
     {
         Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    if (patchPath is null)
+    {
+        Console.Error.WriteLine("Missing patch file.");
         return 1;
     }
 
@@ -761,7 +834,7 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
 
     var root = await store.GetRepositoryRootPathAsync(session.RepositoryId);
     var repositoryRoot = root ?? Environment.CurrentDirectory;
-    var llmConfig = LoadLlmConfig(repositoryRoot) ?? new LlmConfig("ollama", "qwen2.5-coder", "http://localhost:11434", 0.7, 8192, 8192, 4000, 8);
+    var llmConfig = LoadLlmConfig(repositoryRoot) ?? new LlmConfig("mlx-lm", "mlx-community/Qwen3-8B-4bit", "http://localhost:8080", 0.7, 8192, 8192, 4000, 8);
     llmConfig = ApplyEnvOverrides(llmConfig);
 
     SandboxManager? sandbox = null;
@@ -775,6 +848,18 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
         effectiveStore = new SandboxRepositoryStore(store, sandbox.SandboxRoot);
         effectiveRoot = sandbox.SandboxRoot;
         Console.WriteLine($"Sandbox: {sandbox.SandboxRoot}");
+    }
+
+    var launchConfig = CreateServerLaunchConfig(llmConfig);
+    using var serverManager = new LlmServerManager(llmConfig, launchConfig);
+    try
+    {
+        await serverManager.EnsureRunningAsync();
+    }
+    catch (Exception ex)
+    {
+        WriteAskFailure(format, ex, serverManager.GetDiagnostics(), llmConfig.Endpoint);
+        return 1;
     }
 
     using var llm = LlmClientFactory.Create(llmConfig);
@@ -849,7 +934,16 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
         }
     };
 
-    var askResult = await orchestrator.RunAsync(userPrompt, session);
+    AskResult askResult;
+    try
+    {
+        askResult = await orchestrator.RunAsync(userPrompt, session);
+    }
+    catch (Exception ex)
+    {
+        WriteAskFailure(format, ex, serverManager.GetDiagnostics(), llmConfig.Endpoint);
+        return 1;
+    }
     await store.AddOperationMetricAsync(new OperationMetric("ask", started, DateTimeOffset.UtcNow - started, askResult.Success, sessionId));
 
     Console.WriteLine();
@@ -1001,6 +1095,50 @@ static LlmConfig ApplyEnvOverrides(LlmConfig config)
     return config with { Provider = provider, Model = model, Endpoint = endpoint, MaxTokens = maxTokens, ContextWindow = contextWindow, MaxToolResultLength = maxToolResultLength, ConversationWindow = conversationWindow };
 }
 
+static LlmServerLaunchConfig CreateServerLaunchConfig(LlmConfig config)
+{
+    if (config.Provider.Equals("mlx", StringComparison.OrdinalIgnoreCase) || config.Provider.Equals("mlx-lm", StringComparison.OrdinalIgnoreCase))
+    {
+        return new LlmServerLaunchConfig(
+            "mlx_lm.server",
+            ["--model", "mlx-community/Qwen3-8B-4bit", "--port", "8080"],
+            "v1/models",
+            180,
+            1000);
+    }
+
+    if (config.Provider.Equals("ollama", StringComparison.OrdinalIgnoreCase))
+    {
+        return new LlmServerLaunchConfig(
+            "ollama",
+            ["serve"],
+            "api/tags",
+            60,
+            1000);
+    }
+
+    return new LlmServerLaunchConfig(string.Empty, Array.Empty<string>(), "v1/models", 1, 1000);
+}
+
+static void WriteAskFailure(string format, Exception exception, LlmServerStartupDiagnostics diagnostics, string endpoint, OpenAiMessage? assistantMessage = null, object? usage = null)
+{
+    if (format == "json")
+    {
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            Success = false,
+            Error = exception.Message,
+            Diagnostics = diagnostics with { FinalFailureReason = exception.Message },
+            AssistantMessage = assistantMessage,
+            Usage = usage
+        }));
+        return;
+    }
+
+    Console.Error.WriteLine($"Failed to start or connect to the local LLM server: {exception.Message}");
+    Console.Error.WriteLine($"Expected endpoint: {endpoint}");
+}
+
 static string? GetOption(string[] args, string name)
 {
     for (var i = 0; i < args.Length - 1; i++)
@@ -1009,6 +1147,25 @@ static string? GetOption(string[] args, string name)
         {
             return args[i + 1];
         }
+    }
+
+    return null;
+}
+
+static string? GetPatchPath(string[] args)
+{
+    for (var i = 2; i < args.Length; i++)
+    {
+        if (args[i].StartsWith("--", StringComparison.Ordinal))
+        {
+            if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+            {
+                i++;
+            }
+            continue;
+        }
+
+        return args[i];
     }
 
     return null;

@@ -1,4 +1,5 @@
 using Ecp.Cli;
+using Xunit;
 
 namespace Ecp.Tests.Cli;
 

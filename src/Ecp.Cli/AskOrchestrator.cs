@@ -7,6 +7,9 @@ namespace Ecp.Cli;
 
 public sealed record AskResult(string Summary, bool Success, IReadOnlyList<AskTurn> TurnHistory);
 public sealed record AskTurn(string Role, string Content, string? ToolName = null, string? ToolResult = null);
+public sealed record AskLoopExceeded(string LastAssistantContent, int ToolCallCount);
+public sealed record AskToolCall(string Tool, JsonElement Args);
+public sealed record AskModelResponse(string? Content, bool? Finished, string? Reasoning, IReadOnlyList<AskToolCall>? ToolCalls);
 
 public sealed class AskOrchestrator
 {
@@ -39,6 +42,8 @@ public sealed class AskOrchestrator
         const int maxTurns = 30;
         var sessionStart = DateTimeOffset.UtcNow;
         var maxSessionDuration = TimeSpan.FromMinutes(10);
+        var toolCallCount = 0;
+        string lastAssistantContent = string.Empty;
 
         while (turnCount < maxTurns)
         {
@@ -51,58 +56,67 @@ public sealed class AskOrchestrator
             var prompt = FormatConversationForLlm(conversation, memory);
             var response = await _llm.CompleteAsync(prompt, cancellationToken);
 
-            var toolCall = ParseToolCall(response);
-            if (toolCall is null)
+            var modelResponse = ParseModelResponse(response);
+            if (modelResponse is null)
             {
                 var turn = new AskTurn("assistant", response);
                 conversation.Add(new ConversationMessage("assistant", response));
                 turns.Add(turn);
                 OnTurn?.Invoke(this, turn);
+                lastAssistantContent = response;
+                conversation.Add(new ConversationMessage("system", "Return a structured response with finished=true, or continue with tool calls."));
                 TrimConversation(conversation, memory, _config.ConversationWindow);
                 continue;
             }
 
-            if (toolCall.Tool == "done")
+            lastAssistantContent = modelResponse.Content ?? string.Empty;
+
+            if (modelResponse.Finished == true)
             {
-                var summary = SafeGetString(toolCall.Args, "summary") ?? "Task completed.";
+                var summary = modelResponse.Content ?? "Task completed.";
                 var turn = new AskTurn("assistant", summary, "done");
                 turns.Add(turn);
                 OnTurn?.Invoke(this, turn);
                 return new AskResult(summary, true, turns);
             }
 
-            if (toolCall.Tool == "__json_error")
+            if (modelResponse.ToolCalls is null || modelResponse.ToolCalls.Count == 0)
             {
-                var errorMsg = SafeGetString(toolCall.Args, "error") ?? "Invalid JSON";
-                var rawMsg = SafeGetString(toolCall.Args, "raw") ?? "";
                 var turn = new AskTurn("assistant", response);
                 conversation.Add(new ConversationMessage("assistant", response));
-                conversation.Add(new ConversationMessage("system", $"Your tool call was malformed: {errorMsg}. Raw: {rawMsg}. Fix and retry."));
+                conversation.Add(new ConversationMessage("system", "Your response must include finished=true to terminate, or tool_calls to continue."));
                 turns.Add(turn);
                 OnTurn?.Invoke(this, turn);
                 TrimConversation(conversation, memory, _config.ConversationWindow);
                 continue;
             }
 
-            var assistantTurn = new AskTurn("assistant", response, toolCall.Tool);
-            turns.Add(assistantTurn);
-            OnTurn?.Invoke(this, assistantTurn);
-            conversation.Add(new ConversationMessage("assistant", response));
+            foreach (var toolCall in modelResponse.ToolCalls)
+            {
+                var assistantTurn = new AskTurn("assistant", response, toolCall.Tool);
+                turns.Add(assistantTurn);
+                OnTurn?.Invoke(this, assistantTurn);
+                conversation.Add(new ConversationMessage("assistant", response));
+                toolCallCount++;
 
-            var toolResult = await ExecuteToolAsync(toolCall, session, cancellationToken);
-            var toolResultJson = JsonSerializer.Serialize(toolResult);
-            var shouldTruncate = toolCall.Tool is "search_symbol" or "search_text" or "callers" or "callees";
-            var truncatedResult = shouldTruncate && toolResultJson.Length > _config.MaxToolResultLength
-                ? toolResultJson[.._config.MaxToolResultLength] + "\n...[truncated]"
-                : toolResultJson;
-            var toolTurn = new AskTurn("tool", truncatedResult, toolCall.Tool, truncatedResult);
-            turns.Add(toolTurn);
-            OnTurn?.Invoke(this, toolTurn);
-            conversation.Add(new ConversationMessage("tool", truncatedResult));
+                var toolResult = await ExecuteToolAsync(new ToolCall(toolCall.Tool, toolCall.Args), session, cancellationToken);
+                var toolResultJson = JsonSerializer.Serialize(toolResult);
+                var shouldTruncate = toolCall.Tool is "search_symbol" or "search_text" or "callers" or "callees";
+                var truncatedResult = shouldTruncate && toolResultJson.Length > _config.MaxToolResultLength
+                    ? toolResultJson[.._config.MaxToolResultLength] + "\n...[truncated]"
+                    : toolResultJson;
+                var toolTurn = new AskTurn("tool", truncatedResult, toolCall.Tool, truncatedResult);
+                turns.Add(toolTurn);
+                OnTurn?.Invoke(this, toolTurn);
+                conversation.Add(new ConversationMessage("tool", truncatedResult));
+                TrimConversation(conversation, memory, _config.ConversationWindow);
+            }
+
+            conversation.Add(new ConversationMessage("system", "After tool results, continue with a structured response containing finished=true or more tool_calls."));
             TrimConversation(conversation, memory, _config.ConversationWindow);
         }
 
-        return new AskResult("Reached maximum turn limit. The task may be incomplete.", false, turns);
+        return new AskResult($"MaxTurnsExceeded: lastAssistantContent='{lastAssistantContent}', lastFinished=false, toolCallCount={toolCallCount}", false, turns);
     }
 
     private static void TrimConversation(List<ConversationMessage> conversation, System.Text.StringBuilder memory, int window)
@@ -174,62 +188,83 @@ public sealed class AskOrchestrator
             "</tool_call>";
     }
 
-    private static ToolCall? ParseToolCall(string response)
+    private static AskModelResponse? ParseModelResponse(string response)
     {
-        // Extract content after thinking markers
         var cleaned = response;
-        
-        // Remove thinking sections (Qwen3 style)
+
         var thinkEnd = cleaned.LastIndexOf("</think>");
         if (thinkEnd >= 0)
         {
             cleaned = cleaned[(thinkEnd + "</think>".Length)..];
         }
-        
-        // Remove code blocks
-        cleaned = Regex.Replace(cleaned, @"```(?:xml|json)?\s*", string.Empty, RegexOptions.Singleline);
-        cleaned = cleaned.Replace("```", string.Empty);
-        cleaned = cleaned.Trim();
+        cleaned = Regex.Replace(cleaned, @"```(?:xml|json)?\s*", string.Empty, RegexOptions.Singleline).Replace("```", string.Empty).Trim();
 
-        // Find <tool_call> tag
-        var toolCallMatch = Regex.Match(cleaned, @"<tool_call>\s*(\{.*?\})\s*</tool_call>", RegexOptions.Singleline);
-        if (!toolCallMatch.Success)
-        {
-            // Try without XML tags
-            toolCallMatch = Regex.Match(cleaned, @"\{\s*""name""\s*:\s*""([^""]+)""\s*,\s*""arguments""\s*:\s*(\{.*?\})\s*\}", RegexOptions.Singleline);
-            if (!toolCallMatch.Success) return null;
-            
-            try
-            {
-                var toolName = toolCallMatch.Groups[1].Value;
-                var argsJson = toolCallMatch.Groups[2].Value;
-                using var doc = JsonDocument.Parse(argsJson);
-                return new ToolCall(toolName, doc.RootElement.Clone());
-            }
-            catch { return null; }
-        }
+        if (string.IsNullOrWhiteSpace(cleaned)) return null;
+
+        AskModelResponse? parsed = null;
 
         try
         {
-            var json = toolCallMatch.Groups[1].Value;
-            using var doc = JsonDocument.Parse(json);
+            using var doc = JsonDocument.Parse(cleaned);
             var root = doc.RootElement;
-            
-            if (root.TryGetProperty("name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String)
+            string? content = null;
+            bool? finished = null;
+            string? reasoning = null;
+            IReadOnlyList<AskToolCall>? toolCalls = null;
+
+            if (root.TryGetProperty("content", out var contentProp) && contentProp.ValueKind == JsonValueKind.String)
             {
-                var toolName = nameProp.GetString()!;
-                var args = root.TryGetProperty("arguments", out var argsProp) 
-                    ? argsProp.Clone() 
-                    : JsonDocument.Parse("{}").RootElement.Clone();
-                return new ToolCall(toolName, args);
+                content = contentProp.GetString();
             }
+
+            if (root.TryGetProperty("finished", out var finishedProp) && (finishedProp.ValueKind == JsonValueKind.True || finishedProp.ValueKind == JsonValueKind.False))
+            {
+                finished = finishedProp.GetBoolean();
+            }
+
+            if (root.TryGetProperty("reasoning", out var reasoningProp) && reasoningProp.ValueKind == JsonValueKind.String)
+            {
+                reasoning = reasoningProp.GetString();
+            }
+
+            if (root.TryGetProperty("tool_calls", out var toolCallsProp) && toolCallsProp.ValueKind == JsonValueKind.Array)
+            {
+                var parsedToolCalls = new List<AskToolCall>();
+                foreach (var item in toolCallsProp.EnumerateArray())
+                {
+                    var toolCall = ParseToolCallFromJson(item);
+                    if (toolCall is not null)
+                    {
+                        parsedToolCalls.Add(toolCall);
+                    }
+                }
+
+                toolCalls = parsedToolCalls;
+            }
+
+            parsed = new AskModelResponse(content, finished, reasoning, toolCalls);
         }
         catch (JsonException)
         {
             return null;
         }
 
-        return null;
+        return parsed;
+    }
+
+    private static AskToolCall? ParseToolCallFromJson(JsonElement item)
+    {
+        if (!item.TryGetProperty("name", out var nameProp) || nameProp.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        var toolName = nameProp.GetString()!;
+        var args = item.TryGetProperty("arguments", out var argsProp)
+            ? argsProp.Clone()
+            : JsonDocument.Parse("{}").RootElement.Clone();
+
+        return new AskToolCall(toolName, args);
     }
 
     private async Task<ProtocolResponse> ExecuteToolAsync(ToolCall call, SessionState session, CancellationToken cancellationToken)
