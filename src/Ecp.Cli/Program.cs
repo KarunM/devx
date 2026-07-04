@@ -786,14 +786,8 @@ static async Task<int> ReportAsync(string connectionString, string[] args, strin
 
 static async Task<int> AskAsync(string connectionString, string[] args, string format)
 {
-    var sessionId = GetOption(args, "--session");
-    if (sessionId is null)
-    {
-        Console.Error.WriteLine("Usage: ecp ask <prompt> --session <id> [--sandbox]");
-        return 1;
-    }
-
     var useSandbox = args.Contains("--sandbox");
+    var traceAsk = HasFlag(args, "--trace-ask") || HasFlag(args, "--debug-ask");
 
     var promptBuilder = new System.Text.StringBuilder();
     for (var i = 1; i < args.Length; i++)
@@ -825,10 +819,11 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
 
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
-    var session = await store.GetSessionAsync(new GetSessionRequest(new SessionId(Guid.Parse(sessionId))));
+    var sessionResolution = await ResolveSessionAsync(connectionString, args, allowCreate: true, allowReuse: true);
+    var session = sessionResolution.Session;
     if (session is null)
     {
-        Console.Error.WriteLine("Session not found.");
+        Console.Error.WriteLine(sessionResolution.ErrorMessage ?? "Session not found.");
         return 1;
     }
 
@@ -867,7 +862,7 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
         new SearchService(effectiveStore, (ISymbolStore)effectiveStore),
         (ISessionStore)effectiveStore,
         effectiveStore);
-    var orchestrator = new AskOrchestrator(llm, engine, llmConfig, useSandbox ? sandbox?.SandboxRoot : null);
+    var orchestrator = new AskOrchestrator(llm, engine, llmConfig, useSandbox ? sandbox?.SandboxRoot : null, traceAsk);
     var started = DateTimeOffset.UtcNow;
 
     Console.WriteLine("═══════════════════════════════════════════════════");
@@ -944,7 +939,7 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
         WriteAskFailure(format, ex, serverManager.GetDiagnostics(), llmConfig.Endpoint);
         return 1;
     }
-    await store.AddOperationMetricAsync(new OperationMetric("ask", started, DateTimeOffset.UtcNow - started, askResult.Success, sessionId));
+    await store.AddOperationMetricAsync(new OperationMetric("ask", started, DateTimeOffset.UtcNow - started, askResult.Success, session.Id.Value.ToString()));
 
     Console.WriteLine();
     Console.WriteLine($"Completed: {askResult.Summary}");
@@ -1150,6 +1145,77 @@ static string? GetOption(string[] args, string name)
     }
 
     return null;
+}
+
+static async Task<(SessionState? Session, string? ErrorMessage, bool Reused, bool Created)> ResolveSessionAsync(string connectionString, string[] args, bool allowCreate, bool allowReuse)
+{
+    var explicitSessionId = GetOption(args, "--session");
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+
+    if (!string.IsNullOrWhiteSpace(explicitSessionId))
+    {
+        var explicitSession = await store.GetSessionAsync(new GetSessionRequest(new SessionId(Guid.Parse(explicitSessionId))));
+        return explicitSession is null
+            ? (null, "Session not found.", false, false)
+            : (explicitSession, null, false, false);
+    }
+
+    var repositoryRoot = Path.GetFullPath(Environment.CurrentDirectory);
+    var repository = await store.GetRepositoryByRootPathAsync(repositoryRoot);
+    if (repository is null)
+    {
+        return (null, "Repository has not been indexed yet.", false, false);
+    }
+
+    if (allowReuse)
+    {
+        var activeSession = await GetActiveSessionAsync(store, repository.Id);
+        if (activeSession is not null)
+        {
+            Console.WriteLine($"Auto-reused active session: {activeSession.Id.Value}");
+            return (activeSession, null, true, false);
+        }
+    }
+
+    if (!allowCreate)
+    {
+        return (null, "No active session available.", false, false);
+    }
+
+    var created = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+    await SetActiveSessionAsync(store, repository.Id, created.Id.Value.ToString());
+    Console.WriteLine($"Auto-created active session: {created.Id.Value}");
+    return (created, null, false, true);
+}
+
+static async Task<SessionState?> GetActiveSessionAsync(SqliteStorageInitializer store, RepositoryId repositoryId)
+{
+    var path = GetActiveSessionPath(repositoryId);
+    if (!IOFile.Exists(path))
+    {
+        return null;
+    }
+
+    var sessionIdText = (await IOFile.ReadAllTextAsync(path)).Trim();
+    if (string.IsNullOrWhiteSpace(sessionIdText) || !Guid.TryParse(sessionIdText, out var sessionGuid))
+    {
+        return null;
+    }
+
+    return await store.GetSessionAsync(new GetSessionRequest(new SessionId(sessionGuid)));
+}
+
+static async Task SetActiveSessionAsync(SqliteStorageInitializer store, RepositoryId repositoryId, string sessionId)
+{
+    var path = GetActiveSessionPath(repositoryId);
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    await IOFile.WriteAllTextAsync(path, sessionId);
+}
+
+static string GetActiveSessionPath(RepositoryId repositoryId)
+{
+    return Path.Combine(".ecp", "current-session", repositoryId.Value.ToString(), "active");
 }
 
 static string? GetPatchPath(string[] args)
