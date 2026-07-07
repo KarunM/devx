@@ -623,7 +623,20 @@ public sealed class ProtocolEngine : IProtocolEngine
 
             if (operation.Operation.Equals("ReplaceMethod", StringComparison.OrdinalIgnoreCase)
                 || operation.Operation.Equals("InsertMethod", StringComparison.OrdinalIgnoreCase)
-                || operation.Operation.Equals("AddUsing", StringComparison.OrdinalIgnoreCase))
+                || operation.Operation.Equals("ReplaceLineRange", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(operation.BeforeState))
+                {
+                    return Fail("ValidationError", $"Rollback requires before-state metadata for operation '{operation.Operation}'.");
+                }
+
+                IOFile.WriteAllText(absolutePath, operation.BeforeState);
+                restoredFiles++;
+                revertedOperations++;
+                continue;
+            }
+
+            if (operation.Operation.Equals("AddUsing", StringComparison.OrdinalIgnoreCase))
             {
                 return Fail("ValidationError", $"Rollback does not support operation '{operation.Operation}' without stored before-state.");
             }

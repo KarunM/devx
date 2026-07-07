@@ -81,7 +81,8 @@ public sealed record PatchOperation(
     string? TypeId,
     string? MethodText,
     string? Position,
-    string? Namespace);
+    string? Namespace,
+    string? BeforeState);
 public sealed record DiagnosticRecord(
     string Severity,
     string Code,

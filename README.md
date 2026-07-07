@@ -40,10 +40,31 @@ dotnet build
 dotnet test
 ```
 
+## ECP Core Patch Baseline Freeze
+
+The current baseline is tagged as `ECP-Core-Patch-Baseline-v0` and is the boundary for the core mutation workflow work.
+
+Freeze scope:
+
+- `ecp patch create`
+- `ecp artifact create/delete/path`
+- `ecp patch preview/validate/apply/rollback`
+- `ecp build/test`
+- `ecp capabilities/help` updates
+
+Freeze caveats:
+
+- Some earlier certification runs used non-ECP inspection commands.
+- Final mutations used the ECP patch workflow.
+- ReplaceMethod rollback is functionally certified.
+- Runtime discovery for multi-app repos is intentionally out of scope for this baseline.
+- MCP server work is intentionally out of scope for this baseline.
+
+The next branch, `ecp-runtime-discovery-v0`, is reserved for runtime discovery work.
+
 ## Contribute
 
 Please keep changes focused and follow the existing solution structure under `src/` and `tests/`.
-
 
 ## Ask Session
 export SESSION_ID=$(ecp session create --format json | jq -r '.sessionId')

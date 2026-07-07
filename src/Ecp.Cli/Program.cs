@@ -58,6 +58,9 @@ static async Task<int> RunAsync(string[] args)
         case "patch":
             return await PatchAsync(connectionString, args, format);
 
+        case "artifact":
+            return await ArtifactAsync(args, format);
+
         case "build":
             return await RunBuildAsync(connectionString, args, format);
 
@@ -335,6 +338,9 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
+
+static async Task<int> ArtifactAsync(string[] args, string format)
+    => await Ecp.Cli.ArtifactCommand.RunAsync(args.Skip(1).ToArray(), format);
 
 static async Task<int> PatchCreateAsync(string connectionString, string[] args, string format)
     => await Ecp.Cli.PatchCreateCommand.RunAsync(connectionString, args, format);
@@ -1319,17 +1325,48 @@ static void WriteResponse(ProtocolResponse response, string format)
 
 static void PrintHelp()
 {
-    Console.WriteLine(@"
+    Console.WriteLine("""
 Usage:
-  ecp ask <command> [options]
-    --context-workflow  Use context workflow for ask command
-    --debug-ask         Enable debug output for ask command
+  ecp artifact create <name> --content <text>|--content-file <path>|--content-json <json-string>|--content-stdin
+  ecp artifact delete <name>
+  ecp artifact path <name>
+  ecp patch create <output-file> --session <id> --op <Operation> --path <relative-path> [options] [--append]
+  ecp patch preview <patch-file> --session <id>
+  ecp patch validate <patch-file> --session <id>
+  ecp patch apply <patch-file> --session <id>
+  ecp patch rollback <patch-file> --session <id>
+  ecp build --session <id>
+  ecp test --session <id>
+  ecp capabilities [--format json]
 
-Global Options:
-  --help               Show help
-  --version            Show version
-  --debug-ask          Enable debug output for ask command
-");
+Patch create options:
+  --op <Operation>
+  --path <relative-path>
+  --append
+  --content <text>
+  --content-file <path>
+  --content-stdin
+  --replacement <text>
+  --replacement-file <path>
+  --replacement-stdin
+  --method <name>
+  --method-text <text>
+  --method-text-file <path>
+  --position <value>
+  --namespace <name>
+  --containing-type <name>
+  --type-id <id>
+
+Artifact options:
+  --content <text>
+  --content-file <path>
+  --content-json <json-string>
+  --content-stdin
+
+Global options:
+  --format <json|text>
+  --session <id>
+""");
 }
 
 static void PrintUsage()
@@ -1338,33 +1375,21 @@ static void PrintUsage()
         ecp <command> [options]
 
         Commands:
-          ecp ask <prompt> --session <id> [--sandbox]    Ask the LLM to orchestrate code changes
-          ecp index <path>                              Index a repository
-          ecp index status [--session <id>]               Check index status
-          ecp index update <file> --session <id>          Re-index a single file
-          ecp search symbol <query> --session <id>        Search symbols
-          ecp search text <query> --session <id>          Search text
-          ecp snapshot <file> --session <id>              Get file snapshot
-          ecp session create                              Create a new session
-          ecp patch <apply|preview|validate|rollback> <patch-file> --session <id>
-                                                          Apply/manage patches
-          ecp build --session <id>                      Build the solution
-          ecp test --session <id>                       Run tests
-          ecp diagnostics --session <id>                Get diagnostics
-          ecp method <summary|get> <method> --session <id>
-                                                          Get method info
-          ecp type get <type> --session <id>            Get type info
-          ecp callers <method> --session <id>            Get callers
-          ecp callees <method> --session <id>            Get callees
-          ecp references <symbol> --session <id>          Get references
-          ecp read <file|method|type> <target> --session <id> [--range start:end|--full]
-                                                          Read source
-          ecp report --session <id>                     Generate session report
-          ecp capabilities [--format json]                List all capabilities
+          ecp artifact create <name> [--content <text>|--content-file <path>|--content-json <json-string>|--content-stdin]
+          ecp artifact delete <name>
+          ecp artifact path <name>
+          ecp patch create <output-file> --session <id> --op <Operation> --path <relative-path> [options] [--append]
+          ecp patch preview <patch-file> --session <id>
+          ecp patch validate <patch-file> --session <id>
+          ecp patch apply <patch-file> --session <id>
+          ecp patch rollback <patch-file> --session <id>
+          ecp build --session <id>
+          ecp test --session <id>
+          ecp capabilities [--format json]
 
         Global Options:
           --format <json|text>    Output format (default: text)
           --session <id>          Session identifier
-          --sandbox               Run Ask in sandbox mode (changes not applied until approved)
         """);
 }
+
