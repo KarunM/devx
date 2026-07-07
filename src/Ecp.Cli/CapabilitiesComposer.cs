@@ -2,7 +2,7 @@ namespace Ecp.Cli;
 
 public sealed record CapabilityOption(string Name, string Description, string? Default, bool Required);
 public sealed record CapabilitySubcommand(string Name, string Description, string[] Args);
-public sealed record CapabilityCommand(string Name, string Description, string Usage, CapabilitySubcommand[] Subcommands, string[] Args, string[] Options);
+public sealed record CapabilityCommand(string Name, string Description, string Usage, CapabilitySubcommand[] Subcommands, string[] Args, string[] Options, bool SupportsJsonOutput);
 public sealed record CapabilitiesResponse(string Version, CapabilityOption[] GlobalOptions, CapabilityCommand[] Commands);
 
 public static class CapabilitiesComposer
@@ -24,7 +24,8 @@ public static class CapabilitiesComposer
                     "ecp ask <prompt> --session <id>",
                     Array.Empty<CapabilitySubcommand>(),
                     new[] { "<prompt>" },
-                    new[] { "--session" }
+                    new[] { "--session" },
+                    true
                 ),
                 new CapabilityCommand(
                     "index",
@@ -36,7 +37,8 @@ public static class CapabilitiesComposer
                         new CapabilitySubcommand("update", "Re-index a single file after changes", new[] { "<file>" })
                     },
                     new[] { "<path>" },
-                    Array.Empty<string>()
+                    Array.Empty<string>(),
+                    true
                 ),
                 new CapabilityCommand(
                     "search",
@@ -44,7 +46,8 @@ public static class CapabilitiesComposer
                     "ecp search <symbol|text> <query> --session <id>",
                     Array.Empty<CapabilitySubcommand>(),
                     new[] { "<kind>", "<query>" },
-                    new[] { "--session" }
+                    new[] { "--session" },
+                    true
                 ),
                 new CapabilityCommand(
                     "session",
@@ -52,21 +55,38 @@ public static class CapabilitiesComposer
                     "ecp session create",
                     new[] { new CapabilitySubcommand("create", "Create a new session for the current repository", Array.Empty<string>()) },
                     Array.Empty<string>(),
-                    Array.Empty<string>()
+                    Array.Empty<string>(),
+                    true
+                ),
+                new CapabilityCommand(
+                    "artifact",
+                    "Create or manage reusable patch payload artifacts",
+                    "ecp artifact <create|delete|path> <name> [options]",
+                    new[]
+                    {
+                        new CapabilitySubcommand("create", "Create an artifact payload", new[] { "<name>" }),
+                        new CapabilitySubcommand("delete", "Delete an artifact payload", new[] { "<name>" }),
+                        new CapabilitySubcommand("path", "Print the artifact path", new[] { "<name>" })
+                    },
+                    new[] { "<subcommand>", "<name>" },
+                    new[] { "--content", "--content-file", "--content-json", "--content-stdin" },
+                    true
                 ),
                 new CapabilityCommand(
                     "patch",
-                    "Apply, preview, validate, or rollback a patch file",
-                    "ecp patch <apply|preview|validate|rollback> <patch-file> --session <id>",
+                    "Create, preview, validate, apply, or rollback a patch file",
+                    "ecp patch <create|apply|preview|validate|rollback> <patch-file> --session <id>",
                     new[]
                     {
+                        new CapabilitySubcommand("create", "Create a patch artifact", new[] { "<output-file>" }),
                         new CapabilitySubcommand("apply", "Apply a patch file", new[] { "<patch-file>" }),
                         new CapabilitySubcommand("preview", "Preview a patch without applying", new[] { "<patch-file>" }),
                         new CapabilitySubcommand("validate", "Validate a patch file", new[] { "<patch-file>" }),
                         new CapabilitySubcommand("rollback", "Rollback a previously applied patch", new[] { "<patch-file>" })
                     },
                     new[] { "<action>", "<patch-file>" },
-                    new[] { "--session" }
+                    new[] { "--session", "--op", "--path", "--append", "--content", "--content-file", "--content-stdin", "--replacement", "--replacement-file", "--replacement-stdin", "--method", "--method-text", "--method-text-file", "--position", "--namespace", "--containing-type", "--type-id" },
+                    true
                 ),
                 new CapabilityCommand(
                     "build",
@@ -74,7 +94,8 @@ public static class CapabilitiesComposer
                     "ecp build --session <id>",
                     Array.Empty<CapabilitySubcommand>(),
                     Array.Empty<string>(),
-                    new[] { "--session" }
+                    new[] { "--session" },
+                    true
                 ),
                 new CapabilityCommand(
                     "test",
@@ -82,7 +103,8 @@ public static class CapabilitiesComposer
                     "ecp test --session <id>",
                     Array.Empty<CapabilitySubcommand>(),
                     Array.Empty<string>(),
-                    new[] { "--session" }
+                    new[] { "--session" },
+                    true
                 ),
                 new CapabilityCommand(
                     "diagnostics",
@@ -90,7 +112,8 @@ public static class CapabilitiesComposer
                     "ecp diagnostics --session <id>",
                     Array.Empty<CapabilitySubcommand>(),
                     Array.Empty<string>(),
-                    new[] { "--session" }
+                    new[] { "--session" },
+                    true
                 ),
                 new CapabilityCommand(
                     "snapshot",
@@ -98,7 +121,8 @@ public static class CapabilitiesComposer
                     "ecp snapshot <file> --session <id>",
                     Array.Empty<CapabilitySubcommand>(),
                     new[] { "<file>" },
-                    new[] { "--session" }
+                    new[] { "--session" },
+                    true
                 ),
                 new CapabilityCommand(
                     "method",
@@ -110,7 +134,8 @@ public static class CapabilitiesComposer
                         new CapabilitySubcommand("get", "Get full method details", new[] { "<method>" })
                     },
                     new[] { "<action>", "<method>" },
-                    new[] { "--session" }
+                    new[] { "--session" },
+                    true
                 ),
                 new CapabilityCommand(
                     "type",
@@ -118,7 +143,8 @@ public static class CapabilitiesComposer
                     "ecp type get <type> --session <id>",
                     new[] { new CapabilitySubcommand("get", "Get type details", new[] { "<type>" }) },
                     new[] { "<action>", "<type>" },
-                    new[] { "--session" }
+                    new[] { "--session" },
+                    true
                 ),
                 new CapabilityCommand(
                     "callers",
@@ -126,7 +152,8 @@ public static class CapabilitiesComposer
                     "ecp callers <method> --session <id>",
                     Array.Empty<CapabilitySubcommand>(),
                     new[] { "<method>" },
-                    new[] { "--session" }
+                    new[] { "--session" },
+                    true
                 ),
                 new CapabilityCommand(
                     "callees",
@@ -134,7 +161,8 @@ public static class CapabilitiesComposer
                     "ecp callees <method> --session <id>",
                     Array.Empty<CapabilitySubcommand>(),
                     new[] { "<method>" },
-                    new[] { "--session" }
+                    new[] { "--session" },
+                    true
                 ),
                 new CapabilityCommand(
                     "references",
@@ -142,7 +170,8 @@ public static class CapabilitiesComposer
                     "ecp references <symbol> --session <id>",
                     Array.Empty<CapabilitySubcommand>(),
                     new[] { "<symbol>" },
-                    new[] { "--session" }
+                    new[] { "--session" },
+                    true
                 ),
                 new CapabilityCommand(
                     "read",
@@ -155,7 +184,8 @@ public static class CapabilitiesComposer
                         new CapabilitySubcommand("type", "Read type source", new[] { "<type>" })
                     },
                     new[] { "<kind>", "<target>" },
-                    new[] { "--session", "--range", "--full", "--id", "--query" }
+                    new[] { "--session", "--range", "--full", "--id", "--query" },
+                    true
                 ),
                 new CapabilityCommand(
                     "report",
@@ -163,7 +193,8 @@ public static class CapabilitiesComposer
                     "ecp report --session <id>",
                     Array.Empty<CapabilitySubcommand>(),
                     Array.Empty<string>(),
-                    new[] { "--session" }
+                    new[] { "--session" },
+                    true
                 ),
                 new CapabilityCommand(
                     "capabilities",
@@ -171,9 +202,11 @@ public static class CapabilitiesComposer
                     "ecp capabilities [--format json]",
                     Array.Empty<CapabilitySubcommand>(),
                     Array.Empty<string>(),
-                    new[] { "--format" }
+                    new[] { "--format" },
+                    true
                 )
             }
         );
     }
 }
+

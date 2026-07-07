@@ -41,7 +41,7 @@ public sealed class CapabilitiesComposerTests
 
         var expected = new[]
         {
-            "ask", "index", "search", "session", "patch", "build", "test",
+            "ask", "index", "search", "session", "artifact", "patch", "build", "test",
             "diagnostics", "snapshot", "method", "type", "callers",
             "callees", "references", "read", "report", "capabilities"
         };
@@ -59,7 +59,8 @@ public sealed class CapabilitiesComposerTests
     [InlineData("index", "Index a repository for discovery and search")]
     [InlineData("search", "Search indexed symbols or full text")]
     [InlineData("session", "Session management")]
-    [InlineData("patch", "Apply, preview, validate, or rollback a patch file")]
+    [InlineData("artifact", "Create or manage reusable patch payload artifacts")]
+    [InlineData("patch", "Create, preview, validate, apply, or rollback a patch file")]
     [InlineData("build", "Build the indexed solution")]
     [InlineData("test", "Run tests for the indexed solution")]
     [InlineData("diagnostics", "Get diagnostics for the indexed solution")]
@@ -97,17 +98,61 @@ public sealed class CapabilitiesComposerTests
     }
 
     [Fact]
-    public void Compose_PatchCommand_HasFourSubcommands()
+    public void Compose_PatchCommand_HasFiveSubcommands()
     {
         var caps = CapabilitiesComposer.Compose();
         var patch = caps.Commands.Single(c => c.Name == "patch");
 
-        Assert.Equal(4, patch.Subcommands.Length);
+        Assert.Equal(5, patch.Subcommands.Length);
         var subNames = patch.Subcommands.Select(s => s.Name).ToHashSet();
+        Assert.Contains("create", subNames);
         Assert.Contains("apply", subNames);
         Assert.Contains("preview", subNames);
         Assert.Contains("validate", subNames);
         Assert.Contains("rollback", subNames);
+    }
+
+    [Fact]
+    public void Compose_ArtifactCommand_HasCreateDeleteAndPathSubcommands()
+    {
+        var caps = CapabilitiesComposer.Compose();
+        var artifact = caps.Commands.Single(c => c.Name == "artifact");
+
+        Assert.Equal(3, artifact.Subcommands.Length);
+        var subNames = artifact.Subcommands.Select(s => s.Name).ToHashSet();
+        Assert.Contains("create", subNames);
+        Assert.Contains("delete", subNames);
+        Assert.Contains("path", subNames);
+    }
+
+    [Fact]
+    public void Compose_ArtifactCommand_IncludesArtifactContentOptions()
+    {
+        var caps = CapabilitiesComposer.Compose();
+        var artifact = caps.Commands.Single(c => c.Name == "artifact");
+
+        Assert.Contains("--content", artifact.Options);
+        Assert.Contains("--content-file", artifact.Options);
+        Assert.Contains("--content-json", artifact.Options);
+        Assert.Contains("--content-stdin", artifact.Options);
+    }
+
+    [Fact]
+    public void Compose_PatchCreateCommand_IncludesCreateOptions()
+    {
+        var caps = CapabilitiesComposer.Compose();
+        var patch = caps.Commands.Single(c => c.Name == "patch");
+
+        Assert.Contains("--op", patch.Options);
+        Assert.Contains("--path", patch.Options);
+        Assert.Contains("--append", patch.Options);
+        Assert.Contains("--content", patch.Options);
+        Assert.Contains("--replacement", patch.Options);
+        Assert.Contains("--method", patch.Options);
+        Assert.Contains("--position", patch.Options);
+        Assert.Contains("--namespace", patch.Options);
+        Assert.Contains("--containing-type", patch.Options);
+        Assert.Contains("--type-id", patch.Options);
     }
 
     [Fact]
@@ -154,3 +199,4 @@ public sealed class CapabilitiesComposerTests
         }
     }
 }
+

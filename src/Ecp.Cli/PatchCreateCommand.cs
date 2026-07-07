@@ -18,6 +18,7 @@ namespace Ecp.Cli;
 public static class PatchCreateCommand
 {
     private static readonly string[] StdinFlags = ["--content-stdin", "--replacement-stdin", "--method-text-stdin"];
+    private static readonly string[] FileFlags = ["--content-file", "--replacement-file", "--method-text-file"];
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -71,11 +72,11 @@ public static class PatchCreateCommand
         }
 
         var stdinContent = stdinFlags.Length == 1 ? await Console.In.ReadToEndAsync() : null;
+        var content = await ResolveFieldAsync(GetOption(args, "--content"), HasFlag(args, "--content-stdin"), stdinContent, GetOption(args, "--content-file"));
+        var replacementText = await ResolveFieldAsync(GetOption(args, "--replacement"), HasFlag(args, "--replacement-stdin"), stdinContent, GetOption(args, "--replacement-file"));
+        var methodText = await ResolveFieldAsync(GetOption(args, "--method-text"), HasFlag(args, "--method-text-stdin"), stdinContent, GetOption(args, "--method-text-file"));
 
-        var content = ResolveField(GetOption(args, "--content"), HasFlag(args, "--content-stdin"), stdinContent);
-        var replacementText = ResolveField(GetOption(args, "--replacement"), HasFlag(args, "--replacement-stdin"), stdinContent);
-        var methodText = ResolveField(GetOption(args, "--method-text"), HasFlag(args, "--method-text-stdin"), stdinContent);
-
+        var beforeState = await TryReadBeforeStateAsync(connectionString, sessionGuid, operationPath, operationName);
         var operation = new PatchOperation(
             Operation: operationName,
             Path: operationPath,
@@ -86,7 +87,8 @@ public static class PatchCreateCommand
             TypeId: GetOption(args, "--type-id"),
             MethodText: methodText,
             Position: GetOption(args, "--position"),
-            Namespace: GetOption(args, "--namespace"));
+            Namespace: GetOption(args, "--namespace"),
+            BeforeState: beforeState);
 
         var operations = new List<PatchOperation>();
         var appending = HasFlag(args, "--append");
@@ -173,8 +175,59 @@ public static class PatchCreateCommand
         return 0;
     }
 
-    private static string? ResolveField(string? inlineValue, bool useStdin, string? stdinContent)
-        => useStdin ? stdinContent : inlineValue;
+    private static async Task<string?> ResolveFieldAsync(string? inlineValue, bool useStdin, string? stdinContent, string? filePath)
+    {
+        if (useStdin)
+        {
+            return stdinContent;
+        }
+
+        if (!string.IsNullOrWhiteSpace(filePath))
+        {
+            if (!IOFile.Exists(filePath))
+            {
+                throw new FileNotFoundException($"Input file '{filePath}' was not found.");
+            }
+
+            return await IOFile.ReadAllTextAsync(filePath);
+        }
+
+        return inlineValue;
+    }
+
+    private static async Task<string?> TryReadBeforeStateAsync(string connectionString, Guid sessionGuid, string operationPath, string operationName)
+    {
+        if (!operationName.Equals("ReplaceMethod", StringComparison.OrdinalIgnoreCase)
+            && !operationName.Equals("InsertMethod", StringComparison.OrdinalIgnoreCase)
+            && !operationName.Equals("ReplaceLineRange", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        try
+        {
+            var store = new SqliteStorageInitializer(connectionString);
+            await store.InitializeAsync();
+            var session = await store.GetSessionAsync(new GetSessionRequest(new SessionId(sessionGuid)));
+            if (session is null)
+            {
+                return null;
+            }
+
+            var repositoryRoot = await store.GetRepositoryRootPathAsync(session.RepositoryId);
+            if (string.IsNullOrWhiteSpace(repositoryRoot))
+            {
+                return null;
+            }
+
+            var fullPath = Path.GetFullPath(Path.Combine(repositoryRoot, operationPath));
+            return IOFile.Exists(fullPath) ? await IOFile.ReadAllTextAsync(fullPath) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     private static string HashOperation(PatchOperation operation)
     {

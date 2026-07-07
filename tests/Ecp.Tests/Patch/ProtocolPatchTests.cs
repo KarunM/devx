@@ -177,6 +177,66 @@ public sealed class ProtocolPatchTests
     }
 
     [Fact]
+    public async Task ExecuteAsync_PatchRollback_RestoresReplaceMethodBeforeState()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("ecp-patch-rollback-method-test").FullName;
+        var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
+        Directory.CreateDirectory(projectDirectory);
+
+        var filePath = Path.Combine(projectDirectory, "Sample.cs");
+        await System.IO.File.WriteAllTextAsync(filePath, """
+            namespace Sample;
+
+            public sealed class Sample
+            {
+                public void Hello()
+                {
+                    System.Console.WriteLine("before");
+                }
+            }
+            """);
+
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"ecp-patch-rollback-method-{Guid.NewGuid():N}.db") }.ToString();
+        var store = new SqliteStorageInitializer(connectionString);
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(repositoryRoot);
+
+        var repositoryId = await GetRepositoryIdAsync(connectionString);
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(new RepositoryId(Guid.Parse(repositoryId))));
+
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+        var beforeState = await System.IO.File.ReadAllTextAsync(filePath);
+        var patchPayload = JsonSerializer.Serialize(new
+        {
+            version = "1.0",
+            operations = new[]
+            {
+                new
+                {
+                    operation = "ReplaceMethod",
+                    path = "src/Sample/Sample.cs",
+                    methodName = "Hello",
+                    replacementText = "public void Hello() { System.Console.WriteLine(\"after\"); }",
+                    beforeState
+                }
+            }
+        });
+        using var patchDocument = JsonDocument.Parse(patchPayload);
+
+        var applyRequest = new ProtocolRequest("1.0", ProtocolOperations.Patch, session.Id.Value.ToString(), patchDocument.RootElement.Clone());
+        var applyResponse = await engine.ExecuteAsync(applyRequest);
+        Assert.True(applyResponse.Success);
+        Assert.Contains("after", await System.IO.File.ReadAllTextAsync(filePath));
+
+        var rollbackRequest = new ProtocolRequest("1.0", ProtocolOperations.PatchRollback, session.Id.Value.ToString(), patchDocument.RootElement.Clone());
+        var rollbackResponse = await engine.ExecuteAsync(rollbackRequest);
+
+        Assert.True(rollbackResponse.Success);
+        Assert.Contains("before", await System.IO.File.ReadAllTextAsync(filePath));
+        Assert.Contains("FilesRestored", rollbackResponse.Data!.Value.GetRawText());
+    }
+
+    [Fact]
     public async Task ExecuteAsync_PatchRollback_RemovesCreatedFile()
     {
         var repositoryRoot = Directory.CreateTempSubdirectory("ecp-patch-rollback-test").FullName;
