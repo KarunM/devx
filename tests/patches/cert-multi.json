@@ -1,0 +1,29 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "69f7005b-aab0-43d1-871d-855dfe6d817d",
+    "createdUtc": "2026-07-07T09:34:36.6697890\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "cert-multi-a.txt",
+      "cert-multi-b.txt"
+    ],
+    "operationHashes": [
+      "ce4c8c42ef89433b6fd3ad798ceeeb4675b43ebfc75424355d8e12ceddba7160",
+      "cf2669fe34d041ab9749de05c755249e27c9c8d8d12b789a91fc3da148eadcd3"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "CreateFile",
+      "path": "cert-multi-a.txt",
+      "content": "file A"
+    },
+    {
+      "operation": "CreateFile",
+      "path": "cert-multi-b.txt",
+      "content": "file B"
+    }
+  ]
+}

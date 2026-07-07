@@ -328,6 +328,7 @@ public interface IRepositoryStore
     Task<TypeSummary?> FindTypeSummaryByIdAsync(string typeId, CancellationToken cancellationToken = default);
     Task<int> CountIndexedFilesAsync(RepositoryId repositoryId, CancellationToken cancellationToken = default);
     Task<string?> GetRepositoryRootPathAsync(RepositoryId repositoryId, CancellationToken cancellationToken = default);
+    Task DeleteFileAsync(FileId fileId, CancellationToken cancellationToken = default);
 }
 
 public interface ISymbolStore

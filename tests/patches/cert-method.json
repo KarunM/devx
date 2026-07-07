@@ -1,0 +1,23 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "d2eb4d9f-86de-40b8-9ac3-fae6b49cc246",
+    "createdUtc": "2026-07-07T09:35:24.9524210\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "cert-method.cs"
+    ],
+    "operationHashes": [
+      "8f123f723058184a96b4ef3d53b1861b10c69de974711bc7571a616c196effca"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "ReplaceMethod",
+      "path": "cert-method.cs",
+      "methodName": "Value",
+      "replacementText": "    public static int Value()\n    {\n        return 42;\n    }"
+    }
+  ]
+}

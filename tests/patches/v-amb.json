@@ -1,0 +1,23 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "f73178f3-698d-4c51-a1de-7a4f4c2f8ae8",
+    "createdUtc": "2026-07-07T09:44:48.8076910\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "v-amb.cs"
+    ],
+    "operationHashes": [
+      "7c60045fee3b758eee49a31a7740b2db5f1af95b7fced90b2569e6cb6faf38bc"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "ReplaceMethod",
+      "path": "v-amb.cs",
+      "methodName": "Dup",
+      "replacementText": "    public static int Dup() { return 9; }"
+    }
+  ]
+}

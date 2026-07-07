@@ -1,0 +1,27 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "3c2f9f8e-4b8b-4138-a701-e96c401344c6",
+    "createdUtc": "2026-07-07T09:45:21.0856940\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "v-nf.cs",
+      "v-amb.cs"
+    ],
+    "operationHashes": [
+      "dcc6757b8fe33f1f86d2c2b8a6ad5f7473bb8af2b68734f0221a1ae7080c9090",
+      "2d5a7ca7afaef6e08b52d268f18b33da3c02e7045ca2e2b2e29beb3dc7fcf32e"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "DeleteFile",
+      "path": "v-nf.cs"
+    },
+    {
+      "operation": "DeleteFile",
+      "path": "v-amb.cs"
+    }
+  ]
+}

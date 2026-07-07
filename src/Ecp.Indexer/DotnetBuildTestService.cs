@@ -7,42 +7,83 @@ namespace Ecp.Indexer;
 public sealed class DotnetBuildTestService
 {
     public async Task<ExecutionRecord> RunBuildAsync(string repositoryRoot, CancellationToken cancellationToken = default)
-        => await RunAsync("dotnet", GetBuildArguments(repositoryRoot), repositoryRoot, cancellationToken);
+        => await RunAsync("dotnet", GetBuildArguments(repositoryRoot, null), repositoryRoot, cancellationToken);
+
+    public async Task<ExecutionRecord> RunBuildAsync(string repositoryRoot, string? projectSelector, CancellationToken cancellationToken = default)
+        => await RunAsync("dotnet", GetBuildArguments(repositoryRoot, projectSelector), repositoryRoot, cancellationToken);
 
     public async Task<ExecutionRecord> RunTestsAsync(string repositoryRoot, CancellationToken cancellationToken = default)
-        => await RunAsync("dotnet", GetTestArguments(repositoryRoot), repositoryRoot, cancellationToken);
+        => await RunAsync("dotnet", GetTestArguments(repositoryRoot, null), repositoryRoot, cancellationToken);
 
-    private static string GetBuildArguments(string repositoryRoot)
+    public async Task<ExecutionRecord> RunTestsAsync(string repositoryRoot, string? projectSelector, CancellationToken cancellationToken = default)
+        => await RunAsync("dotnet", GetTestArguments(repositoryRoot, projectSelector), repositoryRoot, cancellationToken);
+
+    private static string GetBuildArguments(string repositoryRoot, string? projectSelector)
     {
-        var solution = FindSolutionFile(repositoryRoot);
+        var solution = SelectSolutionFile(repositoryRoot, projectSelector);
         if (solution is not null)
         {
             return $"build \"{solution}\"";
         }
 
-        var project = FindProjectFile(repositoryRoot, includeTestProjects: false) ?? FindProjectFile(repositoryRoot, includeTestProjects: true);
+        var project = SelectProjectFile(repositoryRoot, projectSelector, includeTestProjects: false)
+            ?? SelectProjectFile(repositoryRoot, projectSelector, includeTestProjects: true);
         return project is null ? "build" : $"build \"{project}\"";
     }
 
-    private static string GetTestArguments(string repositoryRoot)
+    private static string GetTestArguments(string repositoryRoot, string? projectSelector)
     {
-        var solution = FindSolutionFile(repositoryRoot);
+        var solution = SelectSolutionFile(repositoryRoot, projectSelector);
         if (solution is not null)
         {
             return $"test \"{solution}\"";
         }
 
-        var project = FindProjectFile(repositoryRoot, includeTestProjects: true) ?? FindProjectFile(repositoryRoot, includeTestProjects: false);
+        var project = SelectProjectFile(repositoryRoot, projectSelector, includeTestProjects: true)
+            ?? SelectProjectFile(repositoryRoot, projectSelector, includeTestProjects: false);
         return project is null ? "test" : $"test \"{project}\"";
     }
 
-    private static string? FindSolutionFile(string repositoryRoot)
-        => Directory.EnumerateFiles(repositoryRoot, "*.sln", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.Ordinal).FirstOrDefault();
+    private static string? SelectSolutionFile(string repositoryRoot, string? projectSelector)
+    {
+        if (string.IsNullOrWhiteSpace(projectSelector))
+        {
+            return Directory.EnumerateFiles(repositoryRoot, "*.sln", SearchOption.AllDirectories).OrderBy(path => path, StringComparer.Ordinal).FirstOrDefault();
+        }
 
-    private static string? FindProjectFile(string repositoryRoot, bool includeTestProjects)
+        var selectorPath = NormalizeSelector(repositoryRoot, projectSelector);
+        if (selectorPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase))
+        {
+            return System.IO.File.Exists(selectorPath) ? selectorPath : null;
+        }
+
+        return Directory.EnumerateFiles(repositoryRoot, "*.sln", SearchOption.AllDirectories)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .FirstOrDefault(path => Path.GetFileNameWithoutExtension(path).Equals(projectSelector, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string? SelectProjectFile(string repositoryRoot, string? projectSelector, bool includeTestProjects)
     {
         var candidates = Directory.EnumerateFiles(repositoryRoot, "*.csproj", SearchOption.AllDirectories)
             .OrderBy(path => path, StringComparer.Ordinal);
+
+        if (!string.IsNullOrWhiteSpace(projectSelector))
+        {
+            var selectorPath = NormalizeSelector(repositoryRoot, projectSelector);
+            if (selectorPath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) && System.IO.File.Exists(selectorPath))
+            {
+                return selectorPath;
+            }
+
+            var selectorMatch = candidates.FirstOrDefault(path =>
+                Path.GetFileNameWithoutExtension(path).Equals(projectSelector, StringComparison.OrdinalIgnoreCase) ||
+                path.Contains(projectSelector, StringComparison.OrdinalIgnoreCase));
+
+            if (selectorMatch is not null)
+            {
+                return selectorMatch;
+            }
+        }
 
         if (includeTestProjects)
         {
@@ -51,6 +92,9 @@ public sealed class DotnetBuildTestService
 
         return candidates.FirstOrDefault(path => !Path.GetFileNameWithoutExtension(path).Contains("Test", StringComparison.OrdinalIgnoreCase));
     }
+
+    private static string NormalizeSelector(string repositoryRoot, string selector)
+        => Path.IsPathRooted(selector) ? selector : Path.Combine(repositoryRoot, selector);
 
     private static async Task<ExecutionRecord> RunAsync(string fileName, string arguments, string workingDirectory, CancellationToken cancellationToken)
     {

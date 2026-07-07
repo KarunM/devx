@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "61ab761c-48e4-4b47-a091-67bf5519fdfc",
+    "createdUtc": "2026-07-07T09:34:04.9011150\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "cert-single.txt"
+    ],
+    "operationHashes": [
+      "7ad1439ee09105ac67bb714cc6f393c044d404739d7eb387d863605b688cfa4a"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "CreateFile",
+      "path": "cert-single.txt",
+      "content": "hello single file"
+    }
+  ]
+}

@@ -117,6 +117,110 @@ public sealed class RepositoryIndexingService
         }
     }
 
+    public async Task ReindexFileAsync(string repositoryPath, string filePath, CancellationToken cancellationToken = default)
+    {
+        var rootPath = Path.GetFullPath(repositoryPath);
+        var relativePath = filePath.Replace('\\', '/');
+        var absolutePath = Path.GetFullPath(Path.Combine(rootPath, relativePath));
+
+        if (!absolutePath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("File path must be inside the repository root.", nameof(filePath));
+        }
+
+        if (!System.IO.File.Exists(absolutePath))
+        {
+            throw new FileNotFoundException("File not found.", absolutePath);
+        }
+
+        var repositoryId = new RepositoryId(StableId(rootPath));
+        var fileId = new FileId(StableId(absolutePath));
+        await _repositoryStore.DeleteFileAsync(fileId, cancellationToken);
+
+        var projectPath = Directory.EnumerateFiles(rootPath, "*.csproj", SearchOption.AllDirectories)
+            .FirstOrDefault(p => absolutePath.StartsWith(Path.GetDirectoryName(p)!, StringComparison.OrdinalIgnoreCase));
+        if (projectPath is null)
+        {
+            throw new InvalidOperationException("Could not determine project for file.");
+        }
+
+        var projectDirectory = Path.GetDirectoryName(projectPath)!;
+        var projectId = new ProjectId(StableId(projectPath));
+        var project = new Project(projectId, repositoryId, Path.GetFileNameWithoutExtension(projectPath), RelativePath(rootPath, projectPath));
+        var file = new DomainFile(fileId, project.Id, RelativePath(rootPath, absolutePath));
+        await _repositoryStore.UpsertFileAsync(file, cancellationToken);
+
+        var parsed = _languageParser.Parse(absolutePath, await System.IO.File.ReadAllTextAsync(absolutePath, cancellationToken));
+        if (!string.IsNullOrWhiteSpace(parsed.Namespace))
+        {
+            var namespaceId = new NamespaceId(StableId($"{absolutePath}:{parsed.Namespace}"));
+            await _repositoryStore.UpsertNamespaceAsync(new Namespace(namespaceId, file.Id, parsed.Namespace!), cancellationToken);
+
+            foreach (var type in parsed.Types)
+            {
+                var typeId = new TypeId(StableId($"{absolutePath}:{parsed.Namespace}:{type.Name}"));
+                await _repositoryStore.UpsertTypeAsync(new Ecp.Domain.Type(typeId, namespaceId, type.Name), cancellationToken);
+                await _symbolStore.UpsertSymbolAsync(new Symbol(
+                    StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{parsed.Namespace}:{type.Name}").ToString(),
+                    repositoryId.Value.ToString(),
+                    projectId.Value.ToString(),
+                    fileId.Value.ToString(),
+                    namespaceId.Value.ToString(),
+                    type.Kind,
+                    type.Name,
+                    $"{parsed.Namespace}.{type.Name}",
+                    null), cancellationToken);
+
+                foreach (var method in type.Methods)
+                {
+                    await _repositoryStore.UpsertMethodAsync(new Method(new MethodId(StableId($"{typeId}:{method.Name}:{method.Signature}")), typeId, method.Name), cancellationToken);
+                    await _symbolStore.UpsertSymbolAsync(new Symbol(
+                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{parsed.Namespace}:{type.Name}:{method.Name}:{method.Signature}").ToString(),
+                        repositoryId.Value.ToString(),
+                        projectId.Value.ToString(),
+                        fileId.Value.ToString(),
+                        typeId.Value.ToString(),
+                        method.IsConstructor ? "Constructor" : "Method",
+                        method.Name,
+                        $"{parsed.Namespace}.{type.Name}.{method.Name}",
+                        method.Signature), cancellationToken);
+                }
+
+                await IndexCallersAsync(absolutePath, file.Id, parsed.Namespace, type.Name, type.Methods, cancellationToken);
+
+                foreach (var property in type.Properties)
+                {
+                    await _repositoryStore.UpsertPropertyAsync(new Property(new PropertyId(StableId($"{typeId}:{property.Name}")), typeId, property.Name), cancellationToken);
+                    await _symbolStore.UpsertSymbolAsync(new Symbol(
+                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{parsed.Namespace}:{type.Name}:{property.Name}").ToString(),
+                        repositoryId.Value.ToString(),
+                        projectId.Value.ToString(),
+                        fileId.Value.ToString(),
+                        typeId.Value.ToString(),
+                        "Property",
+                        property.Name,
+                        $"{parsed.Namespace}.{type.Name}.{property.Name}",
+                        property.Type), cancellationToken);
+                }
+
+                foreach (var field in type.Fields)
+                {
+                    await _repositoryStore.UpsertFieldAsync(new Field(new FieldId(StableId($"{typeId}:{field.Name}")), typeId, field.Name), cancellationToken);
+                    await _symbolStore.UpsertSymbolAsync(new Symbol(
+                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{parsed.Namespace}:{type.Name}:{field.Name}").ToString(),
+                        repositoryId.Value.ToString(),
+                        projectId.Value.ToString(),
+                        fileId.Value.ToString(),
+                        typeId.Value.ToString(),
+                        "Field",
+                        field.Name,
+                        $"{parsed.Namespace}.{type.Name}.{field.Name}",
+                        field.Type), cancellationToken);
+                }
+            }
+        }
+    }
+
     private static bool IsNotIgnored(string path)
         => !path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(segment => IgnoredDirectories.Contains(segment));
 

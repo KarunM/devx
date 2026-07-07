@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "fcd118e1-4981-4a64-8821-f2aef798411b",
+    "createdUtc": "2026-07-07T09:44:34.1753230\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "v-amb.cs"
+    ],
+    "operationHashes": [
+      "fa72301bd72b74810ddacbfbac28837b94de19329aff988ee83948b16bf29052"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "CreateFile",
+      "path": "v-amb.cs",
+      "content": "public static class AmbSample\n{\n    public static int Dup() { return 1; }\n    public static int Dup() { return 2; }\n}\n"
+    }
+  ]
+}

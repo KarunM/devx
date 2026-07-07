@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using System.Security.Cryptography;
 using Ecp.Domain;
 using Ecp.Cli;
@@ -33,7 +35,12 @@ static async Task<int> RunAsync(string[] args)
                 return await IndexStatusAsync(connectionString, args, format);
             }
 
-            if (args.Length < 2)
+            if (args.Length >= 2 && args[1] == "update")
+            {
+                return await IndexUpdateAsync(connectionString, args, format);
+            }
+
+            if (args.Length < 2 || args[1].StartsWith("--", StringComparison.Ordinal))
             {
                 Console.Error.WriteLine("Missing repository path.");
                 return 1;
@@ -84,6 +91,12 @@ static async Task<int> RunAsync(string[] args)
         case "report":
             return await ReportAsync(connectionString, args, format);
 
+        case "ask":
+            return await AskAsync(connectionString, args, format);
+
+        case "capabilities":
+            return await CapabilitiesAsync(connectionString, args, format);
+
         default:
             Console.Error.WriteLine($"Unknown command '{command}'.");
             return 1;
@@ -99,6 +112,50 @@ static async Task IndexAsync(string connectionString, string repositoryPath)
     await indexer.IndexAsync(repositoryPath);
     await store.AddOperationMetricAsync(new OperationMetric("index", started, DateTimeOffset.UtcNow - started, true, null));
     Console.WriteLine("Indexed repository.");
+}
+
+static async Task<int> IndexUpdateAsync(string connectionString, string[] args, string format)
+{
+    if (args.Length < 3)
+    {
+        Console.Error.WriteLine("Usage: ecp index update <file> --session <id>");
+        return 1;
+    }
+
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    var filePath = args[2];
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var session = await store.GetSessionAsync(new GetSessionRequest(new SessionId(Guid.Parse(sessionId))));
+    if (session is null)
+    {
+        Console.Error.WriteLine("Session not found.");
+        return 1;
+    }
+
+    var root = await store.GetRepositoryRootPathAsync(session.RepositoryId);
+    var repositoryRoot = root ?? Environment.CurrentDirectory;
+    var indexer = new RepositoryIndexingService(store);
+    var started = DateTimeOffset.UtcNow;
+    await indexer.ReindexFileAsync(repositoryRoot, filePath);
+    await store.AddOperationMetricAsync(new OperationMetric("index update", started, DateTimeOffset.UtcNow - started, true, sessionId));
+
+    if (format == "json")
+    {
+        Console.WriteLine(JsonSerializer.Serialize(new { Success = true, File = filePath }));
+    }
+    else
+    {
+        Console.WriteLine("Updated file index.");
+    }
+
+    return 0;
 }
 
 static async Task<int> IndexStatusAsync(string connectionString, string[] args, string format)
@@ -222,8 +279,13 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
 {
     if (args.Length < 3)
     {
-        Console.Error.WriteLine("Usage: ecp patch <apply|preview> <patch-file> --session <id>");
+        Console.Error.WriteLine("Usage: ecp patch <create|apply|preview|validate|rollback> <patch-file> --session <id>");
         return 1;
+    }
+
+    if (args[1] == "create")
+    {
+        return await PatchCreateAsync(connectionString, args, format);
     }
 
     if (args[1] == "validate")
@@ -247,11 +309,17 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
         return 1;
     }
 
-    var patchPath = args[2];
+    var patchPath = GetPatchPath(args);
     var sessionId = GetOption(args, "--session");
     if (sessionId is null)
     {
         Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    if (patchPath is null)
+    {
+        Console.Error.WriteLine("Missing patch file.");
         return 1;
     }
 
@@ -268,6 +336,9 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
     return response.Success ? 0 : 1;
 }
 
+static async Task<int> PatchCreateAsync(string connectionString, string[] args, string format)
+    => await Ecp.Cli.PatchCreateCommand.RunAsync(connectionString, args, format);
+
 static async Task<int> PatchPreviewAsync(string connectionString, string[] args, string format)
 {
     if (args.Length < 3)
@@ -276,11 +347,17 @@ static async Task<int> PatchPreviewAsync(string connectionString, string[] args,
         return 1;
     }
 
-    var patchPath = args[2];
+    var patchPath = GetPatchPath(args);
     var sessionId = GetOption(args, "--session");
     if (sessionId is null)
     {
         Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    if (patchPath is null)
+    {
+        Console.Error.WriteLine("Missing patch file.");
         return 1;
     }
 
@@ -305,11 +382,17 @@ static async Task<int> PatchValidateAsync(string connectionString, string[] args
         return 1;
     }
 
-    var patchPath = args[2];
+    var patchPath = GetPatchPath(args);
     var sessionId = GetOption(args, "--session");
     if (sessionId is null)
     {
         Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    if (patchPath is null)
+    {
+        Console.Error.WriteLine("Missing patch file.");
         return 1;
     }
 
@@ -334,11 +417,17 @@ static async Task<int> PatchRollbackAsync(string connectionString, string[] args
         return 1;
     }
 
-    var patchPath = args[2];
+    var patchPath = GetPatchPath(args);
     var sessionId = GetOption(args, "--session");
     if (sessionId is null)
     {
         Console.Error.WriteLine("Missing --session.");
+        return 1;
+    }
+
+    if (patchPath is null)
+    {
+        Console.Error.WriteLine("Missing patch file.");
         return 1;
     }
 
@@ -704,6 +793,407 @@ static async Task<int> ReportAsync(string connectionString, string[] args, strin
     return 0;
 }
 
+static async Task<int> AskAsync(string connectionString, string[] args, string format)
+{
+    var useSandbox = args.Contains("--sandbox");
+    var traceAsk = HasFlag(args, "--trace-ask") || HasFlag(args, "--debug-ask");
+    var useContextWorkflow = HasFlag(args, "--context-workflow");
+
+    var promptBuilder = new System.Text.StringBuilder();
+    for (var i = 1; i < args.Length; i++)
+    {
+        if (args[i] is "--session" or "--format" or "--sandbox" || (i > 1 && args[i - 1] == "--session") || (i > 1 && args[i - 1] == "--format"))
+        {
+            if (args[i] is "--session" or "--format")
+            {
+                i++;
+            }
+            continue;
+        }
+        if (promptBuilder.Length > 0) promptBuilder.Append(' ');
+        promptBuilder.Append(args[i]);
+    }
+
+    var userPrompt = promptBuilder.ToString().Trim();
+    if (string.IsNullOrWhiteSpace(userPrompt))
+    {
+        Console.WriteLine("Enter your prompt (Ctrl+D to finish):");
+        userPrompt = await Console.In.ReadToEndAsync();
+    }
+
+    if (string.IsNullOrWhiteSpace(userPrompt))
+    {
+        Console.Error.WriteLine("Prompt is required.");
+        return 1;
+    }
+
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+
+    if (useContextWorkflow)
+    {
+        var bootstrap = await AskBootstrap.InitializeAsync(connectionString);
+        Console.WriteLine("phase=Bootstrap");
+        Console.WriteLine($"index_created={bootstrap.IndexCreated.ToString().ToLowerInvariant()}");
+        Console.WriteLine($"session_created={bootstrap.SessionCreated.ToString().ToLowerInvariant()}");
+        Console.WriteLine($"session_reused={(!bootstrap.SessionCreated).ToString().ToLowerInvariant()}");
+        Console.WriteLine("phase=RepoMap");
+
+        using var contextLlm = LlmClientFactory.Create(LoadLlmConfig(Environment.CurrentDirectory) ?? new LlmConfig("mlx-lm", "mlx-community/Qwen3-8B-4bit", "http://localhost:8080", 0.7, 8192, 8192, 4000, 8));
+        var contextEngine = new ProtocolEngine(new SearchService(store, (ISymbolStore)store), (ISessionStore)store, store);
+        var contextWorkflow = new AskContextWorkflow(contextLlm, contextEngine, traceAsk);
+        var contextResult = await contextWorkflow.RunAsync(userPrompt, bootstrap.RepoMap, bootstrap.Session);
+        Console.WriteLine();
+        if (contextResult is null || !contextResult.Success || contextResult.SourceBlocks is null || contextResult.SourceBlocks.Count == 0)
+        {
+            var summary = contextResult?.Summary ?? "Context workflow failed.";
+            if (!string.IsNullOrWhiteSpace(contextResult?.FailureReason))
+            {
+                summary = $"{summary} reason={contextResult.FailureReason}";
+            }
+
+            Console.WriteLine($"Completed: {summary}");
+            return 1;
+        }
+        if (!string.IsNullOrWhiteSpace(contextResult.Summary))
+        {
+            Console.WriteLine($"Completed: {contextResult.Summary}");
+        }
+        if (!string.IsNullOrWhiteSpace(contextResult.EditProposal))
+        {
+            Console.WriteLine("Context workflow complete; model produced an edit proposal.");
+            Console.WriteLine("Proposal:");
+            Console.WriteLine(contextResult.EditProposal);
+            return 0;
+        }
+
+        var editLlm = LlmClientFactory.Create(LoadLlmConfig(Environment.CurrentDirectory) ?? new LlmConfig("mlx-lm", "mlx-community/Qwen3-8B-4bit", "http://localhost:8080", 0.7, 8192, 8192, 4000, 8));
+        var editWorkflow = new AskEditWorkflow(editLlm, traceAsk);
+        if (traceAsk)
+        {
+            Console.WriteLine("edit_workflow_start");
+        }
+        var editResult = await editWorkflow.RunAsync(userPrompt, contextResult, Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "src/Ecp.Cli/Program.cs")));
+        Console.WriteLine();
+        Console.WriteLine($"Completed: {editResult.Summary}");
+        return editResult.Success ? 0 : 1;
+    }
+
+    var sessionResolution = await ResolveSessionAsync(connectionString, args, allowCreate: true, allowReuse: true);
+    var session = sessionResolution.Session;
+    if (session is null)
+    {
+        Console.Error.WriteLine(sessionResolution.ErrorMessage ?? "Session not found.");
+        return 1;
+    }
+
+    var root = await store.GetRepositoryRootPathAsync(session.RepositoryId);
+    var repositoryRoot = root ?? Environment.CurrentDirectory;
+    var llmConfig = LoadLlmConfig(repositoryRoot) ?? new LlmConfig("mlx-lm", "mlx-community/Qwen3-8B-4bit", "http://localhost:8080", 0.7, 8192, 8192, 4000, 8);
+    llmConfig = ApplyEnvOverrides(llmConfig);
+
+    SandboxManager? sandbox = null;
+    IRepositoryStore effectiveStore = store;
+    string effectiveRoot = repositoryRoot;
+
+    if (useSandbox)
+    {
+        sandbox = new SandboxManager(repositoryRoot);
+        sandbox.CopySourceTree();
+        effectiveStore = new SandboxRepositoryStore(store, sandbox.SandboxRoot);
+        effectiveRoot = sandbox.SandboxRoot;
+        Console.WriteLine($"Sandbox: {sandbox.SandboxRoot}");
+    }
+
+    var launchConfig = CreateServerLaunchConfig(llmConfig);
+    using var serverManager = new LlmServerManager(llmConfig, launchConfig);
+    try
+    {
+        await serverManager.EnsureRunningAsync();
+    }
+    catch (Exception ex)
+    {
+        WriteAskFailure(format, ex, serverManager.GetDiagnostics(), llmConfig.Endpoint);
+        return 1;
+    }
+
+    using var llm = LlmClientFactory.Create(llmConfig);
+    var engine = new ProtocolEngine(
+        new SearchService(effectiveStore, (ISymbolStore)effectiveStore),
+        (ISessionStore)effectiveStore,
+        effectiveStore);
+    var orchestrator = new AskOrchestrator(llm, engine, llmConfig, useSandbox ? sandbox?.SandboxRoot : null);
+    var started = DateTimeOffset.UtcNow;
+
+    Console.WriteLine("═══════════════════════════════════════════════════");
+    Console.WriteLine("  ECP Ask — LLM-driven code orchestration");
+    Console.WriteLine($"  Provider: {llmConfig.Provider} ({llmConfig.Model})");
+    if (useSandbox) Console.WriteLine("  Mode: SANDBOX");
+    Console.WriteLine("═══════════════════════════════════════════════════");
+    Console.WriteLine();
+    Console.WriteLine($">>> User: {userPrompt}");
+    Console.WriteLine();
+
+    var turnIndex = 0;
+    orchestrator.OnTurn += (sender, turn) =>
+    {
+        turnIndex++;
+        if (turn.Role == "assistant" && turn.ToolName == "done")
+        {
+            Console.WriteLine();
+            Console.WriteLine("═══════════════════════════════════════════════════");
+            Console.WriteLine($"  DONE: {turn.Content}");
+            Console.WriteLine("═══════════════════════════════════════════════════");
+        }
+        else if (turn.Role == "assistant" && turn.ToolName is not null)
+        {
+            Console.WriteLine($"\n  [Turn {turnIndex}] 🤖 LLM → Tool call: {turn.ToolName}");
+            var thoughtMatch = Regex.Match(turn.Content, @"Thought:\s*(.+?)(?:\n|$)", RegexOptions.Singleline);
+            if (thoughtMatch.Success)
+            {
+                Console.WriteLine($"             💭 {thoughtMatch.Groups[1].Value.Trim()}");
+            }
+        }
+        else if (turn.Role == "tool")
+        {
+            if (turn.ToolName == "patch_apply")
+            {
+                var success = turn.Content.Contains("\"Success\":true") || turn.Content.Contains("\"success\":true");
+                var status = success ? "✅ PATCH APPLIED" : "❌ PATCH FAILED";
+                Console.WriteLine($"  [Turn {turnIndex}] 🔧 ECP → {status}");
+            }
+            else if (turn.ToolName == "build")
+            {
+                var success = turn.Content.Contains("\"Success\":true") || turn.Content.Contains("\"success\":true");
+                var status = success ? "✅ BUILD PASSED" : "❌ BUILD FAILED";
+                Console.WriteLine($"  [Turn {turnIndex}] 🔧 ECP → {status}");
+            }
+            else if (turn.ToolName == "test")
+            {
+                var success = turn.Content.Contains("\"Success\":true") || turn.Content.Contains("\"success\":true");
+                var status = success ? "✅ TESTS PASSED" : "❌ TESTS FAILED";
+                Console.WriteLine($"  [Turn {turnIndex}] 🔧 ECP → {status}");
+            }
+            else
+            {
+                Console.WriteLine($"  [Turn {turnIndex}] 🔧 ECP → Result for {turn.ToolName} received");
+            }
+        }
+        else if (turn.Role == "assistant")
+        {
+            var thoughtMatch = Regex.Match(turn.Content, @"Thought:\s*(.+?)(?:\n|$)", RegexOptions.Singleline);
+            if (thoughtMatch.Success)
+            {
+                Console.WriteLine($"\n  [Turn {turnIndex}] 🤖 LLM → 💭 {thoughtMatch.Groups[1].Value.Trim()}");
+            }
+        }
+    };
+
+    AskResult askResult;
+    try
+    {
+        askResult = await orchestrator.RunAsync(userPrompt, session);
+    }
+    catch (Exception ex)
+    {
+        WriteAskFailure(format, ex, serverManager.GetDiagnostics(), llmConfig.Endpoint);
+        return 1;
+    }
+    await store.AddOperationMetricAsync(new OperationMetric("ask", started, DateTimeOffset.UtcNow - started, askResult.Success, session.Id.Value.ToString()));
+
+    Console.WriteLine();
+    Console.WriteLine($"Completed: {askResult.Summary}");
+
+    if (useSandbox && sandbox is not null)
+    {
+        var changedFiles = sandbox.GetChangedFiles();
+        if (changedFiles.Count > 0)
+        {
+            Console.WriteLine();
+            Console.WriteLine("═══════════════════════════════════════════════════");
+            Console.WriteLine("  CHANGED FILES IN SANDBOX");
+            Console.WriteLine("═══════════════════════════════════════════════════");
+            foreach (var file in changedFiles)
+            {
+                Console.WriteLine($"  {file}");
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("Apply changes to real codebase? [y/N]: ");
+            var response = Console.ReadLine()?.Trim().ToLowerInvariant();
+            if (response == "y" || response == "yes")
+            {
+                sandbox.ApplyChanges();
+                Console.WriteLine("✅ Changes applied to real codebase.");
+            }
+            else
+            {
+                Console.WriteLine("❌ Changes discarded.");
+            }
+        }
+        else
+        {
+            Console.WriteLine("No files were changed.");
+        }
+        sandbox.Dispose();
+    }
+
+    return askResult.Success ? 0 : 1;
+}
+
+static async Task<int> CapabilitiesAsync(string connectionString, string[] args, string format)
+{
+    var response = CapabilitiesComposer.Compose();
+
+    if (format == "json")
+    {
+        Console.WriteLine(JsonSerializer.Serialize(response));
+        return 0;
+    }
+
+    Console.WriteLine("ECP Capabilities");
+    Console.WriteLine($"Version: {response.Version}");
+    Console.WriteLine();
+    Console.WriteLine("Global Options:");
+    foreach (var option in response.GlobalOptions)
+    {
+        Console.WriteLine($"  --{option.Name}: {option.Description} (default: {option.Default}, required: {option.Required})");
+    }
+    Console.WriteLine();
+    Console.WriteLine("Commands:");
+    foreach (var command in response.Commands)
+    {
+        Console.WriteLine($"  {command.Name}: {command.Description}");
+        Console.WriteLine($"    Usage: {command.Usage}");
+        if (command.Subcommands.Length > 0)
+        {
+            Console.WriteLine($"    Subcommands: {string.Join(", ", command.Subcommands.Select(s => s.Name))}");
+        }
+        if (command.Args.Length > 0)
+        {
+            Console.WriteLine($"    Args: {string.Join(", ", command.Args)}");
+        }
+        if (command.Options.Length > 0)
+        {
+            Console.WriteLine($"    Options: {string.Join(", ", command.Options)}");
+        }
+    }
+    return 0;
+}
+
+static LlmConfig? LoadLlmConfig(string repositoryRoot)
+{
+    var configPath = Path.Combine(repositoryRoot, ".ecp", "config.json");
+    if (!IOFile.Exists(configPath))
+    {
+        return null;
+    }
+
+    try
+    {
+        var json = IOFile.ReadAllText(configPath);
+        using var doc = JsonDocument.Parse(json);
+        if (!doc.RootElement.TryGetProperty("llm", out var llmElement))
+        {
+            return null;
+        }
+
+        var provider = llmElement.GetProperty("provider").GetString() ?? "ollama";
+        var model = llmElement.GetProperty("model").GetString() ?? "qwen2.5-coder";
+        var endpoint = llmElement.GetProperty("endpoint").GetString() ?? "http://localhost:11434";
+        var temperature = 0.7;
+        var maxTokens = 8192;
+        var contextWindow = 8192;
+        var maxToolResultLength = 4000;
+        var conversationWindow = 8;
+        if (llmElement.TryGetProperty("temperature", out var tempElement) && tempElement.ValueKind == JsonValueKind.Number)
+        {
+            temperature = tempElement.GetDouble();
+        }
+        if (llmElement.TryGetProperty("maxTokens", out var maxTokensElement) && maxTokensElement.ValueKind == JsonValueKind.Number)
+        {
+            maxTokens = maxTokensElement.GetInt32();
+        }
+        if (llmElement.TryGetProperty("contextWindow", out var cwElement) && cwElement.ValueKind == JsonValueKind.Number)
+        {
+            contextWindow = cwElement.GetInt32();
+        }
+        if (llmElement.TryGetProperty("maxToolResultLength", out var mtrlElement) && mtrlElement.ValueKind == JsonValueKind.Number)
+        {
+            maxToolResultLength = mtrlElement.GetInt32();
+        }
+        if (llmElement.TryGetProperty("conversationWindow", out var convwElement) && convwElement.ValueKind == JsonValueKind.Number)
+        {
+            conversationWindow = convwElement.GetInt32();
+        }
+        return new LlmConfig(provider, model, endpoint, temperature, maxTokens, contextWindow, maxToolResultLength, conversationWindow);
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+static LlmConfig ApplyEnvOverrides(LlmConfig config)
+{
+    var provider = Environment.GetEnvironmentVariable("OLLAMA_PROVIDER") ?? config.Provider;
+    var model = Environment.GetEnvironmentVariable("OLLAMA_MODEL") ?? config.Model;
+    var endpoint = Environment.GetEnvironmentVariable("OLLAMA_ENDPOINT") ?? config.Endpoint;
+    var maxTokensStr = Environment.GetEnvironmentVariable("OLLAMA_MAX_TOKENS");
+    var maxTokens = int.TryParse(maxTokensStr, out var parsed) ? parsed : config.MaxTokens;
+    var contextWindowStr = Environment.GetEnvironmentVariable("OLLAMA_CONTEXT_WINDOW");
+    var contextWindow = int.TryParse(contextWindowStr, out var cwParsed) ? cwParsed : config.ContextWindow;
+    var maxToolResultLengthStr = Environment.GetEnvironmentVariable("OLLAMA_MAX_TOOL_RESULT_LENGTH");
+    var maxToolResultLength = int.TryParse(maxToolResultLengthStr, out var mtrlParsed) ? mtrlParsed : config.MaxToolResultLength;
+    var conversationWindowStr = Environment.GetEnvironmentVariable("OLLAMA_CONVERSATION_WINDOW");
+    var conversationWindow = int.TryParse(conversationWindowStr, out var convwParsed) ? convwParsed : config.ConversationWindow;
+    return config with { Provider = provider, Model = model, Endpoint = endpoint, MaxTokens = maxTokens, ContextWindow = contextWindow, MaxToolResultLength = maxToolResultLength, ConversationWindow = conversationWindow };
+}
+
+static LlmServerLaunchConfig CreateServerLaunchConfig(LlmConfig config)
+{
+    if (config.Provider.Equals("mlx", StringComparison.OrdinalIgnoreCase) || config.Provider.Equals("mlx-lm", StringComparison.OrdinalIgnoreCase))
+    {
+        return new LlmServerLaunchConfig(
+            "mlx_lm.server",
+            ["--model", "mlx-community/Qwen3-8B-4bit", "--port", "8080"],
+            "v1/models",
+            180,
+            1000);
+    }
+
+    if (config.Provider.Equals("ollama", StringComparison.OrdinalIgnoreCase))
+    {
+        return new LlmServerLaunchConfig(
+            "ollama",
+            ["serve"],
+            "api/tags",
+            60,
+            1000);
+    }
+
+    return new LlmServerLaunchConfig(string.Empty, Array.Empty<string>(), "v1/models", 1, 1000);
+}
+
+static void WriteAskFailure(string format, Exception exception, LlmServerStartupDiagnostics diagnostics, string endpoint, OpenAiMessage? assistantMessage = null, object? usage = null)
+{
+    if (format == "json")
+    {
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            Success = false,
+            Error = exception.Message,
+            Diagnostics = diagnostics with { FinalFailureReason = exception.Message },
+            AssistantMessage = assistantMessage,
+            Usage = usage
+        }));
+        return;
+    }
+
+    Console.Error.WriteLine($"Failed to start or connect to the local LLM server: {exception.Message}");
+    Console.Error.WriteLine($"Expected endpoint: {endpoint}");
+}
+
 static string? GetOption(string[] args, string name)
 {
     for (var i = 0; i < args.Length - 1; i++)
@@ -712,6 +1202,96 @@ static string? GetOption(string[] args, string name)
         {
             return args[i + 1];
         }
+    }
+
+    return null;
+}
+
+static async Task<(SessionState? Session, string? ErrorMessage, bool Reused, bool Created)> ResolveSessionAsync(string connectionString, string[] args, bool allowCreate, bool allowReuse)
+{
+    var explicitSessionId = GetOption(args, "--session");
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+
+    if (!string.IsNullOrWhiteSpace(explicitSessionId))
+    {
+        var explicitSession = await store.GetSessionAsync(new GetSessionRequest(new SessionId(Guid.Parse(explicitSessionId))));
+        return explicitSession is null
+            ? (null, "Session not found.", false, false)
+            : (explicitSession, null, false, false);
+    }
+
+    var repositoryRoot = Path.GetFullPath(Environment.CurrentDirectory);
+    var repository = await store.GetRepositoryByRootPathAsync(repositoryRoot);
+    if (repository is null)
+    {
+        return (null, "Repository has not been indexed yet.", false, false);
+    }
+
+    if (allowReuse)
+    {
+        var activeSession = await GetActiveSessionAsync(store, repository.Id);
+        if (activeSession is not null)
+        {
+            Console.WriteLine($"Auto-reused active session: {activeSession.Id.Value}");
+            return (activeSession, null, true, false);
+        }
+    }
+
+    if (!allowCreate)
+    {
+        return (null, "No active session available.", false, false);
+    }
+
+    var created = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+    await SetActiveSessionAsync(store, repository.Id, created.Id.Value.ToString());
+    Console.WriteLine($"Auto-created active session: {created.Id.Value}");
+    return (created, null, false, true);
+}
+
+static async Task<SessionState?> GetActiveSessionAsync(SqliteStorageInitializer store, RepositoryId repositoryId)
+{
+    var path = GetActiveSessionPath(repositoryId);
+    if (!IOFile.Exists(path))
+    {
+        return null;
+    }
+
+    var sessionIdText = (await IOFile.ReadAllTextAsync(path)).Trim();
+    if (string.IsNullOrWhiteSpace(sessionIdText) || !Guid.TryParse(sessionIdText, out var sessionGuid))
+    {
+        return null;
+    }
+
+    return await store.GetSessionAsync(new GetSessionRequest(new SessionId(sessionGuid)));
+}
+
+static async Task SetActiveSessionAsync(SqliteStorageInitializer store, RepositoryId repositoryId, string sessionId)
+{
+    var path = GetActiveSessionPath(repositoryId);
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    await IOFile.WriteAllTextAsync(path, sessionId);
+}
+
+static string GetActiveSessionPath(RepositoryId repositoryId)
+{
+    return Path.Combine(".ecp", "current-session", repositoryId.Value.ToString(), "active");
+}
+
+static string? GetPatchPath(string[] args)
+{
+    for (var i = 2; i < args.Length; i++)
+    {
+        if (args[i].StartsWith("--", StringComparison.Ordinal))
+        {
+            if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+            {
+                i++;
+            }
+            continue;
+        }
+
+        return args[i];
     }
 
     return null;
@@ -739,11 +1319,52 @@ static void WriteResponse(ProtocolResponse response, string format)
 
 static void PrintHelp()
 {
+    Console.WriteLine(@"
+Usage:
+  ecp ask <command> [options]
+    --context-workflow  Use context workflow for ask command
+    --debug-ask         Enable debug output for ask command
+
+Global Options:
+  --help               Show help
+  --version            Show version
+  --debug-ask          Enable debug output for ask command
+");
+}
+
+static void PrintUsage()
+{
     Console.WriteLine("""
-        ecp index <path>
-        ecp search symbol <query> --session <id>
-        ecp search text <query> --session <id>
-        ecp snapshot <file> --session <id>
-        ecp session create
+        ecp <command> [options]
+
+        Commands:
+          ecp ask <prompt> --session <id> [--sandbox]    Ask the LLM to orchestrate code changes
+          ecp index <path>                              Index a repository
+          ecp index status [--session <id>]               Check index status
+          ecp index update <file> --session <id>          Re-index a single file
+          ecp search symbol <query> --session <id>        Search symbols
+          ecp search text <query> --session <id>          Search text
+          ecp snapshot <file> --session <id>              Get file snapshot
+          ecp session create                              Create a new session
+          ecp patch <apply|preview|validate|rollback> <patch-file> --session <id>
+                                                          Apply/manage patches
+          ecp build --session <id>                      Build the solution
+          ecp test --session <id>                       Run tests
+          ecp diagnostics --session <id>                Get diagnostics
+          ecp method <summary|get> <method> --session <id>
+                                                          Get method info
+          ecp type get <type> --session <id>            Get type info
+          ecp callers <method> --session <id>            Get callers
+          ecp callees <method> --session <id>            Get callees
+          ecp references <symbol> --session <id>          Get references
+          ecp read <file|method|type> <target> --session <id> [--range start:end|--full]
+                                                          Read source
+          ecp report --session <id>                     Generate session report
+          ecp capabilities [--format json]                List all capabilities
+
+        Global Options:
+          --format <json|text>    Output format (default: text)
+          --session <id>          Session identifier
+          --sandbox               Run Ask in sandbox mode (changes not applied until approved)
         """);
 }

@@ -1,0 +1,23 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "bd7643e1-0d30-42c1-9ba9-2f2dd10cb920",
+    "createdUtc": "2026-07-07T09:45:01.9958360\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "v-nf.cs"
+    ],
+    "operationHashes": [
+      "d5f091748810c7ff1750a9b28c648afe9b6de89ee9f688970bef1ae3d9a6d5b4"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "ReplaceMethod",
+      "path": "v-nf.cs",
+      "methodName": "Foo",
+      "replacementText": "    public static int Foo() { return 5; }"
+    }
+  ]
+}

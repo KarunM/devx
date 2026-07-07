@@ -1,0 +1,23 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "b71d35a7-cc56-42db-80d7-f864c95d6944",
+    "createdUtc": "2026-07-07T09:36:52.7484830\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "cert-ambig.cs"
+    ],
+    "operationHashes": [
+      "e5d35d9d7f091f9fbb9daa9221aedb8f593a23069ea3e7c82a698d1af2a0afa3"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "ReplaceMethod",
+      "path": "cert-ambig.cs",
+      "methodName": "Dup",
+      "replacementText": "    public static int Dup() { return 99; }"
+    }
+  ]
+}
