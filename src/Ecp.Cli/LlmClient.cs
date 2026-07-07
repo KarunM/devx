@@ -14,6 +14,68 @@ public interface ILlmClient : IDisposable
     Task<string> CompleteAsync(string prompt, CancellationToken cancellationToken = default);
 }
 
+public sealed record OpenAiChatMessage(
+    string Role,
+    string Content);
+
+public static class EcpAskPrompt
+{
+    public static string BuildSystemPrompt()
+    {
+        return "You are an ECP-native coding assistant.\n\n" +
+            "ECP owns discovery, source reading, patch creation/application, build, test, diagnostics, report, and completion.\n" +
+            "The LLM owns requirement understanding, analysis, code-change proposals, and repair suggestions.\n\n" +
+            "Return only valid JSON.\n\n" +
+            "When ECP asks for analysis, return:\n" +
+            "{\n" +
+            "  \"kind\": \"analysis\",\n" +
+            "  \"understanding\": \"...\",\n" +
+            "  \"relevantFiles\": [],\n" +
+            "  \"relevantSymbols\": [],\n" +
+            "  \"commandDispatchSummary\": \"...\",\n" +
+            "  \"likelyEditLocation\": \"...\",\n" +
+            "  \"questionsOrMissingContext\": []\n" +
+            "}\n\n" +
+            "When you need to propose code changes, return a structured change proposal like:\n" +
+            "{\n" +
+            "  \"kind\": \"change_proposal\",\n" +
+            "  \"summary\": \"Add a health command to the CLI.\",\n" +
+            "  \"changes\": [\n" +
+            "    {\n" +
+            "      \"path\": \"src/Ecp.Cli/Program.cs\",\n" +
+            "      \"operation\": \"ReplaceMethod\",\n" +
+            "      \"target\": \"RunAsync\",\n" +
+            "      \"replacement\": \"...\"\n" +
+            "    }\n" +
+            "  ],\n" +
+            "  \"testsToAddOrUpdate\": [],\n" +
+            "  \"notes\": []\n" +
+            "}\n\n" +
+            "Do not describe ECP tool calls.\n" +
+            "Do not claim completion.\n" +
+            "Do not invent tools.\n\n" +
+            "If you cannot proceed safely, return a blocker with the missing context.\n\n" +
+            "Final response only:\n" +
+            "{\n" +
+            "  \"finished\": true,\n" +
+            "  \"summary\": \"...\",\n" +
+            "  \"filesModified\": [],\n" +
+            "  \"filesCreated\": [],\n" +
+            "  \"verificationCommands\": [],\n" +
+            "  \"remainingLimitations\": []\n" +
+            "}";
+    }
+
+    public static List<OpenAiMessage> BuildMessages(string userPrompt)
+    {
+        return new List<OpenAiMessage>
+        {
+            new("system", BuildSystemPrompt()),
+            new("user", userPrompt)
+        };
+    }
+}
+
 public sealed record LlmConfig(
     string Provider,
     string Model,
@@ -416,6 +478,10 @@ public sealed class OpenAiClient : ILlmClient, IDisposable
     public async Task<OpenAiCompletionResult> CompleteWithMetadataAsync(string prompt, CancellationToken cancellationToken = default)
     {
         var messages = LlmMessageFormatter.ParseTaggedPrompt(prompt);
+        if (messages.Count == 1 && messages[0].Role == "user")
+        {
+            messages.Insert(0, new OpenAiMessage("system", EcpAskPrompt.BuildSystemPrompt()));
+        }
 
         var request = new OpenAiRequest(
             _config.Model,

@@ -913,6 +913,21 @@ public sealed class ProtocolEngine : IProtocolEngine
                 errors.Add(new ProtocolDiagnostic("ValidationError", "ReplaceMethod requires replacementText."));
             }
 
+            if (operation.Operation.Equals("ReplaceMethod", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(operation.MethodName) && IOFile.Exists(absolutePath))
+            {
+                var replaceMethodText = IOFile.ReadAllText(absolutePath);
+                var replaceMethodPattern = $@"(?m)^[ \t]*(?:public|private|protected|internal|static|async|sealed|override|partial|virtual|extern|unsafe|new|readonly|ref)[^\n]*\b{System.Text.RegularExpressions.Regex.Escape(operation.MethodName)}\b[^\n]*$";
+                var replaceMethodMatches = System.Text.RegularExpressions.Regex.Matches(replaceMethodText, replaceMethodPattern).Count;
+                if (replaceMethodMatches == 0)
+                {
+                    errors.Add(new ProtocolDiagnostic("ValidationError", $"ReplaceMethod target [{operation.MethodName}] was not found in [{operation.Path}]."));
+                }
+                else if (replaceMethodMatches > 1)
+                {
+                    errors.Add(new ProtocolDiagnostic("ValidationError", $"ReplaceMethod target [{operation.MethodName}] is ambiguous in [{operation.Path}] ({replaceMethodMatches} matches)."));
+                }
+            }
+
             if (operation.Operation.Equals("InsertMethod", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(operation.MethodText))
             {
                 errors.Add(new ProtocolDiagnostic("ValidationError", "InsertMethod requires methodText."));

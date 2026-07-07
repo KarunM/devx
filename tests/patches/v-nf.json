@@ -1,0 +1,23 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "5977f371-a7c1-4fd1-bc86-07d2e5834264",
+    "createdUtc": "2026-07-07T09:44:46.0127640\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "v-nf.cs"
+    ],
+    "operationHashes": [
+      "84e5446ed02d6e53288513256caf77484ea0241adb83511447d7972c503ebca9"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "ReplaceMethod",
+      "path": "v-nf.cs",
+      "methodName": "Missing",
+      "replacementText": "    public static int Missing() { return 0; }"
+    }
+  ]
+}

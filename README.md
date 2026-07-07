@@ -46,5 +46,5 @@ Please keep changes focused and follow the existing solution structure under `sr
 
 
 ## Ask Session
-SESSION_ID=$(ecp session create --format json | jq -r '.sessionId')
-ecp ask "say hello and finish" --session "$SESSION_ID"
+export SESSION_ID=$(ecp session create --format json | jq -r '.sessionId')
+ecp ask "can you create a health command on cli tool" --session "$SESSION_ID"

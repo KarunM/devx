@@ -49,8 +49,8 @@ public sealed class LlmMessageFormatterTests
         var formatted = LlmMessageFormatter.FormatToolCalls(toolCalls);
 
         Assert.Contains("<tool_call>", formatted);
-        Assert.Contains("\"name\": \"search_symbol\"", formatted);
-        Assert.Contains("\"query\": \"Foo\"", formatted);
+        Assert.Contains("\"name\":\"search_symbol\"", formatted);
+        Assert.Contains("\"query\":\"Foo\"", formatted);
     }
 
     [Fact]

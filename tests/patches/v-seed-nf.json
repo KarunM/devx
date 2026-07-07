@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "9bb906c7-6f87-4db9-a4cc-e66fe43aa713",
+    "createdUtc": "2026-07-07T09:44:31.2578810\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "v-nf.cs"
+    ],
+    "operationHashes": [
+      "33e26626ec13788eaf8f3a26b48bb11df9a45bab7ba8a6538f1db3c472c1b51b"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "CreateFile",
+      "path": "v-nf.cs",
+      "content": "public static class NfSample\n{\n    public static int Foo() { return 1; }\n}\n"
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Security.Cryptography;
 using Ecp.Domain;
@@ -278,8 +279,13 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
 {
     if (args.Length < 3)
     {
-        Console.Error.WriteLine("Usage: ecp patch <apply|preview> <patch-file> --session <id>");
+        Console.Error.WriteLine("Usage: ecp patch <create|apply|preview|validate|rollback> <patch-file> --session <id>");
         return 1;
+    }
+
+    if (args[1] == "create")
+    {
+        return await PatchCreateAsync(connectionString, args, format);
     }
 
     if (args[1] == "validate")
@@ -329,6 +335,9 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
+
+static async Task<int> PatchCreateAsync(string connectionString, string[] args, string format)
+    => await Ecp.Cli.PatchCreateCommand.RunAsync(connectionString, args, format);
 
 static async Task<int> PatchPreviewAsync(string connectionString, string[] args, string format)
 {
@@ -788,6 +797,7 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
 {
     var useSandbox = args.Contains("--sandbox");
     var traceAsk = HasFlag(args, "--trace-ask") || HasFlag(args, "--debug-ask");
+    var useContextWorkflow = HasFlag(args, "--context-workflow");
 
     var promptBuilder = new System.Text.StringBuilder();
     for (var i = 1; i < args.Length; i++)
@@ -819,6 +829,56 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
 
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
+
+    if (useContextWorkflow)
+    {
+        var bootstrap = await AskBootstrap.InitializeAsync(connectionString);
+        Console.WriteLine("phase=Bootstrap");
+        Console.WriteLine($"index_created={bootstrap.IndexCreated.ToString().ToLowerInvariant()}");
+        Console.WriteLine($"session_created={bootstrap.SessionCreated.ToString().ToLowerInvariant()}");
+        Console.WriteLine($"session_reused={(!bootstrap.SessionCreated).ToString().ToLowerInvariant()}");
+        Console.WriteLine("phase=RepoMap");
+
+        using var contextLlm = LlmClientFactory.Create(LoadLlmConfig(Environment.CurrentDirectory) ?? new LlmConfig("mlx-lm", "mlx-community/Qwen3-8B-4bit", "http://localhost:8080", 0.7, 8192, 8192, 4000, 8));
+        var contextEngine = new ProtocolEngine(new SearchService(store, (ISymbolStore)store), (ISessionStore)store, store);
+        var contextWorkflow = new AskContextWorkflow(contextLlm, contextEngine, traceAsk);
+        var contextResult = await contextWorkflow.RunAsync(userPrompt, bootstrap.RepoMap, bootstrap.Session);
+        Console.WriteLine();
+        if (contextResult is null || !contextResult.Success || contextResult.SourceBlocks is null || contextResult.SourceBlocks.Count == 0)
+        {
+            var summary = contextResult?.Summary ?? "Context workflow failed.";
+            if (!string.IsNullOrWhiteSpace(contextResult?.FailureReason))
+            {
+                summary = $"{summary} reason={contextResult.FailureReason}";
+            }
+
+            Console.WriteLine($"Completed: {summary}");
+            return 1;
+        }
+        if (!string.IsNullOrWhiteSpace(contextResult.Summary))
+        {
+            Console.WriteLine($"Completed: {contextResult.Summary}");
+        }
+        if (!string.IsNullOrWhiteSpace(contextResult.EditProposal))
+        {
+            Console.WriteLine("Context workflow complete; model produced an edit proposal.");
+            Console.WriteLine("Proposal:");
+            Console.WriteLine(contextResult.EditProposal);
+            return 0;
+        }
+
+        var editLlm = LlmClientFactory.Create(LoadLlmConfig(Environment.CurrentDirectory) ?? new LlmConfig("mlx-lm", "mlx-community/Qwen3-8B-4bit", "http://localhost:8080", 0.7, 8192, 8192, 4000, 8));
+        var editWorkflow = new AskEditWorkflow(editLlm, traceAsk);
+        if (traceAsk)
+        {
+            Console.WriteLine("edit_workflow_start");
+        }
+        var editResult = await editWorkflow.RunAsync(userPrompt, contextResult, Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "src/Ecp.Cli/Program.cs")));
+        Console.WriteLine();
+        Console.WriteLine($"Completed: {editResult.Summary}");
+        return editResult.Success ? 0 : 1;
+    }
+
     var sessionResolution = await ResolveSessionAsync(connectionString, args, allowCreate: true, allowReuse: true);
     var session = sessionResolution.Session;
     if (session is null)
@@ -862,7 +922,7 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
         new SearchService(effectiveStore, (ISymbolStore)effectiveStore),
         (ISessionStore)effectiveStore,
         effectiveStore);
-    var orchestrator = new AskOrchestrator(llm, engine, llmConfig, useSandbox ? sandbox?.SandboxRoot : null, traceAsk);
+    var orchestrator = new AskOrchestrator(llm, engine, llmConfig, useSandbox ? sandbox?.SandboxRoot : null);
     var started = DateTimeOffset.UtcNow;
 
     Console.WriteLine("═══════════════════════════════════════════════════");
@@ -1258,6 +1318,21 @@ static void WriteResponse(ProtocolResponse response, string format)
 }
 
 static void PrintHelp()
+{
+    Console.WriteLine(@"
+Usage:
+  ecp ask <command> [options]
+    --context-workflow  Use context workflow for ask command
+    --debug-ask         Enable debug output for ask command
+
+Global Options:
+  --help               Show help
+  --version            Show version
+  --debug-ask          Enable debug output for ask command
+");
+}
+
+static void PrintUsage()
 {
     Console.WriteLine("""
         ecp <command> [options]

@@ -1,0 +1,27 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "c862cb9c-a1a0-4aa5-9a65-0c39b87631bb",
+    "createdUtc": "2026-07-07T09:37:29.2673810\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "cert-method.cs",
+      "cert-ambig.cs"
+    ],
+    "operationHashes": [
+      "136af3f76b02388ee1a3fa596d4c34d8e50dbfc25ac207aee0c8dbcec92826e2",
+      "ba619af9bf2b87b43499d5df7bac7adcad103ab420d5caef68df3e79dcb112e5"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "DeleteFile",
+      "path": "cert-method.cs"
+    },
+    {
+      "operation": "DeleteFile",
+      "path": "cert-ambig.cs"
+    }
+  ]
+}
