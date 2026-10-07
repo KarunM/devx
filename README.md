@@ -3,8 +3,6 @@
 DevX is a local code-intelligence and engineering-loop CLI. It indexes repositories, returns narrowly scoped source context, applies structured patches, and runs build/test validation.
 
 
-> **History:** developed privately from June 2026 (Azure DevOps) and moved to GitHub on 7 October 2026 with its original commit history.
-
 ## Install or update
 
 From the repository root:
@@ -48,13 +46,13 @@ devx report html --period 30d --output devx-report.html
 devx report html --session "$SESSION_ID" --format json --output devx-report.json
 ```
 
-Organization aggregation is a preview for the Enterprise reporting capability. Supply a normalized event file (`AnalyticsInput`: `Organization` and `Events`) with globally unique event IDs and explicit repository, team, developer, agent, and session attribution:
+Organization aggregation is an org-report preview. Supply a normalized event file (`AnalyticsInput`: `Organization` and `Events`) with globally unique event IDs and explicit repository, team, developer, agent, and session attribution:
 
 ```bash
 devx report html --input org-events.json --org acme --team payments --repo backend --output devx-org-report.html
 ```
 
-HTML and JSON share the same aggregation model. Reports compare the selected period with the preceding equal-length period, count validation runs, show measured output characters and labeled token estimates, and make evidence-based recommendations. Missing policy, audit, merge-quality, and savings data is shown as unavailable. Organization preview input is not authenticated; enterprise RBAC, subscription enforcement, and central collection still require implementation. Existing output files are never overwritten. Local reports include session-attributed events for the current repository; unscoped operations are excluded.
+HTML and JSON share the same aggregation model. Reports compare the selected period with the preceding equal-length period, count validation runs, show measured output characters and labeled token estimates, and make evidence-based recommendations. Missing policy, audit, merge-quality, and savings data is shown as unavailable. Organization preview input is caller-supplied and is not authenticated. Existing output files are never overwritten. Local reports include session-attributed events for the current repository; unscoped operations are excluded.
 
 ```bash
 dotnet build DevX.sln

@@ -32,7 +32,7 @@ Recommended order:
 5. Add patch apply behind explicit approval.
 6. Add runtime/framework discovery.
 7. Add lightweight workflow agent.
-8. Integrate EverCode through MCP or the same DevX service layer.
+8. Integrate DevX through MCP or the same DevX service layer.
 
 ## MCP Server Scope
 
@@ -456,7 +456,7 @@ AI models provide:
 
 The strongest architecture is:
 
-AI Agent / EverCode / Copilot / Claude / Codex
+AI Agent / DevX / Copilot / Claude / Codex
   -> DevX MCP Server
   -> DevX Core Services
   -> Repository
@@ -480,7 +480,7 @@ Excluded:
 - runtime discovery
 - MCP server
 - lightweight workflow agent
-- EverCode integration
+- DevX integration
 
 Next branch:
 

@@ -22,7 +22,7 @@ DevX currently provides many of these capabilities through its CLI:
 
 However, DevX is currently used inconsistently by agents. Some agents fall back to direct repository search, direct edits, or direct build/test commands when DevX commands are missing, incomplete, or unclear.
 
-DevX should become the reliable engineering runtime underneath EverCode, local hosts, IDE extensions, and future AI-assisted engineering tools.
+DevX should become the reliable engineering runtime underneath DevX, local hosts, IDE extensions, and future AI-assisted engineering tools.
 
 ## Problem
 
@@ -323,7 +323,7 @@ If DevX cannot satisfy a request, the agent must report:
 ADR-012 does not define:
 
 - Engineering Session Harness behavior
-- EverCode governance
+- DevX governance
 - Reasoning Engine behavior
 - Development Engine replacement
 - assistant-ui UX
