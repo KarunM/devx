@@ -101,6 +101,45 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.True(report.Content.GetProperty("operationLog").GetArrayLength() >= 0);
     }
 
+    [Fact]
+    public async Task StdioServer_InitializeListAndCallTool_RoundTripsJsonRpc()
+    {
+        var (server, session, _) = await CreateServerAsync("devx-mcp-stdio");
+        var input = new StringReader(string.Join('\n',
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{{\"name\":\"search\",\"arguments\":{{\"sessionId\":\"{session.Id.Value}\",\"kind\":\"symbol\",\"query\":\"Program\"}}}}}}"));
+        var output = new StringWriter();
+
+        await new McpStdioServer(server).RunAsync(input, output);
+
+        var responses = output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(3, responses.Length);
+        using var initialize = JsonDocument.Parse(responses[0]);
+        Assert.Equal("devx", initialize.RootElement.GetProperty("result").GetProperty("serverInfo").GetProperty("name").GetString());
+        using var list = JsonDocument.Parse(responses[1]);
+        Assert.True(list.RootElement.GetProperty("result").GetProperty("tools").GetArrayLength() > 0);
+        using var call = JsonDocument.Parse(responses[2]);
+        Assert.False(call.RootElement.GetProperty("result").GetProperty("isError").GetBoolean());
+    }
+
+    [Fact]
+    public async Task StdioServer_InvalidJsonAndUnknownMethod_ReturnJsonRpcErrors()
+    {
+        var (server, _, _) = await CreateServerAsync("devx-mcp-errors");
+        var input = new StringReader("{broken\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"not/a/method\"}\n");
+        var output = new StringWriter();
+
+        await new McpStdioServer(server).RunAsync(input, output);
+
+        var responses = output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        using var parseError = JsonDocument.Parse(responses[0]);
+        Assert.Equal(-32700, parseError.RootElement.GetProperty("error").GetProperty("code").GetInt32());
+        using var methodError = JsonDocument.Parse(responses[1]);
+        Assert.Equal(-32601, methodError.RootElement.GetProperty("error").GetProperty("code").GetInt32());
+    }
+
     private static async Task<(McpReferenceServer Server, SessionState Session, string RepositoryRoot)> CreateServerAsync(string prefix)
     {
         var repositoryRoot = Directory.CreateTempSubdirectory(prefix).FullName;

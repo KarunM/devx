@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using DevX.Domain;
 
 namespace DevX.Protocol;
@@ -10,12 +11,14 @@ public sealed class McpReferenceServer
     private readonly IProtocolEngine _protocolEngine;
     private readonly ISessionStore _sessionStore;
     private readonly IRepositoryStore _repositoryStore;
+    private readonly string? _defaultSessionId;
 
-    public McpReferenceServer(IProtocolEngine protocolEngine, ISessionStore sessionStore, IRepositoryStore repositoryStore)
+    public McpReferenceServer(IProtocolEngine protocolEngine, ISessionStore sessionStore, IRepositoryStore repositoryStore, string? defaultSessionId = null)
     {
         _protocolEngine = protocolEngine;
         _sessionStore = sessionStore;
         _repositoryStore = repositoryStore;
+        _defaultSessionId = defaultSessionId;
     }
 
     public Task<McpInitializeResponse> InitializeAsync(CancellationToken cancellationToken = default)
@@ -23,7 +26,7 @@ public sealed class McpReferenceServer
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(new McpInitializeResponse(
             "2025-06-18",
-            new McpServerInfo("devx-reference-server", "1.0"),
+            new McpServerInfo("devx", "1.0"),
             BuildTools()));
     }
 
@@ -35,6 +38,12 @@ public sealed class McpReferenceServer
 
     public async Task<McpToolCallResult> CallToolAsync(string toolName, JsonElement arguments, CancellationToken cancellationToken = default)
     {
+        if (_defaultSessionId is not null && arguments.ValueKind == JsonValueKind.Object)
+        {
+            var withSession = JsonNode.Parse(arguments.GetRawText())!.AsObject();
+            withSession["sessionId"] = _defaultSessionId;
+            arguments = JsonSerializer.SerializeToElement(withSession, JsonOptions);
+        }
         return toolName switch
         {
             "search" => await ExecuteProtocolAsync(
@@ -50,6 +59,13 @@ public sealed class McpReferenceServer
                 RequiredSessionId(arguments),
                 BuildReadPayload(arguments),
                 cancellationToken),
+            "snapshot" => await ExecuteQueryToolAsync(ProtocolOperations.GetFileSnapshot, arguments, cancellationToken),
+            "callers" => await ExecuteQueryToolAsync(ProtocolOperations.GetCallers, arguments, cancellationToken),
+            "callees" => await ExecuteQueryToolAsync(ProtocolOperations.GetCallees, arguments, cancellationToken),
+            "references" => await ExecuteQueryToolAsync(ProtocolOperations.GetReferences, arguments, cancellationToken),
+            "patch.preview" => await ExecuteProtocolAsync("PATCH_PREVIEW", RequiredSessionId(arguments), RequiredObject(arguments, "patch"), cancellationToken),
+            "build" => await ExecuteProtocolAsync(ProtocolOperations.RunBuild, RequiredSessionId(arguments), BuildRuntimePayload(arguments), cancellationToken),
+            "test" => await ExecuteProtocolAsync(ProtocolOperations.RunTests, RequiredSessionId(arguments), BuildTestPayload(arguments), cancellationToken),
             "patch.validate" => await ExecuteProtocolAsync(
                 "PATCH_VALIDATE",
                 RequiredSessionId(arguments),
@@ -216,8 +232,29 @@ public sealed class McpReferenceServer
             "file" => "READ_FILE",
             "method" => "READ_METHOD",
             "type" => "READ_TYPE",
+            "section" => "READ_SECTION",
             _ => throw new InvalidOperationException("Unsupported read kind.")
         };
+
+    private Task<McpToolCallResult> ExecuteQueryToolAsync(string operation, JsonElement arguments, CancellationToken cancellationToken)
+        => ExecuteProtocolAsync(operation, RequiredSessionId(arguments), JsonSerializer.SerializeToElement(new { query = RequiredString(arguments, "query") }), cancellationToken);
+
+    private static JsonElement BuildRuntimePayload(JsonElement arguments)
+    {
+        var payload = new Dictionary<string, string?>();
+        if (TryGetString(arguments, "runtime", out var runtime)) payload["runtime"] = runtime;
+        if (TryGetString(arguments, "target", out var target)) payload["target"] = target;
+        return JsonSerializer.SerializeToElement(payload, JsonOptions);
+    }
+
+    private static JsonElement BuildTestPayload(JsonElement arguments)
+    {
+        var payload = new Dictionary<string, object?> { ["timeoutSeconds"] = 300 };
+        if (TryGetString(arguments, "target", out var target)) payload["target"] = target;
+        if (arguments.TryGetProperty("testFiles", out var files)) payload["testFiles"] = files.Clone();
+        if (arguments.TryGetProperty("timeoutSeconds", out var timeout)) payload["timeoutSeconds"] = timeout.GetInt32();
+        return JsonSerializer.SerializeToElement(payload, JsonOptions);
+    }
 
     private static string ReadKind(JsonElement arguments)
         => RequiredString(arguments, "kind").ToLowerInvariant();
@@ -294,7 +331,7 @@ public sealed class McpReferenceServer
                     kind = new { type = "string", @enum = new[] { "symbol", "text" } },
                     query = new { type = "string" }
                 },
-                required = new[] { "sessionId", "kind", "query" }
+                required = new[] { "kind", "query" }
             }),
             CreateTool("read", "Read", "Read file, method, or type content through the runtime capability layer.", "read", new
             {
@@ -302,12 +339,12 @@ public sealed class McpReferenceServer
                 properties = new
                 {
                     sessionId = new { type = "string" },
-                    kind = new { type = "string", @enum = new[] { "file", "method", "type" } },
+                    kind = new { type = "string", @enum = new[] { "file", "method", "type", "section" } },
                     target = new { type = "string" },
                     range = new { type = "string" },
                     full = new { type = "boolean" }
                 },
-                required = new[] { "sessionId", "kind", "target" }
+                required = new[] { "kind", "target" }
             }),
             CreateTool("patch.validate", "Patch Validate", "Validate a structured patch through the runtime capability layer.", "patch.validate", new
             {
@@ -317,7 +354,7 @@ public sealed class McpReferenceServer
                     sessionId = new { type = "string" },
                     patch = new { type = "object" }
                 },
-                required = new[] { "sessionId", "patch" }
+                required = new[] { "patch" }
             }),
             CreateTool("patch.apply", "Patch Apply", "Apply a structured patch through the runtime capability layer.", "patch.apply", new
             {
@@ -327,8 +364,15 @@ public sealed class McpReferenceServer
                     sessionId = new { type = "string" },
                     patch = new { type = "object" }
                 },
-                required = new[] { "sessionId", "patch" }
+                required = new[] { "patch" }
             }),
+            CreateTool("patch.preview", "Patch Preview", "Preview a structured patch.", "patch.validate", new { type = "object", properties = new { sessionId = new { type = "string" }, patch = new { type = "object" } }, required = new[] { "patch" } }),
+            CreateQueryTool("snapshot", "Snapshot", "Get a source file snapshot.", "sessionId", "query"),
+            CreateQueryTool("callers", "Callers", "Find callers of a symbol.", "sessionId", "query"),
+            CreateQueryTool("callees", "Callees", "Find callees of a symbol.", "sessionId", "query"),
+            CreateQueryTool("references", "References", "Find references to a symbol.", "sessionId", "query"),
+            CreateTool("build", "Build", "Run a configured build target.", "build", new { type = "object", properties = new { sessionId = new { type = "string" }, runtime = new { type = "string" }, target = new { type = "string" } }, required = Array.Empty<string>() }),
+            CreateTool("test", "Test", "Run tests through the configured test service.", "test", new { type = "object", properties = new { sessionId = new { type = "string" }, target = new { type = "string" }, testFiles = new { type = "array", items = new { type = "string" } }, timeoutSeconds = new { type = "integer" } }, required = Array.Empty<string>() }),
             CreateTool("report", "Report", "Return the current session report through the runtime capability layer.", "report", new
             {
                 type = "object",
@@ -336,13 +380,16 @@ public sealed class McpReferenceServer
                 {
                     sessionId = new { type = "string" }
                 },
-                required = new[] { "sessionId" }
+                required = Array.Empty<string>()
             })
         ];
     }
 
     private static McpToolDescriptor CreateTool(string name, string title, string description, string capabilityId, object schema)
         => new(name, title, description, capabilityId, JsonSerializer.SerializeToElement(schema, JsonOptions));
+
+    private static McpToolDescriptor CreateQueryTool(string name, string title, string description, string sessionProperty, string queryProperty)
+        => CreateTool(name, title, description, name, new { type = "object", properties = new { sessionId = new { type = "string" }, query = new { type = "string" } }, required = new[] { queryProperty } });
 
     private sealed record McpFallbackEventMetadata(
         string CapabilityId,

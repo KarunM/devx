@@ -130,10 +130,32 @@ static async Task<int> RunAsync(string[] args)
         case "capabilities":
             return await CapabilitiesAsync(connectionString, args, format);
 
+        case "mcp":
+            if (args.Length < 2 || args[1] != "serve")
+            {
+                Console.Error.WriteLine("Usage: devx mcp serve");
+                return 1;
+            }
+            return await McpServeAsync(connectionString);
+
         default:
             Console.Error.WriteLine($"Unknown command '{command}'.");
             return 1;
     }
+}
+
+static async Task<int> McpServeAsync(string connectionString)
+{
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var root = Path.GetFullPath(Environment.CurrentDirectory);
+    var repository = new Repository(new RepositoryId(StableId(root)), Path.GetFileName(root), root);
+    await store.UpsertRepositoryAsync(repository);
+    var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var reference = new McpReferenceServer(engine, store, store, session.Id.Value.ToString());
+    await new McpStdioServer(reference).RunAsync(Console.In, Console.Out);
+    return 0;
 }
 
 static async Task<int> InitAsync(string[] args, string format)
@@ -1909,6 +1931,7 @@ Usage:
   devx fallback observe --session <id> --agent <label> --command <shell-command> [--file <path> ...]
   devx fallback observe --session <id> --agent <label> --coverage-start <ISO8601> --coverage-end <ISO8601>
   devx capabilities [--format json]
+  devx mcp serve
 
 Patch create options:
   --op <Operation>
