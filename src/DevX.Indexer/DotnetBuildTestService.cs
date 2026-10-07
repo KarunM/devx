@@ -252,7 +252,7 @@ public sealed class DotnetBuildTestService
         return path;
     }
 
-    private static IReadOnlyList<DiagnosticRecord> ParseDiagnostics(string raw, string logPath)
+    public static IReadOnlyList<DiagnosticRecord> ParseDiagnostics(string raw, string logPath)
     {
         var diagnostics = new List<DiagnosticRecord>();
         var dotnet = new Regex(@"^(?<file>.*)\((?<line>\d+),(?<column>\d+)\): (?<severity>warning|error) (?<code>[A-Z]+\d+): (?<message>.*)$", RegexOptions.Multiline);
@@ -262,6 +262,16 @@ public sealed class DotnetBuildTestService
         foreach (Match match in pytest.Matches(raw)) diagnostics.Add(new DiagnosticRecord("error", "PYTEST", FirstLine(match.Groups["message"].Value), match.Groups["file"].Value, int.Parse(match.Groups["line"].Value), null, logPath));
         if (diagnostics.Count == 0)
         {
+            if (raw.Contains("Test Run Failed", StringComparison.OrdinalIgnoreCase)
+                || raw.Contains("Failed!", StringComparison.OrdinalIgnoreCase)
+                || raw.Contains("Failed:", StringComparison.OrdinalIgnoreCase))
+            {
+                var failedTest = raw.Split('\n').Select(item => item.Trim())
+                    .FirstOrDefault(item => item.StartsWith("Failed ", StringComparison.OrdinalIgnoreCase));
+                var dotnetMessage = failedTest ?? raw.Split('\n').Select(item => item.Trim()).FirstOrDefault(item => item.Length > 0) ?? ".NET test run failed.";
+                diagnostics.Add(new DiagnosticRecord("error", "DOTNET_TEST", FirstLine(dotnetMessage), null, null, null, logPath));
+                return diagnostics;
+            }
             var location = Regex.Match(raw, @"File ""(?<file>[^""]+\.py)"", line (?<line>\d+)");
             var file = location.Groups["file"].Value;
             var line = location.Success ? int.Parse(location.Groups["line"].Value) : (int?)null;
