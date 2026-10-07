@@ -14,6 +14,22 @@ public interface ILlmClient : IDisposable
     Task<string> CompleteAsync(string prompt, CancellationToken cancellationToken = default);
 }
 
+public static class LlmErrorRedaction
+{
+    public static string SafeFailureMessage(int statusCode) => $"LLM request failed (HTTP {statusCode}). Response details were omitted.";
+
+    public static string SafeEndpoint(string endpoint)
+    {
+        if (!Uri.TryCreate(endpoint, UriKind.Absolute, out var uri))
+        {
+            return "<configured endpoint>";
+        }
+
+        var builder = new UriBuilder(uri) { UserName = string.Empty, Password = string.Empty, Query = string.Empty, Fragment = string.Empty };
+        return builder.Uri.ToString().TrimEnd('/');
+    }
+}
+
 public sealed record OpenAiChatMessage(
     string Role,
     string Content);
@@ -235,11 +251,11 @@ public sealed class LlmServerManager : IDisposable
         try
         {
             using var response = await _probeClient.GetAsync(_launchConfig.ReadyPath, cancellationToken);
-            return new LlmServerReadinessAttempt(attempt, _probeClient.BaseAddress + _launchConfig.ReadyPath, (int)response.StatusCode, null);
+            return new LlmServerReadinessAttempt(attempt, LlmErrorRedaction.SafeEndpoint(_probeClient.BaseAddress + _launchConfig.ReadyPath), (int)response.StatusCode, null);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
-            return new LlmServerReadinessAttempt(attempt, _probeClient.BaseAddress + _launchConfig.ReadyPath, null, ex.Message);
+            return new LlmServerReadinessAttempt(attempt, LlmErrorRedaction.SafeEndpoint(_probeClient.BaseAddress + _launchConfig.ReadyPath), null, "Connection failed.");
         }
     }
 
@@ -284,7 +300,7 @@ public sealed class LlmServerManager : IDisposable
             _launchConfig.ServerCommand,
             ExecutableExists(),
             _process?.Id,
-            _probeClient.BaseAddress + _launchConfig.ReadyPath,
+            LlmErrorRedaction.SafeEndpoint(_probeClient.BaseAddress + _launchConfig.ReadyPath),
             _attempts.ToArray(),
             reason);
 
@@ -297,7 +313,7 @@ public sealed class LlmServerManager : IDisposable
             _launchConfig.ServerCommand,
             ExecutableExists(),
             _process?.Id,
-            _probeClient.BaseAddress + _launchConfig.ReadyPath,
+            LlmErrorRedaction.SafeEndpoint(_probeClient.BaseAddress + _launchConfig.ReadyPath),
             _attempts.ToArray(),
             _process is { HasExited: true } ? "Process exited." : null);
     }
@@ -497,9 +513,7 @@ public sealed class OpenAiClient : ILlmClient, IDisposable
         var response = await _httpClient.PostAsync("v1/chat/completions", content, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new InvalidOperationException(
-                $"LLM request failed ({(int)response.StatusCode}): {errorBody}");
+            throw new InvalidOperationException(LlmErrorRedaction.SafeFailureMessage((int)response.StatusCode));
         }
 
         var result = await response.Content.ReadFromJsonAsync<OpenAiResponse>(_jsonOptions, cancellationToken);

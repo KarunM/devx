@@ -19,7 +19,7 @@ public sealed class ReadResolutionRegressionTests
     private static async Task<Fixture> Create()
     {
         var parent = Directory.CreateTempSubdirectory("devx-read-regression-").FullName;
-        var root = Path.Combine(parent, "scratchpad", "mireuna-live3");
+        var root = Path.Combine(parent, "scratchpad", "project-a");
         Directory.CreateDirectory(root);
         await System.IO.File.WriteAllTextAsync(Path.Combine(root, "auth.py"), "def revoke_session():\n    return 'auth'\n");
         await System.IO.File.WriteAllTextAsync(Path.Combine(root, "db.py"), "def revoke_session():\n    return 'db'\n");
@@ -63,8 +63,8 @@ public sealed class ReadResolutionRegressionTests
     [Theory]
     [InlineData("auth.revoke_session", "auth.py", "module-path")]
     [InlineData("db.revoke_session", "db.py", "module-path")]
-    [InlineData("scratchpad.mireuna-live3.auth.revoke_session", "auth.py", "prefix-stripped")]
-    [InlineData("mireuna-live3.life.today_line", "life.py", "prefix-stripped")]
+    [InlineData("scratchpad.project-a.auth.revoke_session", "auth.py", "prefix-stripped")]
+    [InlineData("project-a.life.today_line", "life.py", "prefix-stripped")]
     [InlineData("tests.filing_model_eval.main", "tests/filing_model_eval.py", "module-path")]
     [InlineData("tests.filing_model_eval.Fake.today_line", "tests/filing_model_eval.py", "exact")]
     public async Task ModuleRead_UsesFileConstraint(string query, string path, string via)
@@ -100,7 +100,7 @@ public sealed class ReadResolutionRegressionTests
         var f = await Create();
         var symbols = await f.Store.FindSymbolsByNameAsync("Planning");
         var symbol = Assert.Single(symbols);
-        var response = await f.Read("scratchpad.mireuna-live3." + symbol.QualifiedName);
+        var response = await f.Read("scratchpad.project-a." + symbol.QualifiedName);
         Assert.True(response.Success);
         Assert.Equal("section", response.Data!.Value.GetProperty("Kind").GetString());
         Assert.Contains("Section contents.", response.Data.Value.GetProperty("Source").GetString());

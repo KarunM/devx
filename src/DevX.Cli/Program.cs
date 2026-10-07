@@ -1511,21 +1511,22 @@ static LlmServerLaunchConfig CreateServerLaunchConfig(LlmConfig config)
 
 static void WriteAskFailure(string format, Exception exception, LlmServerStartupDiagnostics diagnostics, string endpoint, OpenAiMessage? assistantMessage = null, object? usage = null)
 {
+    const string safeError = "The LLM request could not be completed. See local server diagnostics for details.";
     if (format == "json")
     {
         Console.WriteLine(JsonSerializer.Serialize(new
         {
             Success = false,
-            Error = exception.Message,
-            Diagnostics = diagnostics with { FinalFailureReason = exception.Message },
+            Error = safeError,
+            Diagnostics = diagnostics with { FinalFailureReason = safeError },
             AssistantMessage = assistantMessage,
             Usage = usage
         }));
         return;
     }
 
-    Console.Error.WriteLine($"Failed to start or connect to the local LLM server: {exception.Message}");
-    Console.Error.WriteLine($"Expected endpoint: {endpoint}");
+    Console.Error.WriteLine(safeError);
+    Console.Error.WriteLine($"Expected endpoint: {LlmErrorRedaction.SafeEndpoint(endpoint)}");
 }
 
 static async Task<int> RunToolAsync(string connectionString, string[] args, string format)
