@@ -1,72 +1,43 @@
 # DevX
 
-DevX is a local code-intelligence and engineering-loop CLI. It indexes repositories, returns narrowly scoped source context, applies structured patches, and runs build/test validation.
+DevX is a local code-intelligence CLI for software engineers and coding agents. It indexes repositories, helps find and read relevant code, and supports build and test validation so work stays grounded in the current codebase.
 
+## Install
 
-## Install or update
+Install the `DevX.Cli` .NET tool package; its command is `devx`.
 
-From the repository root:
-
-```bash
-dotnet tool uninstall --global devx.cli 2>/dev/null || true
-dotnet pack src/DevX.Cli -c Release -o ./artifacts/tools
-dotnet tool install --global --add-source ./artifacts/tools DevX.Cli
-devx --version
+```sh
+dotnet tool install --global DevX.Cli
+devx --help
 ```
 
-The package is `DevX.Cli` and the installed command is `devx`. The repo-local `./devx` wrapper runs the current source directly.
+## Quick start (60 seconds)
 
-DevX stores workspace state in `.devx/devx.db`.
+From a repository root, index code and search it (provide an existing DevX session ID):
 
-Install or refresh agent instructions in the current repository with `devx init --agents claude,codex`. Add `--global` to target `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`. The command owns only its marked DevX block, so rerunning it updates the rules without replacing other instructions.
-
-## Core workflow
-
-```bash
+```sh
 devx index .
-SESSION_ID=$(devx session create --format json | jq -r '.Data.sessionId')
-devx search text "needle" --session "$SESSION_ID" --agent orchestrator
-devx read section 'docs/plan.md#Implementation' --session "$SESSION_ID" --agent worker-1
-devx test tests/unit_test.py tests/beta_gate_check.py --session "$SESSION_ID" --timeout 120 --agent worker-1
-devx report --session "$SESSION_ID" --format json
+devx search text "TODO" --session <session-id>
 ```
 
-Symbol search results include the defining file and line range. Symbol reads accept IDs, short names, or qualified names; plain output prints `path:line` followed by unescaped source. Missing and ambiguous reads return the attempted name, a failure reason, and up to five suggestions. `search text` searches indexed file contents and returns file, line, column, and preview data.
+Create a session with `devx session create --format json`, then pass its ID to session-scoped commands.
 
-`devx test <files>` detects pytest files and plain Python check scripts, runs them sequentially with a five-minute default timeout, and prints a compact result. Failures include `file:line`, a one-line message, and a full-log path. Test summaries, per-agent calls, response character counts, and estimated output tokens are recorded in `devx report`.
+## MCP
 
-`devx index update` accepts multiple files in one call. JSON and HTML files are indexed as documents, and Git worktrees, where `.git` is a pointer file, are treated as healthy repositories.
+See the [MCP setup guide](docs/mcp.md).
 
-## Build and test
+## Free and Enterprise
 
-Export a self-contained local HTML report across workspace sessions:
+Free includes unlimited local repositories, indexing, search, source reads, patches, validation and testing, local agents and shared sessions, local MCP, and local metrics and reporting. Core engineering work is available offline without DevX authentication. Enterprise adds organization accounts, OIDC/SSO, RBAC, shared remote indexing, audit trails, central policy, team analytics, integrations, and private deployment. Enterprise code is not in this repository; the entitlement seam is an architecture boundary, not a claim that all listed capabilities are implemented.
 
-```bash
-devx report html --period 30d --output devx-report.html
-devx report html --session "$SESSION_ID" --format json --output devx-report.json
-```
+## Benchmark results (to be added)
 
-Organization aggregation is an org-report preview. Supply a normalized event file (`AnalyticsInput`: `Organization` and `Events`) with globally unique event IDs and explicit repository, team, developer, agent, and session attribution:
+Benchmark results will be published here when available.
 
-```bash
-devx report html --input org-events.json --org acme --team payments --repo backend --output devx-org-report.html
-```
+## Licence and contributing
 
-HTML and JSON share the same aggregation model. Reports compare the selected period with the preceding equal-length period, count validation runs, show measured output characters and labeled token estimates, and make evidence-based recommendations. Missing policy, audit, merge-quality, and savings data is shown as unavailable. Organization preview input is caller-supplied and is not authenticated. Existing output files are never overwritten. Local reports include session-attributed events for the current repository; unscoped operations are excluded.
+DevX is licensed under [Apache-2.0](LICENSE); see [NOTICE](NOTICE). Contributions follow [CONTRIBUTING.md](CONTRIBUTING.md) and require the [CLA](CLA.md). See the [Code of Conduct](CODE_OF_CONDUCT.md) and [Security policy](SECURITY.md).
 
-```bash
-dotnet build DevX.sln
-dotnet test DevX.sln
-```
+## Organization report status
 
-## Uninstall
-
-```bash
-dotnet tool uninstall --global DevX.Cli
-```
-
-## Notes
-
-- Workspace-scoped commands evaluate the current working directory.
-- `build`, `test`, and `report` require `--session <id>`.
-- The MCP reference server is currently an integration-tested library surface, not a packaged long-running server command.
+The organization report is a **preview, unverified** aggregation of caller-supplied data. It does not authenticate identity or provide authoritative organization reporting.
