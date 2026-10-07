@@ -28,6 +28,10 @@ Before merge, sign the [individual CLA](CLA.md) using the CLA bot comment: `I ha
 
 New source files should include an SPDX identifier such as `// SPDX-License-Identifier: Apache-2.0` where appropriate. Do not add or rewrite headers across existing files as part of unrelated work.
 
+## CLA signatures
+
+The CLA bot stores signatures on a branch named `cla-signatures`. The repository owner must create this as an empty branch on GitHub once before the first pull request is checked.
+
 ## Security and project documentation
 
 Report vulnerabilities through a GitHub private security advisory for this repository. Do not disclose security issues publicly before maintainers have had a chance to respond.
