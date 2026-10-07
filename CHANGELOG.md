@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.6.3
+
+- C# types declared in the global namespace are now indexed
+
 ## 1.6.2
 
 - Single-file builds no longer crash when indexing Python files

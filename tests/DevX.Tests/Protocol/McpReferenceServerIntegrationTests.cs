@@ -19,7 +19,7 @@ public sealed class McpReferenceServerIntegrationTests
         var response = await server.InitializeAsync();
 
         Assert.Equal("2025-06-18", response.ProtocolVersion);
-        Assert.Equal("1.6.2", response.ServerInfo.Version);
+        Assert.Equal("1.6.3", response.ServerInfo.Version);
         Assert.Contains(response.Tools, tool => tool.Name == "search" && tool.CapabilityId == "search");
         Assert.Contains(response.Tools, tool => tool.Name == "read" && tool.CapabilityId == "read");
         Assert.Contains(response.Tools, tool => tool.Name == "patch.validate" && tool.CapabilityId == "patch.validate");
@@ -202,7 +202,7 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.Equal(3, responses.Length);
         using var initialize = JsonDocument.Parse(responses[0]);
         Assert.Equal("devx", initialize.RootElement.GetProperty("result").GetProperty("serverInfo").GetProperty("name").GetString());
-        Assert.Equal("1.6.2", initialize.RootElement.GetProperty("result").GetProperty("serverInfo").GetProperty("version").GetString());
+        Assert.Equal("1.6.3", initialize.RootElement.GetProperty("result").GetProperty("serverInfo").GetProperty("version").GetString());
         using var list = JsonDocument.Parse(responses[1]);
         Assert.True(list.RootElement.GetProperty("result").GetProperty("tools").GetArrayLength() > 0);
         using var call = JsonDocument.Parse(responses[2]);
@@ -294,7 +294,7 @@ public sealed class McpReferenceServerIntegrationTests
             store,
             session.Id.Value.ToString(),
             (files, cancellationToken) => indexer.ReindexFilesAsync(repositoryRoot, files, cancellationToken),
-            "1.6.2",
+            "1.6.3",
             cancellationToken => indexer.IndexAsync(repositoryRoot, cancellationToken),
             cancellationToken => store.InitializeAsync(cancellationToken));
         return (server, session, repositoryRoot);
