@@ -3,6 +3,7 @@ using Xunit;
 
 namespace DevX.Tests;
 
+[Collection("ProcessGlobalState")]
 public sealed class ArtifactCommandTests
 {
     [Fact]

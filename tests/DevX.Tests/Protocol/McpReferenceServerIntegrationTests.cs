@@ -169,6 +169,30 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.Equal(-32601, methodError.RootElement.GetProperty("error").GetProperty("code").GetInt32());
     }
 
+    [Fact]
+    public async Task StdioServer_PingAndToolCallFailures_ReturnExpectedResponses()
+    {
+        var (server, _, _) = await CreateServerAsync("devx-mcp-stdio-failures");
+        var input = new StringReader(string.Join('\n',
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"no-such-tool\",\"arguments\":{}}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"search\",\"arguments\":{}}}",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"));
+        var output = new StringWriter();
+
+        await new McpStdioServer(server).RunAsync(input, output);
+
+        var responses = output.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(3, responses.Length);
+        using var ping = JsonDocument.Parse(responses[0]);
+        Assert.Equal(1, ping.RootElement.GetProperty("id").GetInt32());
+        Assert.True(ping.RootElement.GetProperty("result").ValueKind == JsonValueKind.Object);
+        using var unknownTool = JsonDocument.Parse(responses[1]);
+        Assert.True(unknownTool.RootElement.GetProperty("result").GetProperty("isError").GetBoolean());
+        using var missingArguments = JsonDocument.Parse(responses[2]);
+        Assert.True(missingArguments.RootElement.GetProperty("result").GetProperty("isError").GetBoolean());
+    }
+
     private static async Task<(McpReferenceServer Server, SessionState Session, string RepositoryRoot)> CreateServerAsync(string prefix)
     {
         var repositoryRoot = Directory.CreateTempSubdirectory(prefix).FullName;
