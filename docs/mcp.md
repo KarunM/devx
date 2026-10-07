@@ -12,7 +12,7 @@ The transport uses newline-delimited JSON-RPC 2.0 on stdin and stdout; diagnosti
 
 ## Tools
 
-The server exposes `search` (symbol or text), `read` (file, method, type, or section), `snapshot`, `callers`, `callees`, `references`, `patch.preview`, `patch.validate`, `patch.apply`, `build`, `test`, and `report`. The process creates a repository session at startup and applies it to tool calls automatically. Patch tools accept structured patch documents. Tool results are returned as MCP text content containing the DevX protocol response; failed operations set `isError`.
+The server exposes `index` (incrementally update the index for file paths), `search` (symbol or text), `read` (file, method, type, or section), `snapshot`, `callers`, `callees`, `references`, `patch.preview`, `patch.validate`, `patch.apply`, `build`, `test`, and `report`. The process creates a repository session at startup and applies it to tool calls automatically. Patch tools accept structured patch documents. Tool results are returned as MCP text content containing the DevX protocol response; failed operations set `isError`.
 
 ## Client setup
 

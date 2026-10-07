@@ -61,7 +61,7 @@ public sealed class McpStdioServer(McpReferenceServer server)
             ? version.GetString() : null;
         var initialization = await server.InitializeAsync(cancellationToken);
         var negotiated = requested is "2025-06-18" or "2025-03-26" or "2024-11-05" ? requested : initialization.ProtocolVersion;
-        return new { protocolVersion = negotiated, capabilities = new { tools = new { } }, serverInfo = new { name = "devx", version = "1.0" } };
+        return new { protocolVersion = negotiated, capabilities = new { tools = new { } }, serverInfo = new { name = initialization.ServerInfo.Name, version = initialization.ServerInfo.Version } };
     }
 
     private async Task<object> CallToolAsync(JsonElement parameters, CancellationToken cancellationToken)

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using DevX.Domain;
+using DevX.Indexer;
 
 namespace DevX.Protocol;
 
@@ -12,13 +13,23 @@ public sealed class McpReferenceServer
     private readonly ISessionStore _sessionStore;
     private readonly IRepositoryStore _repositoryStore;
     private readonly string? _defaultSessionId;
+    private readonly Func<string[], CancellationToken, Task<IndexRefreshResult>>? _reindexFilesAsync;
+    private readonly string _version;
 
-    public McpReferenceServer(IProtocolEngine protocolEngine, ISessionStore sessionStore, IRepositoryStore repositoryStore, string? defaultSessionId = null)
+    public McpReferenceServer(
+        IProtocolEngine protocolEngine,
+        ISessionStore sessionStore,
+        IRepositoryStore repositoryStore,
+        string? defaultSessionId = null,
+        Func<string[], CancellationToken, Task<IndexRefreshResult>>? reindexFilesAsync = null,
+        string version = "1.0")
     {
         _protocolEngine = protocolEngine;
         _sessionStore = sessionStore;
         _repositoryStore = repositoryStore;
         _defaultSessionId = defaultSessionId;
+        _reindexFilesAsync = reindexFilesAsync;
+        _version = version;
     }
 
     public Task<McpInitializeResponse> InitializeAsync(CancellationToken cancellationToken = default)
@@ -26,7 +37,7 @@ public sealed class McpReferenceServer
         cancellationToken.ThrowIfCancellationRequested();
         return Task.FromResult(new McpInitializeResponse(
             "2025-06-18",
-            new McpServerInfo("devx", "1.0"),
+            new McpServerInfo("devx", _version),
             BuildTools()));
     }
 
@@ -60,6 +71,7 @@ public sealed class McpReferenceServer
                 BuildReadPayload(arguments),
                 cancellationToken),
             "snapshot" => await ExecuteQueryToolAsync(ProtocolOperations.GetFileSnapshot, arguments, cancellationToken),
+            "index" => await IndexFilesAsync(arguments, cancellationToken),
             "callers" => await ExecuteQueryToolAsync(ProtocolOperations.GetCallers, arguments, cancellationToken),
             "callees" => await ExecuteQueryToolAsync(ProtocolOperations.GetCallees, arguments, cancellationToken),
             "references" => await ExecuteQueryToolAsync(ProtocolOperations.GetReferences, arguments, cancellationToken),
@@ -239,6 +251,19 @@ public sealed class McpReferenceServer
     private Task<McpToolCallResult> ExecuteQueryToolAsync(string operation, JsonElement arguments, CancellationToken cancellationToken)
         => ExecuteProtocolAsync(operation, RequiredSessionId(arguments), JsonSerializer.SerializeToElement(new { query = RequiredString(arguments, "query") }), cancellationToken);
 
+    private async Task<McpToolCallResult> IndexFilesAsync(JsonElement arguments, CancellationToken cancellationToken)
+    {
+        if (_reindexFilesAsync is null)
+            return new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = "Incremental indexing is unavailable." }, JsonOptions));
+        if (!arguments.TryGetProperty("files", out var files) || files.ValueKind != JsonValueKind.Array
+            || files.GetArrayLength() == 0 || files.EnumerateArray().Any(file => file.ValueKind != JsonValueKind.String))
+            return new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = "Argument 'files' must be a non-empty array of paths." }, JsonOptions));
+
+        var result = await _reindexFilesAsync(files.EnumerateArray().Select(file => file.GetString()!).ToArray(), cancellationToken);
+        var failed = result.SkippedFilePaths?.Any(file => file.Reason.StartsWith("ERROR:", StringComparison.Ordinal)) == true;
+        return new McpToolCallResult(failed, JsonSerializer.SerializeToElement(new { success = !failed, result }, JsonOptions));
+    }
+
     private static JsonElement BuildRuntimePayload(JsonElement arguments)
     {
         var payload = new Dictionary<string, string?>();
@@ -368,6 +393,7 @@ public sealed class McpReferenceServer
             }),
             CreateTool("patch.preview", "Patch Preview", "Preview a structured patch.", "patch.validate", new { type = "object", properties = new { sessionId = new { type = "string" }, patch = new { type = "object" } }, required = new[] { "patch" } }),
             CreateQueryTool("snapshot", "Snapshot", "Get a source file snapshot.", "sessionId", "query"),
+            CreateTool("index", "Index files", "Incrementally update the repository index for the given paths.", "index", new { type = "object", properties = new { files = new { type = "array", items = new { type = "string" } }, sessionId = new { type = "string" } }, required = new[] { "files" } }),
             CreateQueryTool("callers", "Callers", "Find callers of a symbol.", "sessionId", "query"),
             CreateQueryTool("callees", "Callees", "Find callees of a symbol.", "sessionId", "query"),
             CreateQueryTool("references", "References", "Find references to a symbol.", "sessionId", "query"),

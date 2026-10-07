@@ -153,7 +153,14 @@ static async Task<int> McpServeAsync(string connectionString)
     await store.UpsertRepositoryAsync(repository);
     var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
-    var reference = new McpReferenceServer(engine, store, store, session.Id.Value.ToString());
+    var indexer = new RepositoryIndexingService(store);
+    var reference = new McpReferenceServer(
+        engine,
+        store,
+        store,
+        session.Id.Value.ToString(),
+        (files, cancellationToken) => indexer.ReindexFilesAsync(root, files, cancellationToken),
+        GetProductVersion());
     await new McpStdioServer(reference).RunAsync(Console.In, Console.Out);
     return 0;
 }
@@ -1884,9 +1891,7 @@ static void WriteSourceResponse(ProtocolResponse response)
 
 static void PrintVersion(string format)
 {
-    var version = typeof(ArtifactCommand).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
-        ?? typeof(ArtifactCommand).Assembly.GetName().Version?.ToString()
-        ?? "unknown";
+    var version = GetProductVersion();
 
     if (format == "json")
     {
@@ -1896,6 +1901,11 @@ static void PrintVersion(string format)
 
     Console.WriteLine(version);
 }
+
+static string GetProductVersion()
+    => typeof(ArtifactCommand).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? typeof(ArtifactCommand).Assembly.GetName().Version?.ToString()
+        ?? "unknown";
 
 static void PrintHelp()
 {

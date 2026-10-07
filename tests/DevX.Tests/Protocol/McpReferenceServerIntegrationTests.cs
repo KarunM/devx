@@ -19,10 +19,12 @@ public sealed class McpReferenceServerIntegrationTests
         var response = await server.InitializeAsync();
 
         Assert.Equal("2025-06-18", response.ProtocolVersion);
+        Assert.Equal("1.5.0", response.ServerInfo.Version);
         Assert.Contains(response.Tools, tool => tool.Name == "search" && tool.CapabilityId == "search");
         Assert.Contains(response.Tools, tool => tool.Name == "read" && tool.CapabilityId == "read");
         Assert.Contains(response.Tools, tool => tool.Name == "patch.validate" && tool.CapabilityId == "patch.validate");
         Assert.Contains(response.Tools, tool => tool.Name == "patch.apply" && tool.CapabilityId == "patch.apply");
+        Assert.Contains(response.Tools, tool => tool.Name == "index" && tool.CapabilityId == "index");
         Assert.Contains(response.Tools, tool => tool.Name == "report" && tool.CapabilityId == "report");
     }
 
@@ -51,6 +53,32 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.False(read.IsError);
         Assert.True(read.Content.GetProperty("success").GetBoolean());
         Assert.Contains("Program", read.Content.GetRawText(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CallToolAsync_Index_IncrementallyIndexesFiles()
+    {
+        var (server, session, repositoryRoot) = await CreateServerAsync("devx-mcp-index");
+        var path = Path.Combine(repositoryRoot, "src", "Sample", "Added.cs");
+        await IOFile.WriteAllTextAsync(path, "namespace Sample; public sealed class AddedByMcp { }");
+
+        var result = await server.CallToolAsync("index", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            files = new[] { "src/Sample/Added.cs" }
+        }));
+
+        Assert.False(result.IsError);
+        Assert.True(result.Content.GetProperty("success").GetBoolean());
+        Assert.Equal(1, result.Content.GetProperty("result").GetProperty("updatedFiles").GetInt32());
+        var search = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            kind = "symbol",
+            query = "AddedByMcp"
+        }));
+        Assert.True(search.Content.GetProperty("success").GetBoolean());
+        Assert.Contains("AddedByMcp", search.Content.GetRawText());
     }
 
     [Fact]
@@ -118,6 +146,7 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.Equal(3, responses.Length);
         using var initialize = JsonDocument.Parse(responses[0]);
         Assert.Equal("devx", initialize.RootElement.GetProperty("result").GetProperty("serverInfo").GetProperty("name").GetString());
+        Assert.Equal("1.5.0", initialize.RootElement.GetProperty("result").GetProperty("serverInfo").GetProperty("version").GetString());
         using var list = JsonDocument.Parse(responses[1]);
         Assert.True(list.RootElement.GetProperty("result").GetProperty("tools").GetArrayLength() > 0);
         using var call = JsonDocument.Parse(responses[2]);
@@ -170,7 +199,13 @@ public sealed class McpReferenceServerIntegrationTests
         var repositoryId = await GetRepositoryIdAsync(connectionString);
         var session = await store.CreateSessionAsync(new CreateSessionRequest(new RepositoryId(Guid.Parse(repositoryId))));
         var engine = new ProtocolEngine(new SearchService(store, store), store, store);
-        var server = new McpReferenceServer(engine, store, store);
+        var server = new McpReferenceServer(
+            engine,
+            store,
+            store,
+            session.Id.Value.ToString(),
+            (files, cancellationToken) => indexer.ReindexFilesAsync(repositoryRoot, files, cancellationToken),
+            "1.5.0");
         return (server, session, repositoryRoot);
     }
 
