@@ -39,8 +39,10 @@ public static class ReportingDetailsComposer
     {
         var failures = events.Where(e => !e.Success).Select(e => new
         {
-            Event = e, Code = Text(e, "ErrorCode") ?? "reason not recorded",
-            Name = Text(e, "AttemptedName") ?? "name not recorded", Reason = Text(e, "FailureReason"),
+            Event = e,
+            Code = Text(e, "ErrorCode") ?? "reason not recorded",
+            Name = Text(e, "AttemptedName") ?? "name not recorded",
+            Reason = Text(e, "FailureReason"),
             Suggestions = Strings(e, "Suggestions")
         }).ToList();
         var codes = failures.GroupBy(f => (f.Event.Operation, f.Code)).Select(g =>

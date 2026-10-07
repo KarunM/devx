@@ -45,9 +45,12 @@ public static class AnalyticsReportCommand
             var exporting = args.Length > 1 && args[1] == "export";
             if (exporting)
             {
-                var export = input with { Events = input.Events.DistinctBy(e => e.Id).Where(e => e.Timestamp >= now.AddDays(-days) && e.Timestamp <= now).ToList(),
+                var export = input with
+                {
+                    Events = input.Events.DistinctBy(e => e.Id).Where(e => e.Timestamp >= now.AddDays(-days) && e.Timestamp <= now).ToList(),
                     CollectionWindows = (input.CollectionWindows ?? []).Where(w => w.End >= now.AddDays(-days) && w.Start <= now)
-                        .Select(w => w with { Start = w.Start < now.AddDays(-days) ? now.AddDays(-days) : w.Start, End = w.End > now ? now : w.End }).ToList() };
+                        .Select(w => w with { Start = w.Start < now.AddDays(-days) ? now.AddDays(-days) : w.Start, End = w.End > now ? now : w.End }).ToList()
+                };
                 var destination = Option(args, "--output") ?? "events.json";
                 await WriteNewAsync(destination, JsonSerializer.Serialize(export, new JsonSerializerOptions { WriteIndented = true }));
                 Console.WriteLine($"Wrote event export: {Path.GetFullPath(destination)} ({export.Events.Count} events)");

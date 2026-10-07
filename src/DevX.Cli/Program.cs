@@ -1700,8 +1700,17 @@ static string? OperationMetadata(ProtocolResponse response, string? attemptedNam
             if (metadata.TryGetProperty("ReturnedCharacters", out var returned)) returnedCharacters = returned.GetInt64();
             if (metadata.TryGetProperty("ReadEventId", out var readId)) readEventId = readId.GetString();
         }
-        return JsonSerializer.Serialize(new { AttemptedName = attemptedName, Summary = summary, ResolvedVia = resolvedVia,
-            WholeFileCharacters = wholeFileCharacters, ReturnedCharacters = returnedCharacters, ReadEventId = readEventId, ResponseCharacters = responseCharacters, EstimatedTokens = estimatedTokens });
+        return JsonSerializer.Serialize(new
+        {
+            AttemptedName = attemptedName,
+            Summary = summary,
+            ResolvedVia = resolvedVia,
+            WholeFileCharacters = wholeFileCharacters,
+            ReturnedCharacters = returnedCharacters,
+            ReadEventId = readEventId,
+            ResponseCharacters = responseCharacters,
+            EstimatedTokens = estimatedTokens
+        });
     }
 
     var error = response.Errors.FirstOrDefault();

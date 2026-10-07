@@ -1014,7 +1014,7 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
                 // If candidate is the same as the search hit
                 var fullPath = Path.Combine(candidate.RootPath, candidate.FilePath.Replace('/', Path.DirectorySeparatorChar));
                 var sourceText = await System.IO.File.ReadAllTextAsync(fullPath, cancellationToken);
-                
+
                 // Very basic heuristic for finding references without symbol analysis (similar to the caller behavior)
                 if (sourceText.Contains(target.Name, StringComparison.Ordinal) && !addedIds.Contains(candidate.Id))
                 {

@@ -319,7 +319,7 @@ public static class JavaScriptSymbolReader
                     var k = i + 1;
                     while (k < masked.Length && char.IsWhiteSpace(masked[k])) k++;
                     // A leading `.`/operator on the next line continues the expression.
-                    if (k < masked.Length && ".?:+-*/&|,".IndexOf(masked[k]) >= 0 && !(masked[k] == '/' ))
+                    if (k < masked.Length && ".?:+-*/&|,".IndexOf(masked[k]) >= 0 && !(masked[k] == '/'))
                     {
                         continue;
                     }

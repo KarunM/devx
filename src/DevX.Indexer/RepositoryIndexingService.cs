@@ -66,9 +66,9 @@ public sealed class RepositoryIndexingService
                             $"{parsed.Namespace}.{type.Name}",
                             null, type.StartLine, type.EndLine), cancellationToken);
 
-                    foreach (var method in type.Methods)
-                    {
-                        await _repositoryStore.UpsertMethodAsync(new Method(new MethodId(StableId($"{typeId}:{method.Name}:{method.Signature}")), typeId, method.Name), cancellationToken);
+                        foreach (var method in type.Methods)
+                        {
+                            await _repositoryStore.UpsertMethodAsync(new Method(new MethodId(StableId($"{typeId}:{method.Name}:{method.Signature}")), typeId, method.Name), cancellationToken);
                             await _symbolStore.UpsertSymbolAsync(new Symbol(
                                 StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{method.Name}:{method.Signature}").ToString(),
                                 repository.Id.Value.ToString(),
@@ -79,12 +79,12 @@ public sealed class RepositoryIndexingService
                                 method.Name,
                                 $"{parsed.Namespace}.{type.Name}.{method.Name}",
                                 method.Signature, method.StartLine, method.EndLine), cancellationToken);
-                    }
+                        }
 
-                    await IndexCallersAsync(filePath, file.Id, parsed.Namespace, type.Name, type.Methods, cancellationToken);
+                        await IndexCallersAsync(filePath, file.Id, parsed.Namespace, type.Name, type.Methods, cancellationToken);
 
-                    foreach (var property in type.Properties)
-                    {
+                        foreach (var property in type.Properties)
+                        {
                             await _repositoryStore.UpsertPropertyAsync(new Property(new PropertyId(StableId($"{typeId}:{property.Name}")), typeId, property.Name), cancellationToken);
                             await _symbolStore.UpsertSymbolAsync(new Symbol(
                                 StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{property.Name}").ToString(),

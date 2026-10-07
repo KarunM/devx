@@ -1,4 +1,4 @@
-﻿namespace DevX.Indexer;
+namespace DevX.Indexer;
 
 public class Class1
 {

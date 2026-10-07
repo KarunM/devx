@@ -52,58 +52,58 @@ public sealed class ProtocolEngine : IProtocolEngine
 
         try
         {
-        var response = request.Operation switch
-        {
-            ProtocolOperations.SearchSymbol => await HandleSearchSymbolAsync(request, session, cancellationToken),
-            ProtocolOperations.SearchText => await HandleSearchTextAsync(request, session, cancellationToken),
-            ProtocolOperations.GetFileSnapshot => await HandleGetFileSnapshotAsync(request, session, cancellationToken),
-            ProtocolOperations.GetMethodSummary => await HandleGetMethodSummaryAsync(request, session, cancellationToken),
-            ProtocolOperations.GetMethod => await HandleGetMethodAsync(request, session, cancellationToken),
-            "READ_FILE" => await HandleReadFileAsync(request, session, cancellationToken),
-            "READ_METHOD" => await HandleReadMethodAsync(request, session, cancellationToken),
-            "READ_SECTION" => await HandleReadSectionAsync(request, session, cancellationToken),
-            "READ_TYPE" => await HandleReadTypeAsync(request, session, cancellationToken),
-            ProtocolOperations.GetTypeOperation => await HandleGetTypeAsync(request, session, cancellationToken),
-            ProtocolOperations.GetCallers => await HandleGetCallersAsync(request, session, cancellationToken),
-            ProtocolOperations.GetCallees => await HandleGetCalleesAsync(request, session, cancellationToken),
-            ProtocolOperations.GetReferences => await HandleGetReferencesAsync(request, session, cancellationToken),
-            ProtocolOperations.Patch => await HandlePatchAsync(request, session, cancellationToken),
-            "PATCH_PREVIEW" => await HandlePatchPreviewAsync(request, session, cancellationToken),
-            "PATCH_VALIDATE" => await HandlePatchValidateAsync(request, session, cancellationToken),
-            ProtocolOperations.PatchRollback => await HandlePatchRollbackAsync(request, session, cancellationToken),
-            ProtocolOperations.RunBuild => await HandleRunBuildAsync(request, session, cancellationToken),
-            ProtocolOperations.RunTests => await HandleRunTestsAsync(request, session, cancellationToken),
-            ProtocolOperations.GetDiagnostics => await HandleGetDiagnosticsAsync(session, cancellationToken),
-            ProtocolOperations.GetMethod or ProtocolOperations.GetCallers or ProtocolOperations.GetCallees or ProtocolOperations.GetTests
-                => Fail("HandlerNotImplemented", $"Operation '{request.Operation}' is not implemented yet."),
-            _ => Fail("InvalidOperation", $"Unknown operation '{request.Operation}'.")
-        };
-        if (response.Success && request.Operation.StartsWith("READ_", StringComparison.Ordinal)
-            && response.Data is { ValueKind: JsonValueKind.Object } data && data.TryGetProperty("Path", out var path))
-        {
-            var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
-            if (root is not null)
+            var response = request.Operation switch
             {
-                var absolute = Path.GetFullPath(Path.Combine(root, path.GetString()!));
-                if (!IOFile.Exists(absolute)) return Fail("FileMissing", $"file missing: {path.GetString()}", GetReadQuery(request.Payload));
-                var whole = await IOFile.ReadAllTextAsync(absolute, cancellationToken);
-                var node = System.Text.Json.Nodes.JsonNode.Parse(data.GetRawText())!.AsObject();
-                var metadata = node["Metadata"] as System.Text.Json.Nodes.JsonObject ?? new();
-                metadata["WholeFileCharacters"] = whole.Length;
-                metadata["ReturnedCharacters"] = data.TryGetProperty("SourceReturned", out var sourceReturned) && sourceReturned.GetBoolean()
-                    ? data.GetProperty("Source").GetString()!.Length : data.GetRawText().Length;
-                metadata["ReadEventId"] = Guid.NewGuid().ToString();
-                metadata["ReturnedLines"] = data.GetProperty("ReturnedLines").GetInt32();
-                node["Metadata"] = metadata;
-                response = response with { Data = JsonSerializer.SerializeToElement(node) };
-                var metricMetadata = new System.Text.Json.Nodes.JsonObject();
-                foreach (var entry in metadata) metricMetadata[entry.Key] = entry.Value?.DeepClone();
-                metricMetadata["EventOrigin"] = "internal-read";
-                await _sessionStore.AddOperationMetricAsync(new OperationMetric(request.Operation.ToLowerInvariant().Replace('_', ' '),
-                    readStarted, DateTimeOffset.UtcNow - readStarted, true, session.Id.Value.ToString(), metricMetadata.ToJsonString(), request.AgentLabel), cancellationToken);
+                ProtocolOperations.SearchSymbol => await HandleSearchSymbolAsync(request, session, cancellationToken),
+                ProtocolOperations.SearchText => await HandleSearchTextAsync(request, session, cancellationToken),
+                ProtocolOperations.GetFileSnapshot => await HandleGetFileSnapshotAsync(request, session, cancellationToken),
+                ProtocolOperations.GetMethodSummary => await HandleGetMethodSummaryAsync(request, session, cancellationToken),
+                ProtocolOperations.GetMethod => await HandleGetMethodAsync(request, session, cancellationToken),
+                "READ_FILE" => await HandleReadFileAsync(request, session, cancellationToken),
+                "READ_METHOD" => await HandleReadMethodAsync(request, session, cancellationToken),
+                "READ_SECTION" => await HandleReadSectionAsync(request, session, cancellationToken),
+                "READ_TYPE" => await HandleReadTypeAsync(request, session, cancellationToken),
+                ProtocolOperations.GetTypeOperation => await HandleGetTypeAsync(request, session, cancellationToken),
+                ProtocolOperations.GetCallers => await HandleGetCallersAsync(request, session, cancellationToken),
+                ProtocolOperations.GetCallees => await HandleGetCalleesAsync(request, session, cancellationToken),
+                ProtocolOperations.GetReferences => await HandleGetReferencesAsync(request, session, cancellationToken),
+                ProtocolOperations.Patch => await HandlePatchAsync(request, session, cancellationToken),
+                "PATCH_PREVIEW" => await HandlePatchPreviewAsync(request, session, cancellationToken),
+                "PATCH_VALIDATE" => await HandlePatchValidateAsync(request, session, cancellationToken),
+                ProtocolOperations.PatchRollback => await HandlePatchRollbackAsync(request, session, cancellationToken),
+                ProtocolOperations.RunBuild => await HandleRunBuildAsync(request, session, cancellationToken),
+                ProtocolOperations.RunTests => await HandleRunTestsAsync(request, session, cancellationToken),
+                ProtocolOperations.GetDiagnostics => await HandleGetDiagnosticsAsync(session, cancellationToken),
+                ProtocolOperations.GetMethod or ProtocolOperations.GetCallers or ProtocolOperations.GetCallees or ProtocolOperations.GetTests
+                    => Fail("HandlerNotImplemented", $"Operation '{request.Operation}' is not implemented yet."),
+                _ => Fail("InvalidOperation", $"Unknown operation '{request.Operation}'.")
+            };
+            if (response.Success && request.Operation.StartsWith("READ_", StringComparison.Ordinal)
+                && response.Data is { ValueKind: JsonValueKind.Object } data && data.TryGetProperty("Path", out var path))
+            {
+                var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+                if (root is not null)
+                {
+                    var absolute = Path.GetFullPath(Path.Combine(root, path.GetString()!));
+                    if (!IOFile.Exists(absolute)) return Fail("FileMissing", $"file missing: {path.GetString()}", GetReadQuery(request.Payload));
+                    var whole = await IOFile.ReadAllTextAsync(absolute, cancellationToken);
+                    var node = System.Text.Json.Nodes.JsonNode.Parse(data.GetRawText())!.AsObject();
+                    var metadata = node["Metadata"] as System.Text.Json.Nodes.JsonObject ?? new();
+                    metadata["WholeFileCharacters"] = whole.Length;
+                    metadata["ReturnedCharacters"] = data.TryGetProperty("SourceReturned", out var sourceReturned) && sourceReturned.GetBoolean()
+                        ? data.GetProperty("Source").GetString()!.Length : data.GetRawText().Length;
+                    metadata["ReadEventId"] = Guid.NewGuid().ToString();
+                    metadata["ReturnedLines"] = data.GetProperty("ReturnedLines").GetInt32();
+                    node["Metadata"] = metadata;
+                    response = response with { Data = JsonSerializer.SerializeToElement(node) };
+                    var metricMetadata = new System.Text.Json.Nodes.JsonObject();
+                    foreach (var entry in metadata) metricMetadata[entry.Key] = entry.Value?.DeepClone();
+                    metricMetadata["EventOrigin"] = "internal-read";
+                    await _sessionStore.AddOperationMetricAsync(new OperationMetric(request.Operation.ToLowerInvariant().Replace('_', ' '),
+                        readStarted, DateTimeOffset.UtcNow - readStarted, true, session.Id.Value.ToString(), metricMetadata.ToJsonString(), request.AgentLabel), cancellationToken);
+                }
             }
-        }
-        return response;
+            return response;
         }
         catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
         {
