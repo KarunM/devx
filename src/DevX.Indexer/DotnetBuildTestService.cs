@@ -42,9 +42,22 @@ public sealed class DotnetBuildTestService
             var path = NormalizeSelector(root, selector);
             if (path.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
             {
-                var pytest = LooksLikePytest(path);
-                var arguments = pytest ? $"-m pytest \"{path}\"" : $"\"{path}\"";
-                executions.Add(await RunWithTimeoutAsync(PythonExecutable(root), arguments, root, remaining, token, pytest ? "test" : "check"));
+                if (selectors.Count == 1 && LooksLikePytestTestFile(path))
+                {
+                    var command = BuildPythonFileTestCommand(root, path);
+                    executions.Add(await RunWithTimeoutAsync(command.FileName, command.Arguments, root, remaining, token, "test"));
+                }
+                else
+                {
+                    var pytest = LooksLikePytest(path);
+                    var arguments = pytest ? $"-m pytest \"{path}\"" : $"\"{path}\"";
+                    executions.Add(await RunWithTimeoutAsync(PythonExecutable(root), arguments, root, remaining, token, pytest ? "test" : "check"));
+                }
+            }
+            else if (path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+            {
+                var command = BuildCSharpFileTestCommand(root, path);
+                executions.Add(await RunWithTimeoutAsync(command.FileName, command.Arguments, root, remaining, token, "test"));
             }
             else if (Directory.Exists(path) && Directory.EnumerateFiles(path, "*.py", SearchOption.AllDirectories).Any())
             {
@@ -63,6 +76,31 @@ public sealed class DotnetBuildTestService
 
         return CombineExecutions(executions, selectors.Count, timer.Elapsed);
     }
+
+    public static (string FileName, string Arguments) BuildCSharpFileTestCommand(string root, string path)
+    {
+        var file = Path.GetFullPath(NormalizeSelector(root, path));
+        var directory = Path.GetDirectoryName(file)!;
+        string? project = null;
+        for (var current = new DirectoryInfo(directory); current is not null && project is null; current = current.Parent)
+            project = current.EnumerateFiles("*.csproj").OrderBy(item => item.FullName, StringComparer.Ordinal).FirstOrDefault()?.FullName;
+        if (project is null) throw new FileNotFoundException($"No enclosing .csproj found for '{path}'.");
+        var source = File.Exists(file) ? File.ReadAllText(file) : string.Empty;
+        var classes = Regex.Matches(source, @"\bclass\s+(\w+)").Select(match => match.Groups[1].Value).Distinct().ToArray();
+        var filter = classes.Length == 0 ? string.Empty : " --filter \"" + string.Join("|", classes.Select(name => $"FullyQualifiedName~{name}")) + "\"";
+        return ("dotnet", $"test \"{project}\"{filter}");
+    }
+
+    public static (string FileName, string Arguments) BuildPythonFileTestCommand(string root, string path)
+    {
+        var file = Path.GetFullPath(NormalizeSelector(root, path));
+        return (PythonExecutable(root), $"-m pytest \"{file}\"");
+    }
+
+    private static bool LooksLikePytestTestFile(string path)
+        => Path.GetFileName(path).StartsWith("test_", StringComparison.OrdinalIgnoreCase)
+            || Path.GetFileName(path).EndsWith("_test.py", StringComparison.OrdinalIgnoreCase)
+            || (File.Exists(path) && Regex.IsMatch(File.ReadAllText(path), @"(?m)^\s*(?:async\s+)?def\s+test_"));
 
     private static bool IsDotnetProject(string root, string? selector)
     {
