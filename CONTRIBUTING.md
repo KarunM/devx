@@ -10,6 +10,7 @@ Install the .NET 10 SDK. From the repository root:
 dotnet restore DevX.sln
 dotnet build DevX.sln
 dotnet test tests/DevX.Tests/DevX.Tests.csproj
+dotnet test tests/DevX.Tests/DevX.Tests.csproj --collect:"XPlat Code Coverage"
 dotnet format DevX.sln
 ```
 

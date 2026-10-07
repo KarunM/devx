@@ -6,6 +6,7 @@ Resolved package versions below come from each source project's and `tests/DevX.
 
 | Package | Version | Dependency kind | SPDX license | License URL | Resolved in | Apache-2.0 compatible? |
 |---|---:|---|---|---|---|---|
+| coverlet.collector | 6.0.4 | Test-only | MIT | https://licenses.nuget.org/MIT | `tests/DevX.Tests` | Yes |
 | Microsoft.CodeAnalysis.Analyzers | 3.3.4 | Transitive | MIT | https://licenses.nuget.org/MIT | `src/DevX.Cli`, `src/DevX.Indexer`, `src/DevX.Infrastructure`, `src/DevX.Protocol`, `tests/DevX.Tests` | Yes |
 | Microsoft.CodeAnalysis.Common | 4.12.0 | Transitive | MIT | https://licenses.nuget.org/MIT | `src/DevX.Cli`, `src/DevX.Indexer`, `src/DevX.Infrastructure`, `src/DevX.Protocol`, `tests/DevX.Tests` | Yes |
 | Microsoft.CodeAnalysis.CSharp | 4.12.0 | Direct in `src/DevX.Indexer`, `src/DevX.Infrastructure` | MIT | https://licenses.nuget.org/MIT | `src/DevX.Cli`, `src/DevX.Indexer`, `src/DevX.Infrastructure`, `src/DevX.Protocol`, `tests/DevX.Tests` | Yes |
