@@ -14,6 +14,8 @@ public sealed class McpReferenceServer
     private readonly IRepositoryStore _repositoryStore;
     private readonly string? _defaultSessionId;
     private readonly Func<string[], CancellationToken, Task<IndexRefreshResult>>? _reindexFilesAsync;
+    private readonly Func<CancellationToken, Task>? _indexRepositoryAsync;
+    private readonly Func<CancellationToken, Task>? _initializeStorageAsync;
     private readonly string _version;
 
     public McpReferenceServer(
@@ -22,13 +24,17 @@ public sealed class McpReferenceServer
         IRepositoryStore repositoryStore,
         string? defaultSessionId = null,
         Func<string[], CancellationToken, Task<IndexRefreshResult>>? reindexFilesAsync = null,
-        string version = "1.0")
+        string version = "1.0",
+        Func<CancellationToken, Task>? indexRepositoryAsync = null,
+        Func<CancellationToken, Task>? initializeStorageAsync = null)
     {
         _protocolEngine = protocolEngine;
         _sessionStore = sessionStore;
         _repositoryStore = repositoryStore;
         _defaultSessionId = defaultSessionId;
         _reindexFilesAsync = reindexFilesAsync;
+        _indexRepositoryAsync = indexRepositoryAsync;
+        _initializeStorageAsync = initializeStorageAsync;
         _version = version;
     }
 
@@ -55,6 +61,8 @@ public sealed class McpReferenceServer
             withSession["sessionId"] = _defaultSessionId;
             arguments = JsonSerializer.SerializeToElement(withSession, JsonOptions);
         }
+        if (RequiresIndex(toolName) && await IsRepositoryUnindexedAsync(arguments, cancellationToken))
+            return new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = "repository not indexed: call the `index` tool first (omit `files` to index the whole repository)" }, JsonOptions));
         return toolName switch
         {
             "search" => await ExecuteProtocolAsync(
@@ -202,7 +210,7 @@ public sealed class McpReferenceServer
 
     private static JsonElement BuildReadPayload(JsonElement arguments)
     {
-        var target = RequiredString(arguments, "target");
+        var target = RequiredAliasString(arguments, "target", "query");
         var readKind = ReadKind(arguments);
         var queryName = readKind == "file" ? "query" : "query";
         var payload = new Dictionary<string, object?>
@@ -249,20 +257,42 @@ public sealed class McpReferenceServer
         };
 
     private Task<McpToolCallResult> ExecuteQueryToolAsync(string operation, JsonElement arguments, CancellationToken cancellationToken)
-        => ExecuteProtocolAsync(operation, RequiredSessionId(arguments), JsonSerializer.SerializeToElement(new { query = RequiredString(arguments, "query") }), cancellationToken);
+        => ExecuteProtocolAsync(operation, RequiredSessionId(arguments), JsonSerializer.SerializeToElement(new { query = RequiredAliasString(arguments, "target", "query") }), cancellationToken);
 
     private async Task<McpToolCallResult> IndexFilesAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
+        if (!arguments.TryGetProperty("files", out var files) || files.ValueKind == JsonValueKind.Null || (files.ValueKind == JsonValueKind.Array && files.GetArrayLength() == 0))
+        {
+            if (_indexRepositoryAsync is null)
+                return new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = "Whole-repository indexing is unavailable." }, JsonOptions));
+            await _indexRepositoryAsync(cancellationToken);
+            var session = await _sessionStore.GetSessionAsync(new GetSessionRequest(new SessionId(Guid.Parse(RequiredSessionId(arguments)))), cancellationToken);
+            var count = session is null ? 0 : await _repositoryStore.CountIndexedFilesAsync(session.RepositoryId, cancellationToken);
+            return new McpToolCallResult(false, JsonSerializer.SerializeToElement(new { success = true, filesIndexed = count }, JsonOptions));
+        }
         if (_reindexFilesAsync is null)
             return new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = "Incremental indexing is unavailable." }, JsonOptions));
-        if (!arguments.TryGetProperty("files", out var files) || files.ValueKind != JsonValueKind.Array
-            || files.GetArrayLength() == 0 || files.EnumerateArray().Any(file => file.ValueKind != JsonValueKind.String))
-            return new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = "Argument 'files' must be a non-empty array of paths." }, JsonOptions));
+        if (files.ValueKind != JsonValueKind.Array || files.EnumerateArray().Any(file => file.ValueKind != JsonValueKind.String))
+            return new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = "Argument 'files' must be an array of paths." }, JsonOptions));
 
         var result = await _reindexFilesAsync(files.EnumerateArray().Select(file => file.GetString()!).ToArray(), cancellationToken);
         var failed = result.SkippedFilePaths?.Any(file => file.Reason.StartsWith("ERROR:", StringComparison.Ordinal)) == true;
         return new McpToolCallResult(failed, JsonSerializer.SerializeToElement(new { success = !failed, result }, JsonOptions));
     }
+
+    private async Task<bool> IsRepositoryUnindexedAsync(JsonElement arguments, CancellationToken cancellationToken)
+    {
+        if (_initializeStorageAsync is not null)
+            await _initializeStorageAsync(cancellationToken);
+        var session = await _sessionStore.GetSessionAsync(new GetSessionRequest(new SessionId(Guid.Parse(RequiredSessionId(arguments)))), cancellationToken);
+        return session is null || await _repositoryStore.CountIndexedFilesAsync(session.RepositoryId, cancellationToken) == 0;
+    }
+
+    private static bool RequiresIndex(string toolName)
+        => toolName is "search" or "read" or "snapshot" or "callers" or "callees" or "references" or "patch.preview" or "patch.validate" or "patch.apply";
+
+    private static string RequiredAliasString(JsonElement arguments, string canonical, string alias)
+        => TryGetString(arguments, canonical, out var value) ? value : RequiredString(arguments, alias);
 
     private static JsonElement BuildRuntimePayload(JsonElement arguments)
     {
@@ -392,11 +422,11 @@ public sealed class McpReferenceServer
                 required = new[] { "patch" }
             }),
             CreateTool("patch.preview", "Patch Preview", "Preview a structured patch.", "patch.validate", new { type = "object", properties = new { sessionId = new { type = "string" }, patch = new { type = "object" } }, required = new[] { "patch" } }),
-            CreateQueryTool("snapshot", "Snapshot", "Get a source file snapshot.", "sessionId", "query"),
-            CreateTool("index", "Index files", "Incrementally update the repository index for the given paths.", "index", new { type = "object", properties = new { files = new { type = "array", items = new { type = "string" } }, sessionId = new { type = "string" } }, required = new[] { "files" } }),
-            CreateQueryTool("callers", "Callers", "Find callers of a symbol.", "sessionId", "query"),
-            CreateQueryTool("callees", "Callees", "Find callees of a symbol.", "sessionId", "query"),
-            CreateQueryTool("references", "References", "Find references to a symbol.", "sessionId", "query"),
+            CreateQueryTool("snapshot", "Snapshot", "Get a source file snapshot.", "sessionId", "target"),
+            CreateTool("index", "Index files", "Index given paths or the whole repository when files is omitted.", "index", new { type = "object", properties = new { files = new { type = "array", items = new { type = "string" } }, sessionId = new { type = "string" } }, required = Array.Empty<string>() }),
+            CreateQueryTool("callers", "Callers", "Find callers of a symbol.", "sessionId", "target"),
+            CreateQueryTool("callees", "Callees", "Find callees of a symbol.", "sessionId", "target"),
+            CreateQueryTool("references", "References", "Find references to a symbol.", "sessionId", "target"),
             CreateTool("build", "Build", "Run a configured build target.", "build", new { type = "object", properties = new { sessionId = new { type = "string" }, runtime = new { type = "string" }, target = new { type = "string" } }, required = Array.Empty<string>() }),
             CreateTool("test", "Test", "Run tests through the configured test service.", "test", new { type = "object", properties = new { sessionId = new { type = "string" }, target = new { type = "string" }, testFiles = new { type = "array", items = new { type = "string" } }, timeoutSeconds = new { type = "integer" } }, required = Array.Empty<string>() }),
             CreateTool("report", "Report", "Return the current session report through the runtime capability layer.", "report", new
@@ -415,7 +445,16 @@ public sealed class McpReferenceServer
         => new(name, title, description, capabilityId, JsonSerializer.SerializeToElement(schema, JsonOptions));
 
     private static McpToolDescriptor CreateQueryTool(string name, string title, string description, string sessionProperty, string queryProperty)
-        => CreateTool(name, title, description, name, new { type = "object", properties = new { sessionId = new { type = "string" }, query = new { type = "string" } }, required = new[] { queryProperty } });
+        => CreateTool(name, title, description, name, new
+        {
+            type = "object",
+            properties = new Dictionary<string, object>
+            {
+                [sessionProperty] = new { type = "string" },
+                [queryProperty] = new { type = "string" }
+            },
+            required = new[] { queryProperty }
+        });
 
     private sealed record McpFallbackEventMetadata(
         string CapabilityId,

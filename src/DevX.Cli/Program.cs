@@ -160,7 +160,9 @@ static async Task<int> McpServeAsync(string connectionString)
         store,
         session.Id.Value.ToString(),
         (files, cancellationToken) => indexer.ReindexFilesAsync(root, files, cancellationToken),
-        GetProductVersion());
+        GetProductVersion(),
+        cancellationToken => indexer.IndexAsync(root, cancellationToken),
+        cancellationToken => store.InitializeAsync(cancellationToken));
     await new McpStdioServer(reference).RunAsync(Console.In, Console.Out);
     return 0;
 }

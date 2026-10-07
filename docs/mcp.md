@@ -8,11 +8,21 @@ Start it from the repository you want to work with:
 devx mcp serve
 ```
 
-The transport uses newline-delimited JSON-RPC 2.0 on stdin and stdout; diagnostics belong on stderr. The repository session is created for each server process. Index the repository first with `devx index .` to enable indexed search.
+The transport uses newline-delimited JSON-RPC 2.0 on stdin and stdout; diagnostics belong on stderr. The repository session is created for each server process. The server does not index automatically at startup. If an index-dependent tool is called before the repository has indexed files, it returns `isError: true` with this text: “repository not indexed: call the `index` tool first (omit `files` to index the whole repository)”. Call `index` first to build the index.
 
 ## Tools
 
-The server exposes `index` (incrementally update the index for file paths), `search` (symbol or text), `read` (file, method, type, or section), `snapshot`, `callers`, `callees`, `references`, `patch.preview`, `patch.validate`, `patch.apply`, `build`, `test`, and `report`. The process creates a repository session at startup and applies it to tool calls automatically. Patch tools accept structured patch documents. Tool results are returned as MCP text content containing the DevX protocol response; failed operations set `isError`.
+The server exposes `index` (incrementally update paths or, when `files` is absent/empty, index the whole repository using the same file selection and `.gitignore` handling as `devx index .`), `search` (symbol or text), `read` (file, method, type, or section), `snapshot`, `callers`, `callees`, `references`, `patch.preview`, `patch.validate`, `patch.apply`, `build`, `test`, and `report`. `index` returns the number of indexed files. The process creates a repository session at startup and applies it to tool calls automatically. Patch tools accept structured patch documents. Tool results are returned as MCP text content containing the DevX protocol response; failed operations set `isError`.
+
+Canonical argument names are shown in `tools/list`. For one release, old names remain accepted as deprecated aliases:
+
+| Tool(s) | Canonical | Deprecated alias |
+| --- | --- | --- |
+| `search` | `query` | — |
+| `read`, `snapshot`, `callers`, `callees`, `references` | `target` | `query` |
+| `index` | `files` (optional) | — |
+
+`kind` remains the argument name for `search` and `read`.
 
 ## Client setup
 

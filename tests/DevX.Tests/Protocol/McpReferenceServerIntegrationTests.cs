@@ -56,6 +56,45 @@ public sealed class McpReferenceServerIntegrationTests
     }
 
     [Fact]
+    public async Task StdioServer_SearchBeforeIndex_ReturnsIndexHint()
+    {
+        var (server, session, _) = await CreateServerAsync("devx-mcp-unindexed", indexRepository: false);
+        var input = new StringReader($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"search\",\"arguments\":{{\"sessionId\":\"{session.Id.Value}\",\"kind\":\"symbol\",\"query\":\"Program\"}}}}}}\n");
+        var output = new StringWriter();
+
+        await new McpStdioServer(server).RunAsync(input, output);
+
+        using var response = JsonDocument.Parse(output.ToString());
+        var result = response.RootElement.GetProperty("result");
+        Assert.True(result.GetProperty("isError").GetBoolean());
+        Assert.Contains("repository not indexed", result.GetProperty("content")[0].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task CallToolAsync_IndexWithoutFilesIndexesWholeRepository()
+    {
+        var (server, session, _) = await CreateServerAsync("devx-mcp-whole-index", indexRepository: false);
+        var indexed = await server.CallToolAsync("index", JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString() }));
+
+        Assert.False(indexed.IsError);
+        Assert.True(indexed.Content.GetProperty("filesIndexed").GetInt32() > 0);
+        var search = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString(), kind = "symbol", query = "Program" }));
+        Assert.False(search.IsError);
+        Assert.Contains("Program", search.Content.GetRawText());
+    }
+
+    [Fact]
+    public async Task CallToolAsync_ReadAcceptsCanonicalAndDeprecatedArgumentNames()
+    {
+        var (server, session, _) = await CreateServerAsync("devx-mcp-callers-alias");
+        var canonical = await server.CallToolAsync("read", JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString(), kind = "file", target = "src/Sample/Program.cs" }));
+        var alias = await server.CallToolAsync("read", JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString(), kind = "file", query = "src/Sample/Program.cs" }));
+
+        Assert.False(canonical.IsError);
+        Assert.False(alias.IsError);
+    }
+
+    [Fact]
     public async Task CallToolAsync_Index_IncrementallyIndexesFiles()
     {
         var (server, session, repositoryRoot) = await CreateServerAsync("devx-mcp-index");
@@ -193,7 +232,7 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.True(missingArguments.RootElement.GetProperty("result").GetProperty("isError").GetBoolean());
     }
 
-    private static async Task<(McpReferenceServer Server, SessionState Session, string RepositoryRoot)> CreateServerAsync(string prefix)
+    private static async Task<(McpReferenceServer Server, SessionState Session, string RepositoryRoot)> CreateServerAsync(string prefix, bool indexRepository = true)
     {
         var repositoryRoot = Directory.CreateTempSubdirectory(prefix).FullName;
         var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
@@ -217,8 +256,15 @@ public sealed class McpReferenceServerIntegrationTests
 
         var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"devx-mcp-{Guid.NewGuid():N}.db") }.ToString();
         var store = new SqliteStorageInitializer(connectionString);
+        await store.InitializeAsync();
         var indexer = new RepositoryIndexingService(store);
-        await indexer.IndexAsync(repositoryRoot);
+        if (indexRepository)
+            await indexer.IndexAsync(repositoryRoot);
+        else
+        {
+            var repositoryHash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(repositoryRoot.ToLowerInvariant()));
+            await store.UpsertRepositoryAsync(new Repository(new RepositoryId(new Guid(repositoryHash.AsSpan(0, 16))), Path.GetFileName(repositoryRoot), repositoryRoot));
+        }
 
         var repositoryId = await GetRepositoryIdAsync(connectionString);
         var session = await store.CreateSessionAsync(new CreateSessionRequest(new RepositoryId(Guid.Parse(repositoryId))));
@@ -229,7 +275,9 @@ public sealed class McpReferenceServerIntegrationTests
             store,
             session.Id.Value.ToString(),
             (files, cancellationToken) => indexer.ReindexFilesAsync(repositoryRoot, files, cancellationToken),
-            "1.5.0");
+            "1.5.0",
+            cancellationToken => indexer.IndexAsync(repositoryRoot, cancellationToken),
+            cancellationToken => store.InitializeAsync(cancellationToken));
         return (server, session, repositoryRoot);
     }
 
