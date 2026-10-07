@@ -79,6 +79,13 @@ jobs:
             echo "value=0.0.0-dryrun" >> "$GITHUB_OUTPUT"
           fi
       - run: dotnet publish src/DevX.Cli -c Release -r ${{ matrix.rid }} --self-contained -p:PublishSingleFile=true -o publish/${{ matrix.rid }}
+      - name: Smoke test published binary
+        shell: bash
+        env:
+          PY: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
+          RID: ${{ matrix.rid }}
+        # osx-x64 runs on the arm64 macOS runner through Rosetta.
+        run: ${PY} tools/smoke_single_file.py "publish/${RID}"
       - name: Archive binary (Unix)
         if: ${{ matrix.archive == 'tar.gz' }}
         shell: bash

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.2
+
+- Single-file builds no longer crash when indexing Python files
+- Release workflow smoke-tests the published single-file binary on every target
+
 ## 1.6.1
 
 - `read method` finds functions declared in top-level statements (for example `Program.cs`)
