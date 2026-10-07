@@ -4,12 +4,22 @@ DevX is a local code-intelligence CLI for software engineers and coding agents. 
 
 ## Install
 
-Install the `DevX.Cli` .NET tool package; its command is `devx`.
+Install the `DevX.Cli` .NET tool package (requires the .NET 10 SDK), or download a single-file binary for your platform from the GitHub Releases page. The binary requires no .NET installation; verify it with `SHA256SUMS.txt` included with each release.
 
 ```sh
 dotnet tool install --global DevX.Cli
 devx --help
 ```
+
+Claude Code MCP setup:
+
+```sh
+claude mcp add devx -- devx mcp serve
+```
+
+See the [MCP setup guide](docs/mcp.md) for details.
+
+**Privacy:** DevX makes no automatic network calls. Network activity occurs only when you run commands that initiate it, such as `devx ask`, build/test operations that restore packages, or `devx run` with a network-using program. See [network and data](docs/network-and-data.md).
 
 ## Quick start (60 seconds)
 
@@ -26,9 +36,9 @@ Create a session with `devx session create --format json`, then pass its ID to s
 
 See the [MCP setup guide](docs/mcp.md).
 
-## Benchmark results (to be added)
+## Benchmarks
 
-Benchmark results will be published here when available.
+Benchmark results will be published here; the protocol and task sets are in docs/benchmarks/ (coming with the first published run).
 
 ## Licence and contributing
 
