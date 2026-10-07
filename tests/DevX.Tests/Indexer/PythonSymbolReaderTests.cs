@@ -11,6 +11,32 @@ namespace DevX.Tests.Indexer;
 /// </summary>
 public sealed class PythonSymbolReaderTests
 {
+    [Fact]
+    public void ResolveScriptPath_EmptyAssemblyLocationFallsBackToBaseDirectory()
+    {
+        var result = PythonSymbolReader.ResolveScriptPath(
+            string.Empty,
+            "/app",
+            null,
+            _ => false);
+
+        Assert.Equal(Path.Combine("/app", "PythonAst", "parse_symbols.py"), result);
+    }
+
+    [Fact]
+    public void ResolveScriptPath_PrefersAssemblyDirectoryWhenScriptExistsThere()
+    {
+        var assemblyCandidate = Path.Combine("/assembly", "PythonAst", "parse_symbols.py");
+
+        var result = PythonSymbolReader.ResolveScriptPath(
+            "/assembly/DevX.Domain.dll",
+            "/app",
+            "/process/devx",
+            path => path == assemblyCandidate);
+
+        Assert.Equal(assemblyCandidate, result);
+    }
+
     private static ParsedFile ParseSource(string source)
     {
         var path = Path.Combine(Path.GetTempPath(), $"devx-py-{Guid.NewGuid():N}.py");

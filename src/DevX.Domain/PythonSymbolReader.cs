@@ -98,13 +98,43 @@ public static class PythonSymbolReader
 
     private static string ResolveScriptPath()
     {
-        var assemblyDirectory = Path.GetDirectoryName(typeof(PythonSymbolReader).Assembly.Location)!;
-        var candidate = Path.Combine(assemblyDirectory, "PythonAst", "parse_symbols.py");
-        if (System.IO.File.Exists(candidate))
+        return ResolveScriptPath(
+            typeof(PythonSymbolReader).Assembly.Location,
+            AppContext.BaseDirectory,
+            Environment.ProcessPath,
+            System.IO.File.Exists);
+    }
+
+    internal static string ResolveScriptPath(
+        string assemblyLocation,
+        string baseDirectory,
+        string? processPath,
+        Func<string, bool> exists)
+    {
+        var baseCandidate = Path.Combine(baseDirectory, "PythonAst", "parse_symbols.py");
+        var directories = new List<string>();
+
+        if (!string.IsNullOrEmpty(assemblyLocation) && Path.GetDirectoryName(assemblyLocation) is { } assemblyDirectory)
         {
-            return candidate;
+            directories.Add(assemblyDirectory);
         }
 
-        return Path.Combine(AppContext.BaseDirectory, "PythonAst", "parse_symbols.py");
+        directories.Add(baseDirectory);
+
+        if (!string.IsNullOrEmpty(processPath) && Path.GetDirectoryName(processPath) is { } processDirectory)
+        {
+            directories.Add(processDirectory);
+        }
+
+        foreach (var directory in directories)
+        {
+            var candidate = Path.Combine(directory, "PythonAst", "parse_symbols.py");
+            if (exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return baseCandidate;
     }
 }

@@ -10,4 +10,8 @@
     <None Include="PythonAst\parse_symbols.py" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="DevX.Tests" />
+  </ItemGroup>
+
 </Project>
