@@ -120,8 +120,18 @@ def smoke(binary):
             require(before.get("result", {}).get("isError") is True and "not indexed" in before_text.lower(), "MCP search before indexing did not report not indexed")
             print("PASS MCP pre-index search", flush=True)
             indexed_call = rpc("tools/call", {"name": "index", "arguments": {}})
-            index_text = json.dumps(indexed_call.get("result", {}), ensure_ascii=False)
-            require("error" not in indexed_call and re.search(r'"filesIndexed"\s*:\s*(\d+)', index_text) and int(re.search(r'"filesIndexed"\s*:\s*(\d+)', index_text).group(1)) >= 3, "MCP index did not report filesIndexed >= 3")
+            index_result = indexed_call.get("result", {})
+            content = index_result.get("content", [])
+            index_text = content[0].get("text", "") if content else ""
+            try:
+                index_payload = json.loads(index_text)
+            except (TypeError, ValueError):
+                index_payload = index_text
+            files_indexed = index_payload.get("filesIndexed") if isinstance(index_payload, dict) else None
+            if files_indexed is None:
+                match = re.search(r'"filesIndexed"\s*:\s*(\d+)', index_text)
+                files_indexed = int(match.group(1)) if match else None
+            require("error" not in indexed_call and isinstance(files_indexed, int) and files_indexed >= 3, "MCP index did not report filesIndexed >= 3")
             print("PASS MCP index", flush=True)
             after = rpc("tools/call", {"name": "search", "arguments": {"kind": "symbol", "query": "greet_user"}})
             after_text = json.dumps(after.get("result", {}), ensure_ascii=False)
