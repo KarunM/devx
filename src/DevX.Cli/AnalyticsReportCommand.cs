@@ -59,8 +59,20 @@ public static class AnalyticsReportCommand
             var report = AnalyticsReportAggregator.Compose(input, now, TimeSpan.FromDays(days), team, Option(args, "--repo"));
             var format = Option(args, "--format") ?? "html";
             if (format is not ("html" or "json")) throw new ArgumentException("Report export supports --format html or json.");
+            if (args.Contains("--anonymize", StringComparer.Ordinal)) report = ReportAnonymizer.Anonymize(report);
             var output = Option(args, "--output") ?? (report.Scope == "organization" ? "devx-org-report" : "devx-report") + (format == "json" ? ".json" : ".html");
             var content = format == "json" ? JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }) : AnalyticsHtmlRenderer.Render(report);
+            var blockedPath = Option(args, "--blocked-terms");
+            if (blockedPath is not null)
+            {
+                IReadOnlyList<string> matches;
+                try { matches = await BlockedTerms.FindMatchesAsync(blockedPath, content); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                { Console.Error.WriteLine($"Could not read blocked-terms file: {ex.Message}"); return 2; }
+                var count = matches.Sum(term => CountMatches(content, term));
+                if (count > 0)
+                { Console.Error.WriteLine($"blocked terms found: {count} ({matches.Count} terms)"); return 3; }
+            }
             await WriteNewAsync(output, content);
             Console.WriteLine($"Wrote {report.Scope} report: {Path.GetFullPath(output)} ({report.Operations} recorded events)");
             return 0;
@@ -103,6 +115,14 @@ public static class AnalyticsReportCommand
         await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write);
         await using var writer = new StreamWriter(stream);
         await writer.WriteAsync(content);
+    }
+    private static int CountMatches(string content, string term)
+    {
+        var count = 0;
+        var index = 0;
+        while ((index = content.IndexOf(term, index, StringComparison.OrdinalIgnoreCase)) >= 0)
+        { count++; index += term.Length; }
+        return count;
     }
     public static IReadOnlyList<string> Options(string[] args, string name)
     {

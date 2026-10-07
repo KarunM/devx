@@ -1107,7 +1107,19 @@ static async Task<int> ReportAsync(string connectionString, string[] args, strin
 
     if (format == "json")
     {
-        Console.WriteLine(JsonSerializer.Serialize(report));
+        if (args.Contains("--anonymize", StringComparer.Ordinal)) report = ReportAnonymizer.Anonymize(report);
+        var json = JsonSerializer.Serialize(report);
+        var blockedPath = GetOption(args, "--blocked-terms");
+        if (blockedPath is not null)
+        {
+            IReadOnlyList<string> matches;
+            try { matches = await BlockedTerms.FindMatchesAsync(blockedPath, json); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            { Console.Error.WriteLine($"Could not read blocked-terms file: {ex.Message}"); return 2; }
+            var count = matches.Sum(term => CountReportTerm(json, term));
+            if (count > 0) { Console.Error.WriteLine($"blocked terms found: {count} ({matches.Count} terms)"); return 3; }
+        }
+        Console.WriteLine(json);
         return 0;
     }
 
@@ -1123,6 +1135,15 @@ static async Task<int> ReportAsync(string connectionString, string[] args, strin
     }
 
     return 0;
+}
+
+static int CountReportTerm(string content, string term)
+{
+    var count = 0;
+    var index = 0;
+    while ((index = content.IndexOf(term, index, StringComparison.OrdinalIgnoreCase)) >= 0)
+    { count++; index += term.Length; }
+    return count;
 }
 
 static async Task<int> AskAsync(string connectionString, string[] args, string format)
@@ -1945,7 +1966,8 @@ Usage:
   devx doctor [--session <id>]
   devx build --session <id> [--runtime <kind>] [--target <path|name>]
   devx test [<file> ...] --session <id> [--runtime <kind>] [--target <path|name>] [--timeout <seconds>]
-  devx report html [--period 30d] [--session <id>] [--output <file>] [--format html|json]
+  devx report html [--period 30d] [--session <id>] [--output <file>] [--format html|json] [--anonymize] [--blocked-terms <file>]
+  devx report --session <id> --format json [--anonymize] [--blocked-terms <file>]
   devx report html --input <events.json> [--org <name>] [--team <name>] [--repo <name>]
   devx report html --input <a.json> --input <b.json> [--period 30d] [--output <file>]
   devx report export [--period 30d] [--session <id>] --output <events.json>
