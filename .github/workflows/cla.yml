@@ -12,9 +12,8 @@ jobs:
   cla:
     runs-on: ubuntu-latest
     steps:
-      # Pin this version tag to a full commit SHA before production use.
       - name: CLA Assistant Lite
-        uses: contributor-assistant/github-action@v2.6.1
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PERSONAL_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
