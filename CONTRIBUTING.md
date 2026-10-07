@@ -32,4 +32,4 @@ New source files should include an SPDX identifier such as `// SPDX-License-Iden
 
 Report vulnerabilities through a GitHub private security advisory for this repository. Do not disclose security issues publicly before maintainers have had a chance to respond.
 
-See the [MCP setup guide](docs/mcp.md), [entitlements](docs/entitlements.md), and the project's [architecture decision records](docs/adr/) for design and product boundaries. Please also follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+See the [MCP setup guide](docs/mcp.md), [extension point](docs/extension-point.md), and the project's [architecture decision records](docs/adr/) for design and product boundaries. Please also follow the [Code of Conduct](CODE_OF_CONDUCT.md).

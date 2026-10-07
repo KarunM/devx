@@ -22,7 +22,7 @@ You represent that You are legally entitled to grant the licences in this Agreem
 
 ## 5. Right to relicense and sublicense
 
-You understand that Recipient may distribute Contributions under the project's current licence and may relicense, sublicense, or otherwise distribute Contributions under other licences, including commercial and proprietary licences. Recipient may grant rights to Contributions as part of a larger work or product. This Agreement does not transfer ownership of Your Contributions; You retain all right, title, and interest in them.
+You understand that Recipient may distribute Contributions under the project's current licence and may relicense, sublicense, or otherwise distribute Contributions under other licences, including proprietary terms. Recipient may grant rights to Contributions as part of a larger work or product. This Agreement does not transfer ownership of Your Contributions; You retain all right, title, and interest in them.
 
 ## 6. Disclaimer
 

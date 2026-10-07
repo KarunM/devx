@@ -1,6 +1,6 @@
 # MCP server
 
-DevX provides a local Model Context Protocol server over stdio. It lets an MCP client use the current working directory as its repository, with a local SQLite session created when the server starts. The server is local only: it has no authentication, network listener, or enterprise entitlement gate. Local MCP is part of the Free edition.
+DevX provides a local Model Context Protocol server over stdio. It lets an MCP client use the current working directory as its repository, with a local SQLite session created when the server starts. The server is local only: it has no authentication or network listener.
 
 Start it from the repository you want to work with:
 

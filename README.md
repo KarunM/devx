@@ -26,10 +26,6 @@ Create a session with `devx session create --format json`, then pass its ID to s
 
 See the [MCP setup guide](docs/mcp.md).
 
-## Free and Enterprise
-
-Free includes unlimited local repositories, indexing, search, source reads, patches, validation and testing, local agents and shared sessions, local MCP, and local metrics and reporting. Core engineering work is available offline without DevX authentication. Enterprise adds organization accounts, OIDC/SSO, RBAC, shared remote indexing, audit trails, central policy, team analytics, integrations, and private deployment. Enterprise code is not in this repository; the entitlement seam is an architecture boundary, not a claim that all listed capabilities are implemented.
-
 ## Benchmark results (to be added)
 
 Benchmark results will be published here when available.

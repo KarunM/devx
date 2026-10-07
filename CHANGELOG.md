@@ -5,7 +5,7 @@
 - Apache-2.0 licence
 - CLA
 - Community files
-- Entitlement seam
+- Feature extension point
 - MCP server (planned in this release)
 - CI
 
