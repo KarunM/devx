@@ -71,6 +71,23 @@ public sealed class McpReferenceServerIntegrationTests
     }
 
     [Fact]
+    public async Task StdioServer_PlainFolderIndexThenSearchFindsPythonFunction()
+    {
+        var (server, session, _) = await CreateServerAsync("devx-mcp-plain", indexRepository: false, plainFolder: true);
+        var requests = string.Join("\n", [
+            $"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"index\",\"arguments\":{{\"sessionId\":\"{session.Id.Value}\"}}}}}}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"search\",\"arguments\":{{\"sessionId\":\"{session.Id.Value}\",\"kind\":\"symbol\",\"query\":\"mcpPlainFunction\"}}}}}}"
+        ]) + "\n";
+        var output = new StringWriter();
+
+        await new McpStdioServer(server).RunAsync(new StringReader(requests), output);
+
+        var responses = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => JsonDocument.Parse(line)).ToArray();
+        Assert.Contains("filesIndexed", responses[0].RootElement.GetRawText());
+        Assert.Contains("mcpPlainFunction", responses[1].RootElement.GetRawText());
+    }
+
+    [Fact]
     public async Task CallToolAsync_IndexWithoutFilesIndexesWholeRepository()
     {
         var (server, session, _) = await CreateServerAsync("devx-mcp-whole-index", indexRepository: false);
@@ -232,13 +249,13 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.True(missingArguments.RootElement.GetProperty("result").GetProperty("isError").GetBoolean());
     }
 
-    private static async Task<(McpReferenceServer Server, SessionState Session, string RepositoryRoot)> CreateServerAsync(string prefix, bool indexRepository = true)
+    private static async Task<(McpReferenceServer Server, SessionState Session, string RepositoryRoot)> CreateServerAsync(string prefix, bool indexRepository = true, bool plainFolder = false)
     {
         var repositoryRoot = Directory.CreateTempSubdirectory(prefix).FullName;
         var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
         Directory.CreateDirectory(projectDirectory);
 
-        await IOFile.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), """
+        if (!plainFolder) await IOFile.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), """
             <Project Sdk="Microsoft.NET.Sdk">
               <PropertyGroup>
                 <TargetFramework>net10.0</TargetFramework>
@@ -246,13 +263,15 @@ public sealed class McpReferenceServerIntegrationTests
             </Project>
             """);
 
-        await IOFile.WriteAllTextAsync(Path.Combine(projectDirectory, "Program.cs"), """
+        if (!plainFolder) await IOFile.WriteAllTextAsync(Path.Combine(projectDirectory, "Program.cs"), """
             namespace Sample;
             public static class Program
             {
                 public static void Run() { }
             }
             """);
+        if (plainFolder)
+            await IOFile.WriteAllTextAsync(Path.Combine(repositoryRoot, "plain.py"), "def mcpPlainFunction():\n    return 1\n");
 
         var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"devx-mcp-{Guid.NewGuid():N}.db") }.ToString();
         var store = new SqliteStorageInitializer(connectionString);
