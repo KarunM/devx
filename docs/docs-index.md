@@ -66,21 +66,6 @@ These define **what** the system does and the contracts it exposes.
 
 These organize implementation into major workstreams.
 
-### 5. Tasks
-
-`docs/tasks/`
-
-Tasks are the executable units of work. Each task should contain:
-
-- Objective
-- Prerequisites
-- Inputs
-- Scope
-- Implementation Steps
-- Acceptance Criteria
-- Verification Steps
-- Definition of Done
-
 ## Supporting Documents
 
 - `docs/glossary.md`

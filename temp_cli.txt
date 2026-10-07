@@ -1,3 +1,0 @@
-        case "references":
-            return await ReferencesAsync(connectionString, args, format);
-
