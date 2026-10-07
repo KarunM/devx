@@ -815,7 +815,10 @@ static async Task<int> DoctorAsync(string connectionString, string[] args, strin
 
 static async Task<int> SnapshotAsync(string connectionString, string[] args, string format)
 {
-    if (args.Length < 2)
+    var target = args.Skip(1).FirstOrDefault(argument => !argument.StartsWith("--", StringComparison.Ordinal)
+        && argument != GetOption(args, "--session") && argument != GetOption(args, "--agent")
+        && argument != GetOption(args, "--task") && argument != GetOption(args, "--format"));
+    if (target is null)
     {
         Console.Error.WriteLine("Usage: devx snapshot <file> --session <id>");
         return 1;
@@ -830,10 +833,10 @@ static async Task<int> SnapshotAsync(string connectionString, string[] args, str
 
     var store = new SqliteStorageInitializer(connectionString);
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
-    var request = new ProtocolRequest("1.0", ProtocolOperations.GetFileSnapshot, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
+    var request = new ProtocolRequest("1.0", ProtocolOperations.GetFileSnapshot, sessionId, JsonSerializer.SerializeToElement(new { query = target }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric("snapshot", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
+    await store.AddOperationMetricAsync(new OperationMetric("snapshot", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, target), GetAgentLabel(args)));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }

@@ -1,4 +1,5 @@
 using DevX.Cli;
+using System.Text.Json;
 using Xunit;
 
 namespace DevX.Tests.Cli;
@@ -68,6 +69,62 @@ public sealed class CliCommandTests
             Environment.CurrentDirectory = originalDirectory;
             Directory.Delete(root, recursive: true);
             ProcessStateLock.Release();
+        }
+    }
+
+    [Fact]
+    public async Task Snapshot_AcceptsSessionOptionBeforeOrAfterFile()
+    {
+        await ProcessStateLock.WaitAsync();
+        var originalDirectory = Environment.CurrentDirectory;
+        var root = Directory.CreateTempSubdirectory("devx-snapshot-order").FullName;
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(root, "Sample.cs"), "public sealed class Sample { }");
+            Environment.CurrentDirectory = root;
+            var (indexCode, _) = await InvokeCliAsync("index", ".");
+            Assert.Equal(0, indexCode);
+            var (sessionCode, sessionOutput) = await InvokeCliAsync("session", "create", "--format", "json");
+            Assert.Equal(0, sessionCode);
+            using var document = JsonDocument.Parse(sessionOutput);
+            var sessionId = document.RootElement.GetProperty("Data").GetProperty("sessionId").GetString()!;
+
+            var (fileFirstCode, fileFirst) = await InvokeCliAsync("snapshot", "Sample.cs", "--session", sessionId, "--format", "json");
+            var (optionFirstCode, optionFirst) = await InvokeCliAsync("snapshot", "--session", sessionId, "Sample.cs", "--format", "json");
+
+            Assert.Equal(0, fileFirstCode);
+            Assert.Equal(0, optionFirstCode);
+            using var firstDocument = JsonDocument.Parse(fileFirst);
+            using var secondDocument = JsonDocument.Parse(optionFirst);
+            Assert.Equal(firstDocument.RootElement.GetRawText(), secondDocument.RootElement.GetRawText());
+        }
+        finally
+        {
+            Environment.CurrentDirectory = originalDirectory;
+            Directory.Delete(root, recursive: true);
+            ProcessStateLock.Release();
+        }
+    }
+
+    private static async Task<(int ExitCode, string Output)> InvokeCliAsync(params string[] args)
+    {
+        var originalOut = Console.Out;
+        var originalError = Console.Error;
+        using var stdout = new StringWriter();
+        using var stderr = new StringWriter();
+        try
+        {
+            Console.SetOut(stdout);
+            Console.SetError(stderr);
+            var entryPoint = typeof(ArtifactCommand).Assembly.EntryPoint!;
+            var invocation = entryPoint.Invoke(null, [args]);
+            var exitCode = invocation is Task<int> task ? await task : Convert.ToInt32(invocation);
+            return (exitCode, stdout.ToString() + stderr.ToString());
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
+            Console.SetError(originalError);
         }
     }
 }
