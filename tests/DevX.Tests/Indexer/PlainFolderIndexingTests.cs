@@ -9,6 +9,22 @@ namespace DevX.Tests.Indexer;
 public sealed class PlainFolderIndexingTests
 {
     [Fact]
+    public async Task IndexAsync_IndexesGlobalNamespaceCSharpTypesInPlainFolder()
+    {
+        var root = Directory.CreateTempSubdirectory("devx-plain-global").FullName;
+        await IOFile.WriteAllTextAsync(Path.Combine(root, "Widget.cs"), "public class Widget { public int Frobnicate() => 1; }");
+        var store = CreateStore();
+
+        try
+        {
+            await new RepositoryIndexingService(store).IndexAsync(root);
+            Assert.Contains(await store.FindSymbolsByQualifiedNameAsync("Widget.Frobnicate"), symbol => symbol.Name == "Frobnicate");
+            Assert.Empty(await store.FindSymbolsByQualifiedNameAsync(".Widget.Frobnicate"));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public async Task IndexAsync_IndexesPlainFolderAndFindsPythonFunction()
     {
         var root = Directory.CreateTempSubdirectory("devx-plain-index").FullName;

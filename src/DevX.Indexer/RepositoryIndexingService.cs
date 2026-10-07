@@ -56,10 +56,9 @@ public sealed class RepositoryIndexingService
 
                 var parsed = _languageParser.Parse(filePath, await System.IO.File.ReadAllTextAsync(filePath, cancellationToken));
                 var hasTopLevelProgram = parsed.Types.Any(type => type.Name == "Program" && type.Kind == "Class" && type.Methods.Count > 0);
-                if (!string.IsNullOrWhiteSpace(parsed.Namespace) || hasTopLevelProgram)
+                if (!string.IsNullOrWhiteSpace(parsed.Namespace) || hasTopLevelProgram || parsed.Types.Count > 0)
                 {
                     var namespaceName = parsed.Namespace ?? string.Empty;
-                    var qualifiedPrefix = string.IsNullOrEmpty(namespaceName) ? string.Empty : namespaceName + ".";
                     var namespaceId = new NamespaceId(StableId($"{filePath}:{namespaceName}"));
                     await _repositoryStore.UpsertNamespaceAsync(new Namespace(namespaceId, file.Id, namespaceName), cancellationToken);
 
@@ -75,7 +74,7 @@ public sealed class RepositoryIndexingService
                             namespaceId.Value.ToString(),
                             type.Kind,
                             type.Name,
-                            $"{qualifiedPrefix}{type.Name}",
+                            QualifiedName(namespaceName, type.Name),
                             null, type.StartLine, type.EndLine), cancellationToken);
 
                         foreach (var method in type.Methods)
@@ -89,7 +88,7 @@ public sealed class RepositoryIndexingService
                                 typeId.Value.ToString(),
                                 method.IsConstructor ? "Constructor" : "Method",
                                 method.Name,
-                                $"{qualifiedPrefix}{type.Name}.{method.Name}",
+                                QualifiedName(namespaceName, type.Name, method.Name),
                                 method.Signature, method.StartLine, method.EndLine), cancellationToken);
                         }
 
@@ -106,7 +105,7 @@ public sealed class RepositoryIndexingService
                                 typeId.Value.ToString(),
                                 "Property",
                                 property.Name,
-                                $"{qualifiedPrefix}{type.Name}.{property.Name}",
+                                QualifiedName(namespaceName, type.Name, property.Name),
                                 property.Type, property.StartLine, property.EndLine), cancellationToken);
                         }
 
@@ -121,7 +120,7 @@ public sealed class RepositoryIndexingService
                                 typeId.Value.ToString(),
                                 "Field",
                                 field.Name,
-                                $"{qualifiedPrefix}{type.Name}.{field.Name}",
+                                QualifiedName(namespaceName, type.Name, field.Name),
                                 field.Type, field.StartLine, field.EndLine), cancellationToken);
                         }
                     }
@@ -142,18 +141,28 @@ public sealed class RepositoryIndexingService
                     var file = new DomainFile(new FileId(StableId(filePath)), project.Id, RelativePath(rootPath, filePath));
                     await _repositoryStore.UpsertFileAsync(file, cancellationToken);
                     var parsed = _languageParser.Parse(filePath, await System.IO.File.ReadAllTextAsync(filePath, cancellationToken));
-                    if (string.IsNullOrWhiteSpace(parsed.Namespace)) continue;
-                    var nsId = new NamespaceId(StableId($"{filePath}:{parsed.Namespace}"));
-                    await _repositoryStore.UpsertNamespaceAsync(new Namespace(nsId, file.Id, parsed.Namespace!), cancellationToken);
+                    var namespaceName = parsed.Namespace ?? string.Empty;
+                    var nsId = new NamespaceId(StableId($"{filePath}:{namespaceName}"));
+                    await _repositoryStore.UpsertNamespaceAsync(new Namespace(nsId, file.Id, namespaceName), cancellationToken);
                     foreach (var type in parsed.Types)
                     {
-                        var typeId = new TypeId(StableId($"{filePath}:{parsed.Namespace}:{type.Name}"));
+                        var typeId = new TypeId(StableId($"{filePath}:{namespaceName}:{type.Name}"));
                         await _repositoryStore.UpsertTypeAsync(new DevX.Domain.Type(typeId, nsId, type.Name), cancellationToken);
-                        await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), nsId.Value.ToString(), type.Kind, type.Name, $"{parsed.Namespace}.{type.Name}", null, type.StartLine, type.EndLine), cancellationToken);
+                        await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), nsId.Value.ToString(), type.Kind, type.Name, QualifiedName(namespaceName, type.Name), null, type.StartLine, type.EndLine), cancellationToken);
                         foreach (var method in type.Methods)
                         {
                             await _repositoryStore.UpsertMethodAsync(new Method(new MethodId(StableId($"{typeId}:{method.Name}:{method.Signature}")), typeId, method.Name), cancellationToken);
-                            await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{method.Name}:{method.Signature}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), typeId.Value.ToString(), "Method", method.Name, $"{parsed.Namespace}.{type.Name}.{method.Name}", method.Signature, method.StartLine, method.EndLine), cancellationToken);
+                            await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}:{method.Name}:{method.Signature}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), typeId.Value.ToString(), "Method", method.Name, QualifiedName(namespaceName, type.Name, method.Name), method.Signature, method.StartLine, method.EndLine), cancellationToken);
+                        }
+                        foreach (var property in type.Properties)
+                        {
+                            await _repositoryStore.UpsertPropertyAsync(new Property(new PropertyId(StableId($"{typeId}:{property.Name}")), typeId, property.Name), cancellationToken);
+                            await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}:{property.Name}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), typeId.Value.ToString(), "Property", property.Name, QualifiedName(namespaceName, type.Name, property.Name), property.Type, property.StartLine, property.EndLine), cancellationToken);
+                        }
+                        foreach (var field in type.Fields)
+                        {
+                            await _repositoryStore.UpsertFieldAsync(new Field(new FieldId(StableId($"{typeId}:{field.Name}")), typeId, field.Name), cancellationToken);
+                            await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}:{field.Name}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), typeId.Value.ToString(), "Field", field.Name, QualifiedName(namespaceName, type.Name, field.Name), field.Type, field.StartLine, field.EndLine), cancellationToken);
                         }
                     }
                 }
@@ -320,7 +329,7 @@ public sealed class RepositoryIndexingService
                 namespaceId.Value.ToString(),
                 type.Kind,
                 type.Name,
-                $"{parsed.Namespace}.{type.Name}",
+                QualifiedName(parsed.Namespace, type.Name),
                 null, type.StartLine, type.EndLine), cancellationToken);
 
             foreach (var method in type.Methods)
@@ -334,7 +343,7 @@ public sealed class RepositoryIndexingService
                     typeId.Value.ToString(),
                     method.IsConstructor ? "Constructor" : "Method",
                     method.Name,
-                    $"{parsed.Namespace}.{type.Name}.{method.Name}",
+                    QualifiedName(parsed.Namespace, type.Name, method.Name),
                     method.Signature, method.StartLine, method.EndLine), cancellationToken);
             }
 
@@ -349,7 +358,7 @@ public sealed class RepositoryIndexingService
                     typeId.Value.ToString(),
                     "Field",
                     field.Name,
-                    $"{parsed.Namespace}.{type.Name}.{field.Name}",
+                    QualifiedName(parsed.Namespace, type.Name, field.Name),
                     field.Type, field.StartLine, field.EndLine), cancellationToken);
             }
 
@@ -418,55 +427,56 @@ public sealed class RepositoryIndexingService
 
         var parsed = _languageParser.Parse(absolutePath, await System.IO.File.ReadAllTextAsync(absolutePath, cancellationToken));
         parsed = NormalizeStructuredNamespace(parsed, RelativePath(rootPath, absolutePath));
-        if (!string.IsNullOrWhiteSpace(parsed.Namespace))
+        if (absolutePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(parsed.Namespace))
         {
-            var namespaceId = new NamespaceId(StableId($"{absolutePath}:{parsed.Namespace}"));
-            await _repositoryStore.UpsertNamespaceAsync(new Namespace(namespaceId, file.Id, parsed.Namespace!), cancellationToken);
+            var namespaceName = parsed.Namespace ?? string.Empty;
+            var namespaceId = new NamespaceId(StableId($"{absolutePath}:{namespaceName}"));
+            await _repositoryStore.UpsertNamespaceAsync(new Namespace(namespaceId, file.Id, namespaceName), cancellationToken);
 
             foreach (var type in parsed.Types)
             {
-                var typeId = new TypeId(StableId($"{absolutePath}:{parsed.Namespace}:{type.Name}"));
+                var typeId = new TypeId(StableId($"{absolutePath}:{namespaceName}:{type.Name}"));
                 await _repositoryStore.UpsertTypeAsync(new DevX.Domain.Type(typeId, namespaceId, type.Name), cancellationToken);
                 await _symbolStore.UpsertSymbolAsync(new Symbol(
-                    StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{parsed.Namespace}:{type.Name}").ToString(),
+                    StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{namespaceName}:{type.Name}").ToString(),
                     repositoryId.Value.ToString(),
                     projectId.Value.ToString(),
                     fileId.Value.ToString(),
                     namespaceId.Value.ToString(),
                     type.Kind,
                     type.Name,
-                    $"{parsed.Namespace}.{type.Name}",
+                    QualifiedName(namespaceName, type.Name),
                     null, type.StartLine, type.EndLine), cancellationToken);
 
                 foreach (var method in type.Methods)
                 {
                     await _repositoryStore.UpsertMethodAsync(new Method(new MethodId(StableId($"{typeId}:{method.Name}:{method.Signature}")), typeId, method.Name), cancellationToken);
                     await _symbolStore.UpsertSymbolAsync(new Symbol(
-                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{parsed.Namespace}:{type.Name}:{method.Name}:{method.Signature}").ToString(),
+                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{namespaceName}:{type.Name}:{method.Name}:{method.Signature}").ToString(),
                         repositoryId.Value.ToString(),
                         projectId.Value.ToString(),
                         fileId.Value.ToString(),
                         typeId.Value.ToString(),
                         method.IsConstructor ? "Constructor" : "Method",
                         method.Name,
-                        $"{parsed.Namespace}.{type.Name}.{method.Name}",
+                        QualifiedName(namespaceName, type.Name, method.Name),
                         method.Signature, method.StartLine, method.EndLine), cancellationToken);
                 }
 
-                await IndexCallersAsync(absolutePath, file.Id, parsed.Namespace, type.Name, type.Methods, cancellationToken);
+                await IndexCallersAsync(absolutePath, file.Id, namespaceName, type.Name, type.Methods, cancellationToken);
 
                 foreach (var property in type.Properties)
                 {
                     await _repositoryStore.UpsertPropertyAsync(new Property(new PropertyId(StableId($"{typeId}:{property.Name}")), typeId, property.Name), cancellationToken);
                     await _symbolStore.UpsertSymbolAsync(new Symbol(
-                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{parsed.Namespace}:{type.Name}:{property.Name}").ToString(),
+                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{namespaceName}:{type.Name}:{property.Name}").ToString(),
                         repositoryId.Value.ToString(),
                         projectId.Value.ToString(),
                         fileId.Value.ToString(),
                         typeId.Value.ToString(),
                         "Property",
                         property.Name,
-                        $"{parsed.Namespace}.{type.Name}.{property.Name}",
+                        QualifiedName(namespaceName, type.Name, property.Name),
                         property.Type, property.StartLine, property.EndLine), cancellationToken);
                 }
 
@@ -474,14 +484,14 @@ public sealed class RepositoryIndexingService
                 {
                     await _repositoryStore.UpsertFieldAsync(new Field(new FieldId(StableId($"{typeId}:{field.Name}")), typeId, field.Name), cancellationToken);
                     await _symbolStore.UpsertSymbolAsync(new Symbol(
-                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{parsed.Namespace}:{type.Name}:{field.Name}").ToString(),
+                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{namespaceName}:{type.Name}:{field.Name}").ToString(),
                         repositoryId.Value.ToString(),
                         projectId.Value.ToString(),
                         fileId.Value.ToString(),
                         typeId.Value.ToString(),
                         "Field",
                         field.Name,
-                        $"{parsed.Namespace}.{type.Name}.{field.Name}",
+                        QualifiedName(namespaceName, type.Name, field.Name),
                         field.Type, field.StartLine, field.EndLine), cancellationToken);
                 }
             }
@@ -694,10 +704,13 @@ public sealed class RepositoryIndexingService
 
     private async Task<Symbol?> FindCallerSymbolAsync(FileId fileId, string @namespace, string typeName, string callerName, CancellationToken cancellationToken)
     {
-        var qualified = string.IsNullOrWhiteSpace(@namespace) ? $"{typeName}.{callerName}" : $"{@namespace}.{typeName}.{callerName}";
+        var qualified = QualifiedName(@namespace, typeName, callerName);
         var matches = await _symbolStore.FindSymbolsByQualifiedNameAsync(qualified, cancellationToken);
         return matches.FirstOrDefault(symbol => symbol.FileId == fileId.Value.ToString() && symbol.Kind is "Method" or "Constructor");
     }
+
+    private static string QualifiedName(string? @namespace, params string[] parts)
+        => string.Join('.', (string.IsNullOrWhiteSpace(@namespace) ? parts : [@namespace, .. parts]));
 
     private static Guid StableId(string value)
     {

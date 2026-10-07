@@ -9,6 +9,24 @@ namespace DevX.Tests.Indexer;
 public sealed class RepositoryIndexingServiceTests
 {
     [Fact]
+    public async Task IndexAsync_IndexesGlobalNamespaceTypesInProject()
+    {
+        var root = Directory.CreateTempSubdirectory("devx-global-project").FullName;
+        await System.IO.File.WriteAllTextAsync(Path.Combine(root, "App.csproj"), "<Project />");
+        await System.IO.File.WriteAllTextAsync(Path.Combine(root, "Widget.cs"), "public class Widget { public int Frobnicate() => 1; }");
+        var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = Path.Combine(root, "index.db") }.ToString());
+
+        try
+        {
+            await new RepositoryIndexingService(store).IndexAsync(root);
+            var symbols = await store.FindSymbolsByNameAsync("Frobnicate");
+            Assert.Contains(symbols, symbol => symbol.QualifiedName == "Widget.Frobnicate");
+            Assert.DoesNotContain(symbols, symbol => symbol.QualifiedName.StartsWith('.'));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public async Task IndexAsync_IndexesTopLevelFunctionsAfterUsingsAndReturnStatement()
     {
         var repositoryRoot = Directory.CreateTempSubdirectory("devx-top-level-indexer").FullName;
