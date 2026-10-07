@@ -1,0 +1,173 @@
+{
+  "Organization": null,
+  "Events": [
+    {
+      "Id": "69030FE3AC400DEC243D6D661C34734749A78963EF0585DDF68D55AD0F5897E1:1",
+      "Repository": "devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Team": null,
+      "Developer": null,
+      "Agent": "codex",
+      "Session": null,
+      "Operation": "index",
+      "Timestamp": "2026-10-07T11:19:08.00238+00:00",
+      "Success": true,
+      "DurationMs": 144.56,
+      "MetadataJson": null,
+      "Workspace": "/private/var/folders/hp/0c0myzs17j95g_ly7qyw12bh0000gn/T/devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Task": null
+    },
+    {
+      "Id": "69030FE3AC400DEC243D6D661C34734749A78963EF0585DDF68D55AD0F5897E1:2",
+      "Repository": "devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Team": null,
+      "Developer": null,
+      "Agent": null,
+      "Session": "17fc5292-e14e-4d53-ad00-f3e4235b9192",
+      "Operation": "session create",
+      "Timestamp": "2026-10-07T11:19:08.254849+00:00",
+      "Success": true,
+      "DurationMs": 11.355,
+      "MetadataJson": null,
+      "Workspace": "/private/var/folders/hp/0c0myzs17j95g_ly7qyw12bh0000gn/T/devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Task": null
+    },
+    {
+      "Id": "69030FE3AC400DEC243D6D661C34734749A78963EF0585DDF68D55AD0F5897E1:3",
+      "Repository": "devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Team": null,
+      "Developer": null,
+      "Agent": "codex",
+      "Session": "17fc5292-e14e-4d53-ad00-f3e4235b9192",
+      "Operation": "read method",
+      "Timestamp": "2026-10-07T11:19:08.289563+00:00",
+      "Success": false,
+      "DurationMs": 15,
+      "MetadataJson": "{\u0022ErrorCode\u0022:\u0022NotFound\u0022,\u0022AttemptedName\u0022:\u0022missing\u0022,\u0022FailureReason\u0022:\u0022not indexed\u0022,\u0022Suggestions\u0022:[\u0022sample\u0022]}",
+      "Workspace": "/private/var/folders/hp/0c0myzs17j95g_ly7qyw12bh0000gn/T/devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Task": null
+    },
+    {
+      "Id": "69030FE3AC400DEC243D6D661C34734749A78963EF0585DDF68D55AD0F5897E1:4",
+      "Repository": "devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Team": null,
+      "Developer": null,
+      "Agent": "codex",
+      "Session": "17fc5292-e14e-4d53-ad00-f3e4235b9192",
+      "Operation": "read method",
+      "Timestamp": "2026-10-07T11:19:08.296839+00:00",
+      "Success": false,
+      "DurationMs": 15,
+      "MetadataJson": "{\u0022ErrorCode\u0022:\u0022NotFound\u0022,\u0022AttemptedName\u0022:\u0022missing\u0022}",
+      "Workspace": "/private/var/folders/hp/0c0myzs17j95g_ly7qyw12bh0000gn/T/devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Task": null
+    },
+    {
+      "Id": "69030FE3AC400DEC243D6D661C34734749A78963EF0585DDF68D55AD0F5897E1:5",
+      "Repository": "devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Team": null,
+      "Developer": null,
+      "Agent": "codex",
+      "Session": "17fc5292-e14e-4d53-ad00-f3e4235b9192",
+      "Operation": "read method",
+      "Timestamp": "2026-10-07T11:19:08.297568+00:00",
+      "Success": false,
+      "DurationMs": 15,
+      "MetadataJson": null,
+      "Workspace": "/private/var/folders/hp/0c0myzs17j95g_ly7qyw12bh0000gn/T/devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Task": null
+    },
+    {
+      "Id": "69030FE3AC400DEC243D6D661C34734749A78963EF0585DDF68D55AD0F5897E1:6",
+      "Repository": "devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Team": null,
+      "Developer": null,
+      "Agent": null,
+      "Session": "17fc5292-e14e-4d53-ad00-f3e4235b9192",
+      "Operation": "read file",
+      "Timestamp": "2026-10-07T11:19:08.415203+00:00",
+      "Success": true,
+      "DurationMs": 20.011,
+      "MetadataJson": "{\u0022Language\u0022:\u0022PY\u0022,\u0022WholeFileCharacters\u0022:40000,\u0022ReturnedCharacters\u0022:2000,\u0022ReadEventId\u0022:\u00224a17a764-e8b6-474a-a17c-e51c9de9c310\u0022,\u0022ReturnedLines\u0022:1,\u0022EventOrigin\u0022:\u0022internal-read\u0022,\u0022TaskLabel\u0022:\u0022brief-054\u0022}",
+      "Workspace": "/private/var/folders/hp/0c0myzs17j95g_ly7qyw12bh0000gn/T/devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Task": null
+    },
+    {
+      "Id": "69030FE3AC400DEC243D6D661C34734749A78963EF0585DDF68D55AD0F5897E1:7",
+      "Repository": "devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Team": null,
+      "Developer": null,
+      "Agent": null,
+      "Session": "17fc5292-e14e-4d53-ad00-f3e4235b9192",
+      "Operation": "read file",
+      "Timestamp": "2026-10-07T11:19:08.397294+00:00",
+      "Success": true,
+      "DurationMs": 43.173,
+      "MetadataJson": "{\u0022AttemptedName\u0022:\u0022sample.py\u0022,\u0022Summary\u0022:null,\u0022ResolvedVia\u0022:null,\u0022WholeFileCharacters\u0022:40000,\u0022ReturnedCharacters\u0022:2000,\u0022ReadEventId\u0022:\u00224a17a764-e8b6-474a-a17c-e51c9de9c310\u0022,\u0022ResponseCharacters\u0022:2349,\u0022EstimatedTokens\u0022:588,\u0022TaskLabel\u0022:\u0022brief-054\u0022}",
+      "Workspace": "/private/var/folders/hp/0c0myzs17j95g_ly7qyw12bh0000gn/T/devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Task": null
+    },
+    {
+      "Id": "69030FE3AC400DEC243D6D661C34734749A78963EF0585DDF68D55AD0F5897E1:8",
+      "Repository": "devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Team": null,
+      "Developer": null,
+      "Agent": "codex",
+      "Session": "17fc5292-e14e-4d53-ad00-f3e4235b9192",
+      "Operation": "fallback coverage",
+      "Timestamp": "2026-10-07T11:19:08.614269+00:00",
+      "Success": true,
+      "DurationMs": 0,
+      "MetadataJson": "{\u0022CoverageStart\u0022:\u00222026-10-07T11:18:08.487125\u002B00:00\u0022,\u0022CoverageEnd\u0022:\u00222026-10-07T11:19:08.48713\u002B00:00\u0022}",
+      "Workspace": "/private/var/folders/hp/0c0myzs17j95g_ly7qyw12bh0000gn/T/devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Task": null
+    },
+    {
+      "Id": "69030FE3AC400DEC243D6D661C34734749A78963EF0585DDF68D55AD0F5897E1:9",
+      "Repository": "devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Team": null,
+      "Developer": null,
+      "Agent": "codex",
+      "Session": "17fc5292-e14e-4d53-ad00-f3e4235b9192",
+      "Operation": "fallback observe",
+      "Timestamp": "2026-10-07T11:19:08.630083+00:00",
+      "Success": true,
+      "DurationMs": 0,
+      "MetadataJson": "{\u0022Command\u0022:\u0022cat sample.py\u0022,\u0022Classification\u0022:\u0022bypass candidate\u0022,\u0022Files\u0022:[{\u0022Path\u0022:\u0022sample.py\u0022,\u0022Classification\u0022:\u0022bypass candidate\u0022}]}",
+      "Workspace": "/private/var/folders/hp/0c0myzs17j95g_ly7qyw12bh0000gn/T/devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Task": null
+    },
+    {
+      "Id": "69030FE3AC400DEC243D6D661C34734749A78963EF0585DDF68D55AD0F5897E1:10",
+      "Repository": "devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Team": null,
+      "Developer": null,
+      "Agent": null,
+      "Session": "17fc5292-e14e-4d53-ad00-f3e4235b9192",
+      "Operation": "index update",
+      "Timestamp": "2026-10-07T11:19:08.767859+00:00",
+      "Success": true,
+      "DurationMs": 19.906,
+      "MetadataJson": "{\u0022UnsupportedFilesSkipped\u0022:1}",
+      "Workspace": "/private/var/folders/hp/0c0myzs17j95g_ly7qyw12bh0000gn/T/devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Task": null
+    }
+  ],
+  "IndexHealth": [
+    {
+      "Workspace": "/private/var/folders/hp/0c0myzs17j95g_ly7qyw12bh0000gn/T/devx-report-test-a964f04e1efc4107a76417662e324958",
+      "ObservedAt": "2026-10-07T11:19:09.146572+00:00",
+      "MissingFiles": 0,
+      "StaleFiles": 0,
+      "FilesWithoutIndexTime": 0,
+      "MissingPaths": [],
+      "StalePaths": []
+    }
+  ],
+  "CollectionWindows": [
+    {
+      "Workspace": "/private/var/folders/hp/0c0myzs17j95g_ly7qyw12bh0000gn/T/devx-report-test-a964f04e1efc4107a76417662e324958",
+      "Start": "2026-10-07T11:19:08.00238+00:00",
+      "End": "2026-10-07T11:19:09.147347+00:00"
+    }
+  ]
+}

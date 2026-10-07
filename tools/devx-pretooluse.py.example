@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Optional Claude Code PreToolUse adapter; never executes the observed shell command.
+
+Configure DEVX_ROOT, DEVX_SESSION, DEVX_AGENT in the harness. This logs observations,
+not continuous monitoring coverage. The harness must report completed active spans
+separately via `devx fallback observe --coverage-start ... --coverage-end ...`.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+
+def main():
+    payload = json.load(sys.stdin)
+    if payload.get("tool_name") != "Bash":
+        return
+    command = payload.get("tool_input", {}).get("command", "")
+    if not re.search(r"\b(grep|cat|sed|head|tail|rg|find)\b", command):
+        return
+    root, session = os.getenv("DEVX_ROOT"), os.getenv("DEVX_SESSION")
+    if not root or not session:
+        print("DevX observation NOT COLLECTED: DEVX_ROOT/DEVX_SESSION missing", file=sys.stderr)
+        return
+    result = subprocess.run(
+        [os.getenv("DEVX_EXECUTABLE", "devx"), "fallback", "observe", "--session", session,
+         "--agent", os.getenv("DEVX_AGENT", "claude"), "--command", command],
+        cwd=root, capture_output=True, text=True, timeout=5,
+    )
+    if result.returncode:
+        print("DevX observation NOT COLLECTED: " + result.stderr.strip(), file=sys.stderr)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        print("DevX observation NOT COLLECTED: " + str(error), file=sys.stderr)

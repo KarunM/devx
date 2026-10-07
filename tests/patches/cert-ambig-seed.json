@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "0317c228-d70d-404e-b6a0-c3df7466ea37",
+    "createdUtc": "2026-07-07T09:36:42.5021280\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "cert-ambig.cs"
+    ],
+    "operationHashes": [
+      "339a778a04ee72c4f289bbc9954403b3fdc696a34b61f7bb36ebb34ab2174d50"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "CreateFile",
+      "path": "cert-ambig.cs",
+      "content": "public static class AmbigSample\n{\n    public static int Dup() { return 1; }\n    public static int Dup() { return 2; }\n}\n"
+    }
+  ]
+}

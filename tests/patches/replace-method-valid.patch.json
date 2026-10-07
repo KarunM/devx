@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "operations": [
+    {
+      "operation": "ReplaceMethod",
+      "path": "src/DevX.Cli/Program.cs",
+      "methodName": "PatchAsync",
+      "replacementText": "static async Task<int> PatchAsync(string connectionString, string[] args, string format)\n{\n    if (args.Length < 3)\n    {\n        Console.Error.WriteLine(\"Usage: devx patch <apply|preview> <patch-file> --session <id>\");\n        return 1;\n    }\n\n    if (args[1] == \"validate\")\n    {\n        return await PatchValidateAsync(connectionString, args, format);\n    }\n\n    if (args[1] == \"rollback\")\n    {\n        return await PatchRollbackAsync(connectionString, args, format);\n    }\n\n    if (args[1] == \"preview\")\n    {\n        return await PatchPreviewAsync(connectionString, args, format);\n    }\n\n    if (args[1] != \"apply\")\n    {\n        Console.Error.WriteLine(\"Usage: devx patch apply <patch-file> --session <id>\");\n        return 1;\n    }\n\n    var patchPath = args[2];\n    var sessionId = GetOption(args, \"--session\");\n    if (sessionId is null)\n    {\n        Console.Error.WriteLine(\"Missing --session.\");\n        return 1;\n    }\n\n    var patchJson = await IOFile.ReadAllTextAsync(patchPath);\n    var store = new SqliteStorageInitializer(connectionString);\n    await store.InitializeAsync();\n    var engine = new ProtocolEngine(new SearchService(store, store), store, store);\n    using var document = JsonDocument.Parse(patchJson);\n    var request = new ProtocolRequest(\"1.0\", ProtocolOperations.Patch, sessionId, document.RootElement.Clone());\n    var started = DateTimeOffset.UtcNow;\n    var response = await engine.ExecuteAsync(request);\n    await store.AddOperationMetricAsync(new OperationMetric(\"patch\", started, DateTimeOffset.UtcNow - started, response.Success, sessionId));\n    WriteResponse(response, format);\n    return response.Success ? 0 : 1;\n}"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "metadata": {
+    "patchId": "bed960e0-239c-43c3-9dff-b4ad21e94cff",
+    "createdUtc": "2026-07-07T09:35:14.8274120\u002B00:00",
+    "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
+    "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
+    "affectedFiles": [
+      "cert-method.cs"
+    ],
+    "operationHashes": [
+      "55dfe4edfc9cd763e735bf320e7686ad357c6ab79b3b93b08fb6b9be09e187f9"
+    ]
+  },
+  "operations": [
+    {
+      "operation": "CreateFile",
+      "path": "cert-method.cs",
+      "content": "public static class CertSample\n{\n    public static int Value()\n    {\n        return 1;\n    }\n}\n"
+    }
+  ]
+}

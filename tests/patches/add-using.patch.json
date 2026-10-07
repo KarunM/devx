@@ -1,0 +1,10 @@
+{
+  "version": "1.0",
+  "operations": [
+    {
+      "operation": "AddUsing",
+      "path": "src/DevX.Protocol/ProtocolEngine.cs",
+      "namespace": "System.Text.RegularExpressions"
+    }
+  ]
+}

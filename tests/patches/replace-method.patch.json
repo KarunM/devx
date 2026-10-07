@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "operations": [
+    {
+      "operation": "ReplaceMethod",
+      "path": "src/DevX.Protocol/ProtocolEngine.cs",
+      "methodName": "HandlePatchAsync",
+      "replacementText": "public async Task<object> HandlePatchAsync(string root, PatchRequest request)\n    {\n        var patch = await ParsePatchAsync(request.Content).ConfigureAwait(false);\n        return ApplyPatch(root, patch, previewOnly: false);\n    }"
+    }
+  ]
+}

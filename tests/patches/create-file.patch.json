@@ -1,0 +1,10 @@
+{
+  "version": "1.0",
+  "operations": [
+    {
+      "operation": "CreateFile",
+      "path": "preview-sample.txt",
+      "content": "hello preview"
+    }
+  ]
+}
