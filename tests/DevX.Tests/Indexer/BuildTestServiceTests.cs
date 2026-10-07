@@ -24,6 +24,25 @@ public sealed class BuildTestServiceTests
     }
 
     [Fact]
+    public async Task RunTestsAsync_PythonDirectoryInMixedRepositoryUsesPythonRunner()
+    {
+        var root = Directory.CreateTempSubdirectory("devx-python-directory").FullName;
+        var pythonDirectory = Path.Combine(root, "python");
+        Directory.CreateDirectory(pythonDirectory);
+        await File.WriteAllTextAsync(Path.Combine(root, "solution.csproj"), "<Project />");
+        await File.WriteAllTextAsync(Path.Combine(pythonDirectory, "pyproject.toml"), "[tool.pytest.ini_options]\n");
+        await File.WriteAllTextAsync(Path.Combine(pythonDirectory, "test_smoke.py"), "def test_ok():\n    assert True\n");
+
+        var result = await new DotnetBuildTestService().RunTestsAsync(
+            root,
+            ["python"],
+            TimeSpan.FromSeconds(30));
+
+        Assert.Contains("-m pytest", result.Command);
+        Assert.True(result.Success);
+    }
+
+    [Fact]
     public async Task RunTestsAsync_TerminatesHungScriptAtTimeout()
     {
         var root = Directory.CreateTempSubdirectory("devx-test-timeout").FullName;

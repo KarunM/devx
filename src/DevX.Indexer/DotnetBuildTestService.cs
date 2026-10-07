@@ -46,6 +46,10 @@ public sealed class DotnetBuildTestService
                 var arguments = pytest ? $"-m pytest \"{path}\"" : $"\"{path}\"";
                 executions.Add(await RunWithTimeoutAsync(PythonExecutable(root), arguments, root, remaining, token, pytest ? "test" : "check"));
             }
+            else if (Directory.Exists(path) && Directory.EnumerateFiles(path, "*.py", SearchOption.AllDirectories).Any())
+            {
+                executions.Add(await RunWithTimeoutAsync(PythonExecutable(root), $"-m pytest \"{path}\"", root, remaining, token, "test"));
+            }
             else
             {
                 executions.Add(await RunWithTimeoutAsync("dotnet", $"test \"{path}\"", root, remaining, token, "test"));
