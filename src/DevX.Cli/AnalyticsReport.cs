@@ -94,7 +94,7 @@ public static class AnalyticsReportAggregator
              "Agent labels are caller supplied; they are not authenticated identities. Developers and teams require explicit input attribution.",
              "Output characters are measured where available. Tokens are estimates (characters / 4), not provider billing or measured savings.",
              "Module hotspots, handoffs, merge outcomes, tests-before-change, policy violations, restricted access, and secret detections are unavailable with the current event schema.",
-             "Organization input is a local aggregation preview, not an RBAC-authorized enterprise export. Subscription enforcement and centralized audit collection are not implemented."], details);
+             "Organization input is a local aggregation preview. Identity, attribution, and input provenance are unverified; governance guarantees are unavailable."], details);
     }
 
     private static int Count(IEnumerable<string?> values) => values.Where(s => !string.IsNullOrWhiteSpace(s)).Distinct(StringComparer.Ordinal).Count();
