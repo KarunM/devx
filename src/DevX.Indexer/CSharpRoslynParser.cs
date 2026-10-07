@@ -38,6 +38,18 @@ public sealed class CSharpRoslynParser : ILanguageParser
                     .ToList()))
             .ToList();
 
+        var topLevelMethods = root.DescendantNodes().OfType<LocalFunctionStatementSyntax>()
+            .Where(method => method.Ancestors().OfType<TypeDeclarationSyntax>().Any() == false
+                && method.Ancestors().OfType<GlobalStatementSyntax>().Any())
+            .Select(method => new ParsedMethod(method.Identifier.ValueText, method.ToString(), method.ReturnType.ToString(), "private", GetLine(method, true), GetLine(method, false), false))
+            .ToList();
+        if (topLevelMethods.Count > 0)
+        {
+            types.Add(new ParsedType("Program", "Class", ns, "internal",
+                topLevelMethods.Min(method => method.StartLine), topLevelMethods.Max(method => method.EndLine),
+                topLevelMethods, [], []));
+        }
+
         return new ParsedFile(filePath, ns, types);
     }
 

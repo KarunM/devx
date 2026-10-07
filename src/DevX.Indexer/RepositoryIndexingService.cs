@@ -55,55 +55,58 @@ public sealed class RepositoryIndexingService
                 await _repositoryStore.UpsertFileAsync(file, cancellationToken);
 
                 var parsed = _languageParser.Parse(filePath, await System.IO.File.ReadAllTextAsync(filePath, cancellationToken));
-                if (!string.IsNullOrWhiteSpace(parsed.Namespace))
+                var hasTopLevelProgram = parsed.Types.Any(type => type.Name == "Program" && type.Kind == "Class" && type.Methods.Count > 0);
+                if (!string.IsNullOrWhiteSpace(parsed.Namespace) || hasTopLevelProgram)
                 {
-                    var namespaceId = new NamespaceId(StableId($"{filePath}:{parsed.Namespace}"));
-                    await _repositoryStore.UpsertNamespaceAsync(new Namespace(namespaceId, file.Id, parsed.Namespace!), cancellationToken);
+                    var namespaceName = parsed.Namespace ?? string.Empty;
+                    var qualifiedPrefix = string.IsNullOrEmpty(namespaceName) ? string.Empty : namespaceName + ".";
+                    var namespaceId = new NamespaceId(StableId($"{filePath}:{namespaceName}"));
+                    await _repositoryStore.UpsertNamespaceAsync(new Namespace(namespaceId, file.Id, namespaceName), cancellationToken);
 
                     foreach (var type in parsed.Types)
                     {
-                        var typeId = new TypeId(StableId($"{filePath}:{parsed.Namespace}:{type.Name}"));
+                        var typeId = new TypeId(StableId($"{filePath}:{namespaceName}:{type.Name}"));
                         await _repositoryStore.UpsertTypeAsync(new DevX.Domain.Type(typeId, namespaceId, type.Name), cancellationToken);
                         await _symbolStore.UpsertSymbolAsync(new Symbol(
-                            StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}").ToString(),
+                            StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}").ToString(),
                             repository.Id.Value.ToString(),
                             project.Id.Value.ToString(),
                             file.Id.Value.ToString(),
                             namespaceId.Value.ToString(),
                             type.Kind,
                             type.Name,
-                            $"{parsed.Namespace}.{type.Name}",
+                            $"{qualifiedPrefix}{type.Name}",
                             null, type.StartLine, type.EndLine), cancellationToken);
 
                         foreach (var method in type.Methods)
                         {
                             await _repositoryStore.UpsertMethodAsync(new Method(new MethodId(StableId($"{typeId}:{method.Name}:{method.Signature}")), typeId, method.Name), cancellationToken);
                             await _symbolStore.UpsertSymbolAsync(new Symbol(
-                                StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{method.Name}:{method.Signature}").ToString(),
+                                StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}:{method.Name}:{method.Signature}").ToString(),
                                 repository.Id.Value.ToString(),
                                 project.Id.Value.ToString(),
                                 file.Id.Value.ToString(),
                                 typeId.Value.ToString(),
                                 method.IsConstructor ? "Constructor" : "Method",
                                 method.Name,
-                                $"{parsed.Namespace}.{type.Name}.{method.Name}",
+                                $"{qualifiedPrefix}{type.Name}.{method.Name}",
                                 method.Signature, method.StartLine, method.EndLine), cancellationToken);
                         }
 
-                        await IndexCallersAsync(filePath, file.Id, parsed.Namespace, type.Name, type.Methods, cancellationToken);
+                        await IndexCallersAsync(filePath, file.Id, namespaceName, type.Name, type.Methods, cancellationToken);
 
                         foreach (var property in type.Properties)
                         {
                             await _repositoryStore.UpsertPropertyAsync(new Property(new PropertyId(StableId($"{typeId}:{property.Name}")), typeId, property.Name), cancellationToken);
                             await _symbolStore.UpsertSymbolAsync(new Symbol(
-                                StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{property.Name}").ToString(),
+                                StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}:{property.Name}").ToString(),
                                 repository.Id.Value.ToString(),
                                 project.Id.Value.ToString(),
                                 file.Id.Value.ToString(),
                                 typeId.Value.ToString(),
                                 "Property",
                                 property.Name,
-                                $"{parsed.Namespace}.{type.Name}.{property.Name}",
+                                $"{qualifiedPrefix}{type.Name}.{property.Name}",
                                 property.Type, property.StartLine, property.EndLine), cancellationToken);
                         }
 
@@ -111,14 +114,14 @@ public sealed class RepositoryIndexingService
                         {
                             await _repositoryStore.UpsertFieldAsync(new Field(new FieldId(StableId($"{typeId}:{field.Name}")), typeId, field.Name), cancellationToken);
                             await _symbolStore.UpsertSymbolAsync(new Symbol(
-                                StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{field.Name}").ToString(),
+                                StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}:{field.Name}").ToString(),
                                 repository.Id.Value.ToString(),
                                 project.Id.Value.ToString(),
                                 file.Id.Value.ToString(),
                                 typeId.Value.ToString(),
                                 "Field",
                                 field.Name,
-                                $"{parsed.Namespace}.{type.Name}.{field.Name}",
+                                $"{qualifiedPrefix}{type.Name}.{field.Name}",
                                 field.Type, field.StartLine, field.EndLine), cancellationToken);
                         }
                     }

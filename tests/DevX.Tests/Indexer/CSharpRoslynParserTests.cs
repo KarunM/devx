@@ -35,4 +35,18 @@ public sealed class CSharpRoslynParserTests
         Assert.Contains(type.Properties, p => p.Name == "Name");
         Assert.Contains(type.Fields, f => f.Name == "_count");
     }
+
+    [Fact]
+    public void Parse_IndexesTopLevelLocalFunctionsAndLongBodies()
+    {
+        var body = string.Join("\n", Enumerable.Range(0, 350).Select(index => $"    var value{index} = {index};"));
+        var result = new CSharpRoslynParser().Parse("Program.cs", "static void HealthAsync()\n{\n" + body + "\n}");
+
+        var program = Assert.Single(result.Types, type => type.Name == "Program");
+        var method = Assert.Single(program.Methods, item => item.Name == "HealthAsync");
+        Assert.Equal(1, method.StartLine);
+        Assert.Equal(353, method.EndLine);
+        Assert.Equal(353, method.EndLine - method.StartLine + 1);
+        Assert.Contains("value349", method.Signature);
+    }
 }

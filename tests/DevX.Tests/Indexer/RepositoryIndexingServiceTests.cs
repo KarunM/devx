@@ -9,6 +9,46 @@ namespace DevX.Tests.Indexer;
 public sealed class RepositoryIndexingServiceTests
 {
     [Fact]
+    public async Task IndexAsync_IndexesTopLevelFunctionsAfterUsingsAndReturnStatement()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("devx-top-level-indexer").FullName;
+        var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
+        Directory.CreateDirectory(projectDirectory);
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Program.cs"), """
+            using System;
+            using System.Threading.Tasks;
+
+            var exitCode = await RunAsync(args);
+            return exitCode;
+
+            static async Task<int> RunAsync(string[] args)
+            {
+                return await HealthAsync();
+            }
+
+            static async Task<int> HealthAsync()
+            {
+                return 0;
+            }
+            """);
+
+        try
+        {
+            var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = Path.Combine(repositoryRoot, "index.db") }.ToString());
+            await new RepositoryIndexingService(store).IndexAsync(repositoryRoot);
+
+            var methods = await store.FindSymbolsByQualifiedNameAsync("Program.HealthAsync");
+
+            Assert.Contains(methods, symbol => symbol.Name == "HealthAsync" && symbol.Kind == "Method");
+        }
+        finally
+        {
+            Directory.Delete(repositoryRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task IndexAsync_DiscoversProjectsSourceFilesAndSymbols()
     {
         var repositoryRoot = Directory.CreateTempSubdirectory("devx-indexer-test").FullName;
