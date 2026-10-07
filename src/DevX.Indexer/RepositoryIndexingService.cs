@@ -8,9 +8,11 @@ using DomainFile = DevX.Domain.File;
 
 namespace DevX.Indexer;
 
+public sealed record RepositoryIndexResult(int FilesIndexed, string? Reason);
+
 public sealed class RepositoryIndexingService
 {
-    private static readonly string[] IgnoredDirectories = [".git", "bin", "obj", ".vs", ".idea", "node_modules", "dist", "out", "coverage", ".venv", "venv", "__pycache__", "site-packages", ".mypy_cache", ".pytest_cache", ".eggs", ".tox"];
+    private static readonly string[] IgnoredDirectories = [".git", "bin", "obj", ".vs", ".idea", "node_modules", "dist", "build", "out", "coverage", ".venv", "venv", "__pycache__", "site-packages", ".mypy_cache", ".pytest_cache", ".eggs", ".tox", ".devx"];
     private readonly IRepositoryStore _repositoryStore;
     private readonly ISymbolStore _symbolStore;
     private readonly ILanguageParser _languageParser;
@@ -27,20 +29,27 @@ public sealed class RepositoryIndexingService
         _languageParser = languageParser;
     }
 
-    public async Task IndexAsync(string repositoryPath, CancellationToken cancellationToken = default)
+    public async Task<RepositoryIndexResult> IndexAsync(string repositoryPath, CancellationToken cancellationToken = default)
     {
         var rootPath = Path.GetFullPath(repositoryPath);
         var repository = new Repository(new RepositoryId(StableId(rootPath)), Path.GetFileName(rootPath), rootPath);
         await _repositoryStore.InitializeAsync(cancellationToken);
         await _repositoryStore.UpsertRepositoryAsync(repository, cancellationToken);
 
-        foreach (var projectPath in Directory.EnumerateFiles(rootPath, "*.csproj", SearchOption.AllDirectories).Where(IsNotIgnored))
+        var projects = Directory.EnumerateFiles(rootPath, "*.csproj", SearchOption.AllDirectories).Where(path => IsNotIgnored(rootPath, path)).ToList();
+        var allFiles = Directory.EnumerateFiles(rootPath, "*", SearchOption.AllDirectories).ToList();
+        var considered = allFiles.Where(path => IsIndexable(path)
+            && (!path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) || projects.Count == 0
+                || projects.Any(project => path.StartsWith(Path.GetDirectoryName(project) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))).ToList();
+        var indexable = considered.Where(path => IsNotIgnored(rootPath, path)).ToList();
+
+        foreach (var projectPath in projects)
         {
             var projectDirectory = Path.GetDirectoryName(projectPath)!;
             var project = new Project(new ProjectId(StableId(projectPath)), repository.Id, Path.GetFileNameWithoutExtension(projectPath), RelativePath(rootPath, projectPath));
             await _repositoryStore.UpsertProjectAsync(project, cancellationToken);
 
-            foreach (var filePath in Directory.EnumerateFiles(projectDirectory, "*.cs", SearchOption.AllDirectories).Where(IsNotIgnored))
+            foreach (var filePath in Directory.EnumerateFiles(projectDirectory, "*.cs", SearchOption.AllDirectories).Where(path => IsNotIgnored(rootPath, path)))
             {
                 var file = new DomainFile(new FileId(StableId(filePath)), project.Id, RelativePath(rootPath, filePath));
                 await _repositoryStore.UpsertFileAsync(file, cancellationToken);
@@ -117,11 +126,45 @@ public sealed class RepositoryIndexingService
             }
         }
 
+        if (projects.Count == 0)
+        {
+            var looseCSharpFiles = Directory.EnumerateFiles(rootPath, "*.cs", SearchOption.AllDirectories).Where(path => IsNotIgnored(rootPath, path)).ToList();
+            if (looseCSharpFiles.Count > 0)
+            {
+                var projectPath = Path.Combine(rootPath, "<csharp>");
+                var project = new Project(new ProjectId(StableId(projectPath)), repository.Id, Path.GetFileName(rootPath), RelativePath(rootPath, rootPath));
+                await _repositoryStore.UpsertProjectAsync(project, cancellationToken);
+                foreach (var filePath in looseCSharpFiles)
+                {
+                    var file = new DomainFile(new FileId(StableId(filePath)), project.Id, RelativePath(rootPath, filePath));
+                    await _repositoryStore.UpsertFileAsync(file, cancellationToken);
+                    var parsed = _languageParser.Parse(filePath, await System.IO.File.ReadAllTextAsync(filePath, cancellationToken));
+                    if (string.IsNullOrWhiteSpace(parsed.Namespace)) continue;
+                    var nsId = new NamespaceId(StableId($"{filePath}:{parsed.Namespace}"));
+                    await _repositoryStore.UpsertNamespaceAsync(new Namespace(nsId, file.Id, parsed.Namespace!), cancellationToken);
+                    foreach (var type in parsed.Types)
+                    {
+                        var typeId = new TypeId(StableId($"{filePath}:{parsed.Namespace}:{type.Name}"));
+                        await _repositoryStore.UpsertTypeAsync(new DevX.Domain.Type(typeId, nsId, type.Name), cancellationToken);
+                        await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), nsId.Value.ToString(), type.Kind, type.Name, $"{parsed.Namespace}.{type.Name}", null, type.StartLine, type.EndLine), cancellationToken);
+                        foreach (var method in type.Methods)
+                        {
+                            await _repositoryStore.UpsertMethodAsync(new Method(new MethodId(StableId($"{typeId}:{method.Name}:{method.Signature}")), typeId, method.Name), cancellationToken);
+                            await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{method.Name}:{method.Signature}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), typeId.Value.ToString(), "Method", method.Name, $"{parsed.Namespace}.{type.Name}.{method.Name}", method.Signature, method.StartLine, method.EndLine), cancellationToken);
+                        }
+                    }
+                }
+            }
+        }
+
         await IndexPythonFilesAsync(rootPath, repository, cancellationToken);
         await IndexMarkdownFilesAsync(rootPath, repository, cancellationToken);
         await IndexJavaScriptFilesAsync(rootPath, repository, cancellationToken);
         await IndexJsonFilesAsync(rootPath, repository, cancellationToken);
         await IndexHtmlFilesAsync(rootPath, repository, cancellationToken);
+        return new RepositoryIndexResult(indexable.Count, indexable.Count == 0
+            ? considered.Count == 0 ? "no files with an indexable extension found" : "all files ignored"
+            : null);
     }
 
     /// <summary>
@@ -132,7 +175,7 @@ public sealed class RepositoryIndexingService
     /// </summary>
     private async Task IndexPythonFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
     {
-        var pythonFiles = Directory.EnumerateFiles(rootPath, "*.py", SearchOption.AllDirectories).Where(IsNotIgnored).ToList();
+        var pythonFiles = Directory.EnumerateFiles(rootPath, "*.py", SearchOption.AllDirectories).Where(path => IsNotIgnored(rootPath, path)).ToList();
         if (pythonFiles.Count == 0)
         {
             return;
@@ -159,7 +202,7 @@ public sealed class RepositoryIndexingService
     {
         var markdownFiles = Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories)
             .Where(path => MarkdownSymbolReader.CanParse(path))
-            .Where(IsNotIgnored)
+            .Where(path => IsNotIgnored(rootPath, path))
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToList();
 
@@ -187,7 +230,7 @@ public sealed class RepositoryIndexingService
         var javaScriptFiles = Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories)
             .Where(path => JavaScriptSymbolReader.CanParse(path))
             .Where(path => !path.EndsWith(".min.js", StringComparison.OrdinalIgnoreCase))
-            .Where(IsNotIgnored)
+            .Where(path => IsNotIgnored(rootPath, path))
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToList();
 
@@ -209,7 +252,7 @@ public sealed class RepositoryIndexingService
     private async Task IndexJsonFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
     {
         var jsonFiles = Directory.EnumerateFiles(rootPath, "*.json", SearchOption.AllDirectories)
-            .Where(IsNotIgnored)
+            .Where(path => IsNotIgnored(rootPath, path))
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToList();
 
@@ -232,7 +275,7 @@ public sealed class RepositoryIndexingService
     {
         var htmlFiles = Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories)
             .Where(HtmlSymbolReader.CanParse)
-            .Where(IsNotIgnored)
+            .Where(path => IsNotIgnored(rootPath, path))
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToList();
         if (htmlFiles.Count == 0) return;
@@ -571,8 +614,29 @@ public sealed class RepositoryIndexingService
         => path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
             || path.EndsWith(".sln", StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsNotIgnored(string path)
-        => !path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(segment => IgnoredDirectories.Contains(segment));
+    private static bool IsNotIgnored(string root, string path)
+    {
+        var relative = Path.GetRelativePath(root, path).Replace('\\', '/');
+        var projectBacked = Directory.EnumerateFiles(root, "*.csproj", SearchOption.AllDirectories).Any();
+        var ignoredDirectories = projectBacked ? IgnoredDirectories.Where(name => name is not "build" and not ".devx") : IgnoredDirectories;
+        if (relative.Split('/').Any(segment => ignoredDirectories.Contains(segment))) return false;
+        if (projectBacked) return true;
+        var ignore = Path.Combine(root, ".gitignore");
+        if (!System.IO.File.Exists(ignore)) return true;
+        return !System.IO.File.ReadAllLines(ignore).Select(line => line.Trim()).Where(line => line.Length > 0 && !line.StartsWith('#'))
+            .Any(pattern =>
+            {
+                pattern = pattern.TrimStart('/').TrimEnd('/');
+                var wildcard = System.Text.RegularExpressions.Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".");
+                var expression = pattern.Contains('/') ? $"^{wildcard}($|/)" : $"(^|/){wildcard}($|/)";
+                return System.Text.RegularExpressions.Regex.IsMatch(relative, expression, System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+            });
+    }
+
+    private static bool IsIndexable(string path)
+        => path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
+            || PythonSymbolReader.CanParse(path) || MarkdownSymbolReader.CanParse(path)
+            || JavaScriptSymbolReader.CanParse(path) || JsonSymbolReader.CanParse(path) || HtmlSymbolReader.CanParse(path);
 
     private static string RelativePath(string root, string fullPath)
         => Path.GetRelativePath(root, fullPath).Replace(Path.DirectorySeparatorChar, '/');

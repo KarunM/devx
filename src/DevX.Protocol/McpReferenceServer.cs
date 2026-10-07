@@ -14,7 +14,7 @@ public sealed class McpReferenceServer
     private readonly IRepositoryStore _repositoryStore;
     private readonly string? _defaultSessionId;
     private readonly Func<string[], CancellationToken, Task<IndexRefreshResult>>? _reindexFilesAsync;
-    private readonly Func<CancellationToken, Task>? _indexRepositoryAsync;
+    private readonly Func<CancellationToken, Task<RepositoryIndexResult>>? _indexRepositoryAsync;
     private readonly Func<CancellationToken, Task>? _initializeStorageAsync;
     private readonly string _version;
 
@@ -25,7 +25,7 @@ public sealed class McpReferenceServer
         string? defaultSessionId = null,
         Func<string[], CancellationToken, Task<IndexRefreshResult>>? reindexFilesAsync = null,
         string version = "1.0",
-        Func<CancellationToken, Task>? indexRepositoryAsync = null,
+        Func<CancellationToken, Task<RepositoryIndexResult>>? indexRepositoryAsync = null,
         Func<CancellationToken, Task>? initializeStorageAsync = null)
     {
         _protocolEngine = protocolEngine;
@@ -265,10 +265,8 @@ public sealed class McpReferenceServer
         {
             if (_indexRepositoryAsync is null)
                 return new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = "Whole-repository indexing is unavailable." }, JsonOptions));
-            await _indexRepositoryAsync(cancellationToken);
-            var session = await _sessionStore.GetSessionAsync(new GetSessionRequest(new SessionId(Guid.Parse(RequiredSessionId(arguments)))), cancellationToken);
-            var count = session is null ? 0 : await _repositoryStore.CountIndexedFilesAsync(session.RepositoryId, cancellationToken);
-            return new McpToolCallResult(false, JsonSerializer.SerializeToElement(new { success = true, filesIndexed = count }, JsonOptions));
+            var indexingResult = await _indexRepositoryAsync(cancellationToken);
+            return new McpToolCallResult(false, JsonSerializer.SerializeToElement(new { success = true, filesIndexed = indexingResult.FilesIndexed, reason = indexingResult.Reason }, JsonOptions));
         }
         if (_reindexFilesAsync is null)
             return new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = "Incremental indexing is unavailable." }, JsonOptions));

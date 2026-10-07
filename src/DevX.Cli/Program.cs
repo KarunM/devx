@@ -203,9 +203,11 @@ static async Task IndexAsync(string connectionString, string repositoryPath, str
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
     var indexer = new RepositoryIndexingService(store);
-    await indexer.IndexAsync(repositoryPath);
+    var result = await indexer.IndexAsync(repositoryPath);
     await store.AddOperationMetricAsync(new OperationMetric("index", started, DateTimeOffset.UtcNow - started, true, null, AgentLabel: agentLabel));
-    Console.WriteLine("Indexed repository.");
+    Console.WriteLine(result.Reason is null
+        ? $"Indexed {result.FilesIndexed} files."
+        : $"Indexed {result.FilesIndexed} files. Reason: {result.Reason}.");
 }
 
 static async Task<int> IndexUpdateAsync(string connectionString, string[] args, string format)
