@@ -10,7 +10,7 @@
 
 ## Objective
 
-Validate the full ECP workflow from repository discovery through patching and validation.
+Validate the full DevX workflow from repository discovery through patching and validation.
 
 ## Prerequisites
 
@@ -75,7 +75,7 @@ dotnet test
 
 ## Definition of Done
 
-The MVP proves the core ECP loop:
+The MVP proves the core DevX loop:
 
 ```text
 Search → Snapshot → Expand → Patch → Build → Test → Repair

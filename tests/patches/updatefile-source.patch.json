@@ -3,7 +3,7 @@
   "operations": [
     {
       "operation": "UpdateFile",
-      "path": "src/Ecp.Protocol/ProtocolEngine.cs",
+      "path": "src/DevX.Protocol/ProtocolEngine.cs",
       "content": "whole-file replacement is unsafe"
     }
   ]

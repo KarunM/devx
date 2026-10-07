@@ -5,19 +5,19 @@
 
 # Purpose
 
-Defines the public command-line interface for ECP.
+Defines the public command-line interface for DevX.
 
 # Commands
 
-ecp index
-ecp ask
-ecp search
-ecp snapshot
-ecp expand
-ecp patch
-ecp build
-ecp test
-ecp diagnostics
+devx index
+devx ask
+devx search
+devx snapshot
+devx expand
+devx patch
+devx build
+devx test
+devx diagnostics
 
 # Principles
 

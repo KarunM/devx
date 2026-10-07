@@ -14,8 +14,8 @@ This task creates the indexing flow before detailed C# symbol parsing is added.
 
 - SQLite schema exists
 - Storage initializer works
-- `Ecp.Indexer` project exists
-- `Ecp.Indexer` project exists
+- `DevX.Indexer` project exists
+- `DevX.Indexer` project exists
 
 ## Inputs
 

@@ -1,11 +1,11 @@
 # PLAN-006: MCP Integration
 
 ## Goal
-Expose ECP as an MCP server.
+Expose DevX as an MCP server.
 
 ## Deliverables
 
-- Ecp.McpServer
+- DevX.McpServer
 - Tool registration
 - ProtocolEngine integration
 - Integration tests

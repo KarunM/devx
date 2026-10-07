@@ -8,11 +8,11 @@ docs/
   tasks/
 
 src/
-  Ecp.Cli/
-  Ecp.Application/
-  Ecp.Domain/
-  Ecp.Protocol/
-  Ecp.Infrastructure/
+  DevX.Cli/
+  DevX.Application/
+  DevX.Domain/
+  DevX.Protocol/
+  DevX.Infrastructure/
     Storage/
     Indexing/
     Build/
@@ -21,7 +21,7 @@ src/
       CSharp/
 
 tests/
-  Ecp.Tests/
+  DevX.Tests/
 ```
 
 Each project has a single responsibility and communicates through well-defined interfaces.

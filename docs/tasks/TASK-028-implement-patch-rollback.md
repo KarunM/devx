@@ -12,7 +12,7 @@ previously applied patch.
 ## CLI
 
 ``` bash
-./ecp patch rollback <patch-file> --session <id> --format json
+./devx patch rollback <patch-file> --session <id> --format json
 ```
 
 ## Requirements
@@ -49,17 +49,17 @@ previously applied patch.
 ## Validation
 
 ``` bash
-./ecp index .
-SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
+./devx index .
+SESSION_ID=$(./devx session create --format json | jq -r '.Data.SessionId')
 
-./ecp patch preview tests/patches/create-file.patch.json --session "$SESSION_ID" --format json
-./ecp patch validate tests/patches/create-file.patch.json --session "$SESSION_ID" --format json
-./ecp patch apply tests/patches/create-file.patch.json --session "$SESSION_ID" --format json
-./ecp patch rollback tests/patches/create-file.patch.json --session "$SESSION_ID" --format json
+./devx patch preview tests/patches/create-file.patch.json --session "$SESSION_ID" --format json
+./devx patch validate tests/patches/create-file.patch.json --session "$SESSION_ID" --format json
+./devx patch apply tests/patches/create-file.patch.json --session "$SESSION_ID" --format json
+./devx patch rollback tests/patches/create-file.patch.json --session "$SESSION_ID" --format json
 
-./ecp build --session "$SESSION_ID" --format json
-./ecp test --session "$SESSION_ID" --format json
-./ecp report --session "$SESSION_ID" --format json
+./devx build --session "$SESSION_ID" --format json
+./devx test --session "$SESSION_ID" --format json
+./devx report --session "$SESSION_ID" --format json
 ```
 
 ## Acceptance Criteria
@@ -73,4 +73,4 @@ SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
 
 ## Definition of Done
 
-An AI can safely undo a previously applied patch using the ECP protocol.
+An AI can safely undo a previously applied patch using the DevX protocol.

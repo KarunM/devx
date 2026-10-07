@@ -1,12 +1,12 @@
-Implement the assigned ECP task.
+Implement the assigned DevX task.
 
 Task:
 <Task-XXX>
 
 Rules
 
-- Use the globally installed `ecp` CLI.
-- Do not use `dotnet run` or `./ecp`.
+- Use the globally installed `devx` CLI.
+- Do not use `dotnet run` or `./devx`.
 - Check index status first.
 - Do not re-index if already indexed.
 - Reuse the current session whenever possible.
@@ -18,8 +18,8 @@ Rules
   3. read type --id
   4. read file (bounded range)
   5. snapshot only if still required
-- Prefer ECP structured patches.
-- If ECP cannot express the required edit, make the smallest direct source edit necessary.
+- Prefer DevX structured patches.
+- If DevX cannot express the required edit, make the smallest direct source edit necessary.
 - Do not invent workarounds to avoid direct edits.
 - Add or update tests.
 - Validate the new feature before full build/test when practical.
@@ -30,22 +30,22 @@ Rules
 Preferred workflow
 
 ```bash
-ecp index status --format json
-ecp session create --format json   # only if needed
+devx index status --format json
+devx session create --format json   # only if needed
 
-ecp search ...
-ecp read ...
+devx search ...
+devx read ...
 
-ecp patch preview ...
-ecp patch validate ...
-ecp patch apply ...
+devx patch preview ...
+devx patch validate ...
+devx patch apply ...
 
-ecp build --session <id> --format json
-ecp test --session <id> --format json
-ecp report --session <id> --format json
+devx build --session <id> --format json
+devx test --session <id> --format json
+devx report --session <id> --format json
 ```
 
-Use `dotnet build` / `dotnet test` only if ECP cannot perform the validation.
+Use `dotnet build` / `dotnet test` only if DevX cannot perform the validation.
 
 Before completion
 
@@ -58,5 +58,5 @@ Final report
 - Files modified
 - Files created
 - Verification commands
-- `ecp report --session <id> --format json`
+- `devx report --session <id> --format json`
 - Remaining limitations

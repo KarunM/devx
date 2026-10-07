@@ -108,16 +108,16 @@ Add automated tests covering:
 ## Validation
 
 ```bash
-./ecp index .
-SESSION=$(./ecp session create --format json)
+./devx index .
+SESSION=$(./devx session create --format json)
 
-./ecp patch preview tests/patches/replace-method.patch.json --session <id> --format json
-./ecp patch validate tests/patches/replace-method.patch.json --session <id> --format json
-./ecp patch apply tests/patches/replace-method.patch.json --session <id> --format json
+./devx patch preview tests/patches/replace-method.patch.json --session <id> --format json
+./devx patch validate tests/patches/replace-method.patch.json --session <id> --format json
+./devx patch apply tests/patches/replace-method.patch.json --session <id> --format json
 
-./ecp build --session <id> --format json
-./ecp test --session <id> --format json
-./ecp report --session <id> --format json
+./devx build --session <id> --format json
+./devx test --session <id> --format json
+./devx report --session <id> --format json
 ```
 
 ---

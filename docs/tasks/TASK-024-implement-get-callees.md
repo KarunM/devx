@@ -4,9 +4,9 @@
 **Completed:** 2026-07-02
 **Implemented By:** Codex
 **Verification:**
-- `./ecp build --session 8b5b0b3c-efe2-4e84-b98c-0a41b1c3c0a4 --format json`
-- `./ecp test --session 8b5b0b3c-efe2-4e84-b98c-0a41b1c3c0a4 --format json`
-- `./ecp callees Ecp.Indexer.DotnetBuildTestService.RunAsync --session 8b5b0b3c-efe2-4e84-b98c-0a41b1c3c0a4 --format json`
+- `./devx build --session 8b5b0b3c-efe2-4e84-b98c-0a41b1c3c0a4 --format json`
+- `./devx test --session 8b5b0b3c-efe2-4e84-b98c-0a41b1c3c0a4 --format json`
+- `./devx callees DevX.Indexer.DotnetBuildTestService.RunAsync --session 8b5b0b3c-efe2-4e84-b98c-0a41b1c3c0a4 --format json`
 **Phase:** v0.2 – Context & Impact Analysis
 **Depends On:** TASK-023
 
@@ -22,7 +22,7 @@ Do **not** return source code.
 
 ## Motivation
 
-After `GET_CALLERS`, ECP also needs to answer:
+After `GET_CALLERS`, DevX also needs to answer:
 
 > What does this method depend on?
 
@@ -49,7 +49,7 @@ SEARCH_SYMBOL
 ## CLI
 
 ```bash
-./ecp callees <method> --session <id> --format json
+./devx callees <method> --session <id> --format json
 ```
 
 Support:
@@ -100,15 +100,15 @@ Do **not** return implementation source.
 ## Validation
 
 ```bash
-./ecp index .
-SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
+./devx index .
+SESSION_ID=$(./devx session create --format json | jq -r '.Data.SessionId')
 
-./ecp search symbol HandleAsync --session "$SESSION_ID" --format json
-./ecp callees HandleAsync --session "$SESSION_ID" --format json
+./devx search symbol HandleAsync --session "$SESSION_ID" --format json
+./devx callees HandleAsync --session "$SESSION_ID" --format json
 
-./ecp build --session "$SESSION_ID" --format json
-./ecp test --session "$SESSION_ID" --format json
-./ecp report --session "$SESSION_ID" --format json
+./devx build --session "$SESSION_ID" --format json
+./devx test --session "$SESSION_ID" --format json
+./devx report --session "$SESSION_ID" --format json
 ```
 
 ---
@@ -116,7 +116,7 @@ SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
 ## Acceptance Criteria
 
 - `GET_CALLEES` implemented.
-- CLI supports `./ecp callees`.
+- CLI supports `./devx callees`.
 - Metadata only.
 - No source code returned.
 - Session and metrics updated.

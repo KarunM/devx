@@ -1,7 +1,7 @@
 # PLAN-003: Context Protocol Engine
 
 ## Goal
-Implement the dispatcher for all ECP protocol operations.
+Implement the dispatcher for all DevX protocol operations.
 
 ## Deliverables
 - Request dispatcher

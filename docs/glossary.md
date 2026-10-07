@@ -1,7 +1,7 @@
 # Glossary
 
 ## Repository
-A source code repository managed by ECP.
+A source code repository managed by DevX.
 
 ## Project
 A buildable unit within a repository.

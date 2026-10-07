@@ -11,14 +11,14 @@ searches.
 ### Read a file
 
 ``` bash
-ecp read file <path> [--range start:end | --full]
+devx read file <path> [--range start:end | --full]
 ```
 
 ### Read a method
 
 ``` bash
-ecp read method --id <method-id>
-ecp read method --query <method-name-or-qualified-name>
+devx read method --id <method-id>
+devx read method --query <method-name-or-qualified-name>
 ```
 
 -   `--id` is the preferred, deterministic form.
@@ -27,8 +27,8 @@ ecp read method --query <method-name-or-qualified-name>
 ### Read a type
 
 ``` bash
-ecp read type --id <type-id>
-ecp read type --query <type-name-or-qualified-name>
+devx read type --id <type-id>
+devx read type --query <type-name-or-qualified-name>
 ```
 
 -   `--id` is the preferred form.
@@ -36,11 +36,11 @@ ecp read type --query <type-name-or-qualified-name>
 
 ## Recommended Agent Flow
 
-1.  `ecp search symbol ...`
+1.  `devx search symbol ...`
 2.  Select the desired symbol ID.
-3.  `ecp read method --id ...` or `ecp read type --id ...`
+3.  `devx read method --id ...` or `devx read type --id ...`
 4.  Use snapshots/method context for analysis.
-5.  Generate edits with `ecp patch`.
+5.  Generate edits with `devx patch`.
 6.  Validate and apply the patch.
 
 ## API Contract

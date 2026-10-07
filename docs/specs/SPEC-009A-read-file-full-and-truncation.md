@@ -1,23 +1,23 @@
 # SPEC-009A: Read File Full Mode and Truncation Controls
 
 **Status:** Ready  
-**Parent:** SPEC-009 – ECP Source Read API  
+**Parent:** SPEC-009 – DevX Source Read API  
 **Phase:** Source Read Hardening
 
 ## Objective
 
-Extend `ecp read file` with explicit full-file reads and safe truncation controls.
+Extend `devx read file` with explicit full-file reads and safe truncation controls.
 
 The goal is to make source reads useful while preventing accidental large context expansion.
 
 ## Current State
 
-`ecp read file` supports bounded line ranges.
+`devx read file` supports bounded line ranges.
 
 Example:
 
 ```bash
-./ecp read file src/Ecp.Cli/Program.cs --range 1:120 --session <id> --format json
+./devx read file src/DevX.Cli/Program.cs --range 1:120 --session <id> --format json
 ```
 
 Missing:
@@ -34,7 +34,7 @@ Missing:
 Continue supporting:
 
 ```bash
-./ecp read file <path> --range <start>:<end> --session <id> --format json
+./devx read file <path> --range <start>:<end> --session <id> --format json
 ```
 
 ### Full Reads
@@ -42,7 +42,7 @@ Continue supporting:
 Add explicit full-file mode:
 
 ```bash
-./ecp read file <path> --full --session <id> --format json
+./devx read file <path> --full --session <id> --format json
 ```
 
 Full reads must never happen implicitly.
@@ -93,7 +93,7 @@ Optional later flag:
 
 ```json
 {
-  "Path": "src/Ecp.Cli/Program.cs",
+  "Path": "src/DevX.Cli/Program.cs",
   "Language": "C#",
   "StartLine": 1,
   "EndLine": 120,
@@ -125,12 +125,12 @@ Update session/report metrics with:
 ## Validation
 
 ```bash
-./ecp read file src/Ecp.Cli/Program.cs --range 1:20 --session <id> --format json
-./ecp read file src/Ecp.Cli/Program.cs --full --session <id> --format json
-./ecp read file src/Ecp.Cli/Program.cs --session <id> --format json
-./ecp build --session <id> --format json
-./ecp test --session <id> --format json
-./ecp report --session <id> --format json
+./devx read file src/DevX.Cli/Program.cs --range 1:20 --session <id> --format json
+./devx read file src/DevX.Cli/Program.cs --full --session <id> --format json
+./devx read file src/DevX.Cli/Program.cs --session <id> --format json
+./devx build --session <id> --format json
+./devx test --session <id> --format json
+./devx report --session <id> --format json
 ```
 
 ## Acceptance Criteria

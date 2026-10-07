@@ -6,7 +6,7 @@
 
 ## Objective
 
-Implement the protocol dispatcher that receives structured ECP requests and routes them to handlers.
+Implement the protocol dispatcher that receives structured DevX requests and routes them to handlers.
 
 ## Prerequisites
 
@@ -86,7 +86,7 @@ dotnet test
 
 ## Definition of Done
 
-The ECP protocol engine can receive structured requests and dispatch them predictably to operation handlers.
+The DevX protocol engine can receive structured requests and dispatch them predictably to operation handlers.
 
 ## Completion
 

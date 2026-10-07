@@ -1,10 +1,10 @@
 # Architecture Overview
 
-> Engineering Context Protocol (ECP)
+> Engineering Context Protocol (DevX)
 
 ## Purpose
 
-This document provides a high-level view of the ECP architecture and explains how the major components interact. It is intended as the architectural map of the system and complements the Vision, ADRs, Specifications, Plans, and Tasks.
+This document provides a high-level view of the DevX architecture and explains how the major components interact. It is intended as the architectural map of the system and complements the Vision, ADRs, Specifications, Plans, and Tasks.
 
 ---
 
@@ -14,7 +14,7 @@ This document provides a high-level view of the ECP architecture and explains ho
                 User
                   │
                   ▼
-             ECP CLI
+             DevX CLI
                   │
         ┌─────────┴─────────┐
         │                   │
@@ -276,7 +276,7 @@ Potential future capabilities include:
 
 # Summary
 
-ECP separates deterministic engineering concerns from probabilistic reasoning.
+DevX separates deterministic engineering concerns from probabilistic reasoning.
 
 The CLI owns orchestration.
 

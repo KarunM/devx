@@ -14,7 +14,7 @@ validation of a patch before it can be applied.
 ## CLI
 
 ``` bash
-./ecp patch validate <patch-file> --session <id> --format json
+./devx patch validate <patch-file> --session <id> --format json
 ```
 
 ------------------------------------------------------------------------
@@ -75,14 +75,14 @@ Return JSON similar to:
 ## Validation
 
 ``` bash
-./ecp index .
-SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
+./devx index .
+SESSION_ID=$(./devx session create --format json | jq -r '.Data.SessionId')
 
-./ecp patch validate tests/patches/create-file.patch.json --session "$SESSION_ID" --format json
+./devx patch validate tests/patches/create-file.patch.json --session "$SESSION_ID" --format json
 
-./ecp build --session "$SESSION_ID" --format json
-./ecp test --session "$SESSION_ID" --format json
-./ecp report --session "$SESSION_ID" --format json
+./devx build --session "$SESSION_ID" --format json
+./devx test --session "$SESSION_ID" --format json
+./devx report --session "$SESSION_ID" --format json
 ```
 
 ------------------------------------------------------------------------

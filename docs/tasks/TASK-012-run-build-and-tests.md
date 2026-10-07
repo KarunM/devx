@@ -5,10 +5,10 @@
 - **Implemented By:** Codex
 - **Verification:**
   - `dotnet build`
-  - `dotnet run --project src/Ecp.Cli -- session create --format json`
-  - `dotnet run --project src/Ecp.Cli -- build --session <id> --format json`
-  - `dotnet run --project src/Ecp.Cli -- test --session <id> --format json`
-  - `dotnet run --project src/Ecp.Cli -- diagnostics --session <id> --format json`
+  - `dotnet run --project src/DevX.Cli -- session create --format json`
+  - `dotnet run --project src/DevX.Cli -- build --session <id> --format json`
+  - `dotnet run --project src/DevX.Cli -- test --session <id> --format json`
+  - `dotnet run --project src/DevX.Cli -- diagnostics --session <id> --format json`
 - **Plan:** PLAN-005 Patch Engine
 - **Depends On:** TASK-011
 
@@ -71,9 +71,9 @@ Diagnostics should include where available:
 ## Verification Steps
 
 ```bash
-dotnet run --project src/Ecp.Cli -- build
-dotnet run --project src/Ecp.Cli -- test
-dotnet run --project src/Ecp.Cli -- diagnostics --format json
+dotnet run --project src/DevX.Cli -- build
+dotnet run --project src/DevX.Cli -- test
+dotnet run --project src/DevX.Cli -- diagnostics --format json
 ```
 
 ## Out of Scope
@@ -85,4 +85,4 @@ dotnet run --project src/Ecp.Cli -- diagnostics --format json
 
 ## Definition of Done
 
-ECP can run builds and tests, capture diagnostics, and expose them through the protocol.
+DevX can run builds and tests, capture diagnostics, and expose them through the protocol.

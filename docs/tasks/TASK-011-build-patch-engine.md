@@ -94,4 +94,4 @@ The patch engine can validate and apply MVP structured patch operations safely.
 - **Verification:**
   - `dotnet build`
   - `dotnet test`
-  - `dotnet run --project src/Ecp.Cli -- patch apply <patch-file> --session <id>`
+  - `dotnet run --project src/DevX.Cli -- patch apply <patch-file> --session <id>`

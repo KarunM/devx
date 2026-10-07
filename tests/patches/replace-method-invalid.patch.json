@@ -3,7 +3,7 @@
   "operations": [
     {
       "operation": "ReplaceMethod",
-      "path": "src/Ecp.Protocol/ProtocolEngine.cs",
+      "path": "src/DevX.Protocol/ProtocolEngine.cs",
       "methodName": "DoesNotExist",
       "replacementText": "replacement"
     }

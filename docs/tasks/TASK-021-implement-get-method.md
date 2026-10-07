@@ -4,9 +4,9 @@
 **Completed:** 2026-07-02
 **Implemented By:** Codex
 **Verification:**
-- `./ecp build --session d5ff50dc-3e57-47b0-9959-83883ed58637 --format json`
-- `./ecp test --session d5ff50dc-3e57-47b0-9959-83883ed58637 --format json`
-- `./ecp method get Ecp.Indexer.DotnetBuildTestService.RunBuildAsync --session d5ff50dc-3e57-47b0-9959-83883ed58637 --format json`
+- `./devx build --session d5ff50dc-3e57-47b0-9959-83883ed58637 --format json`
+- `./devx test --session d5ff50dc-3e57-47b0-9959-83883ed58637 --format json`
+- `./devx method get DevX.Indexer.DotnetBuildTestService.RunBuildAsync --session d5ff50dc-3e57-47b0-9959-83883ed58637 --format json`
 **Phase:** v0.2 – Progressive Context Expansion
 **Depends On:** TASK-020
 
@@ -22,7 +22,7 @@ The operation must never return an entire file.
 
 ## Motivation
 
-ECP's context expansion should be:
+DevX's context expansion should be:
 
 SEARCH_SYMBOL
 → GET_FILE_SNAPSHOT
@@ -42,7 +42,7 @@ Only when an LLM explicitly requests implementation should source code be return
 ## CLI
 
 ```bash
-./ecp method get <method> --session <id> --format json
+./devx method get <method> --session <id> --format json
 ```
 
 Support:
@@ -100,16 +100,16 @@ When invoked:
 Run:
 
 ```bash
-./ecp index .
-SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
+./devx index .
+SESSION_ID=$(./devx session create --format json | jq -r '.Data.SessionId')
 
-./ecp search symbol ProtocolEngine --session "$SESSION_ID" --format json
-./ecp method summary HandleAsync --session "$SESSION_ID" --format json
-./ecp method get HandleAsync --session "$SESSION_ID" --format json
+./devx search symbol ProtocolEngine --session "$SESSION_ID" --format json
+./devx method summary HandleAsync --session "$SESSION_ID" --format json
+./devx method get HandleAsync --session "$SESSION_ID" --format json
 
-./ecp build --session "$SESSION_ID" --format json
-./ecp test --session "$SESSION_ID" --format json
-./ecp report --session "$SESSION_ID" --format json
+./devx build --session "$SESSION_ID" --format json
+./devx test --session "$SESSION_ID" --format json
+./devx report --session "$SESSION_ID" --format json
 ```
 
 ---
@@ -122,7 +122,7 @@ SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
 - Ambiguous requests produce structured errors.
 - Session state and metrics updated.
 - Build and tests pass.
-- `ecp report` includes the new operation.
+- `devx report` includes the new operation.
 
 ---
 

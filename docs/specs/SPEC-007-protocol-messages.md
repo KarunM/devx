@@ -5,7 +5,7 @@
 
 # Purpose
 
-Defines the wire format for ECP protocol requests and responses.
+Defines the wire format for DevX protocol requests and responses.
 
 The protocol is transport-agnostic. JSON is the MVP serialization format.
 

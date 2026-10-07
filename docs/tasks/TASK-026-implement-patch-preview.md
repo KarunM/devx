@@ -39,7 +39,7 @@ SEARCH
 ## CLI
 
 ```bash
-./ecp patch preview <patch-file> --session <id> --format json
+./devx patch preview <patch-file> --session <id> --format json
 ```
 
 ---
@@ -82,14 +82,14 @@ Do **not** modify repository files.
 ## Validation
 
 ```bash
-./ecp index .
-SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
+./devx index .
+SESSION_ID=$(./devx session create --format json | jq -r '.Data.SessionId')
 
-./ecp patch preview sample.patch.json --session "$SESSION_ID" --format json
+./devx patch preview sample.patch.json --session "$SESSION_ID" --format json
 
-./ecp build --session "$SESSION_ID" --format json
-./ecp test --session "$SESSION_ID" --format json
-./ecp report --session "$SESSION_ID" --format json
+./devx build --session "$SESSION_ID" --format json
+./devx test --session "$SESSION_ID" --format json
+./devx report --session "$SESSION_ID" --format json
 ```
 
 ---
@@ -100,7 +100,7 @@ SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
 - Repository remains unchanged.
 - Preview includes unified diff.
 - Validation errors are reported.
-- CLI supports `./ecp patch preview`.
+- CLI supports `./devx patch preview`.
 - Tests pass.
 - Report records the operation.
 

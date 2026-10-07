@@ -6,7 +6,7 @@
 
 ## Objective
 
-Implement the MVP command-line interface for ECP.
+Implement the MVP command-line interface for DevX.
 
 ## Prerequisites
 
@@ -23,28 +23,28 @@ Implement the MVP command-line interface for ECP.
 ## Commands
 
 ```text
-ecp index
-ecp search
-ecp snapshot
-ecp expand
-ecp patch
-ecp build
-ecp test
-ecp diagnostics
-ecp ask
+devx index
+devx search
+devx snapshot
+devx expand
+devx patch
+devx build
+devx test
+devx diagnostics
+devx ask
 ```
 
 ## MVP Priority
 
 Implement in this order:
 
-1. `ecp index`
-2. `ecp search`
-3. `ecp snapshot`
-4. `ecp expand`
-5. `ecp diagnostics`
+1. `devx index`
+2. `devx search`
+3. `devx snapshot`
+4. `devx expand`
+5. `devx diagnostics`
 
-`ecp ask` may initially be a placeholder until LLM adapters exist.
+`devx ask` may initially be a placeholder until LLM adapters exist.
 
 ## Output Modes
 
@@ -70,17 +70,17 @@ JSON output is required for automation.
 ## Acceptance Criteria
 
 - CLI runs successfully.
-- `ecp index <path>` indexes a repository.
-- `ecp search <query>` returns indexed symbols.
+- `devx index <path>` indexes a repository.
+- `devx search <query>` returns indexed symbols.
 - JSON output mode works.
 - Invalid commands return useful errors.
 
 ## Verification Steps
 
 ```bash
-dotnet run --project src/Ecp.Cli -- --help
-dotnet run --project src/Ecp.Cli -- index .
-dotnet run --project src/Ecp.Cli -- search Authentication --format json
+dotnet run --project src/DevX.Cli -- --help
+dotnet run --project src/DevX.Cli -- index .
+dotnet run --project src/DevX.Cli -- search Authentication --format json
 ```
 
 ## Out of Scope
@@ -91,7 +91,7 @@ dotnet run --project src/Ecp.Cli -- search Authentication --format json
 
 ## Definition of Done
 
-The MVP CLI can index and query repositories through the ECP protocol engine.
+The MVP CLI can index and query repositories through the DevX protocol engine.
 
 ## Completion
 
@@ -99,6 +99,6 @@ The MVP CLI can index and query repositories through the ECP protocol engine.
 - **Implemented By:** Codex
 - **Verification:**
   - `dotnet build`
-  - `dotnet run --project src/Ecp.Cli -- index .`
-  - `dotnet run --project src/Ecp.Cli -- session create --format json`
-  - `dotnet run --project src/Ecp.Cli -- search symbol Run --session <id> --format json`
+  - `dotnet run --project src/DevX.Cli -- index .`
+  - `dotnet run --project src/DevX.Cli -- session create --format json`
+  - `dotnet run --project src/DevX.Cli -- search symbol Run --session <id> --format json`

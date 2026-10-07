@@ -7,7 +7,7 @@
 
 ## Objective
 
-Add an `ecp index status` command that tells the user or agent whether the repository index exists and whether it appears current or stale.
+Add an `devx index status` command that tells the user or agent whether the repository index exists and whether it appears current or stale.
 
 This is a lightweight step before full incremental indexing.
 
@@ -16,26 +16,26 @@ This is a lightweight step before full incremental indexing.
 Agents currently run:
 
 ```bash
-./ecp index .
+./devx index .
 ```
 
 too often.
 
 That wastes time and makes every task start with a full indexing pass.
 
-Before implementing full incremental indexing, ECP should expose repository index state so agents can decide whether indexing is necessary.
+Before implementing full incremental indexing, DevX should expose repository index state so agents can decide whether indexing is necessary.
 
 ## CLI
 
 ```bash
-./ecp index status
-./ecp index status --format json
+./devx index status
+./devx index status --format json
 ```
 
 Optional:
 
 ```bash
-./ecp index status <repo-path> --format json
+./devx index status <repo-path> --format json
 ```
 
 ## Response
@@ -78,7 +78,7 @@ If stale detection is basic for now:
 
 ## Requirements
 
-- Add `ecp index status`.
+- Add `devx index status`.
 - Return deterministic JSON with `--format json`.
 - Do not mutate the repository.
 - Do not re-index.
@@ -95,7 +95,7 @@ If stale detection is basic for now:
 Optional:
 
 ```bash
-./ecp index status --session <id> --format json
+./devx index status --session <id> --format json
 ```
 
 ## Implementation Notes
@@ -118,29 +118,29 @@ Add tests for:
 ## Validation
 
 ```bash
-./ecp index status --format json
-./ecp index .
-./ecp index status --format json
+./devx index status --format json
+./devx index .
+./devx index status --format json
 
-SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
-./ecp index status --session "$SESSION_ID" --format json
-./ecp report --session "$SESSION_ID" --format json
+SESSION_ID=$(./devx session create --format json | jq -r '.Data.SessionId')
+./devx index status --session "$SESSION_ID" --format json
+./devx report --session "$SESSION_ID" --format json
 
-./ecp build --session "$SESSION_ID" --format json
-./ecp test --session "$SESSION_ID" --format json
+./devx build --session "$SESSION_ID" --format json
+./devx test --session "$SESSION_ID" --format json
 ```
 
 If `jq` is unavailable, copy the session id manually.
 
 ## Acceptance Criteria
 
-- `ecp index status` works.
+- `devx index status` works.
 - It does not re-index the repository.
 - It returns deterministic JSON.
-- Agents can use it before deciding whether to run `ecp index .`.
+- Agents can use it before deciding whether to run `devx index .`.
 - Build and tests pass.
 - Report records the operation when session is provided.
 
 ## Definition of Done
 
-An agent can ask ECP whether the repository is indexed before running `ecp index .`, reducing unnecessary indexing during dogfooding.
+An agent can ask DevX whether the repository is indexed before running `devx index .`, reducing unnecessary indexing during dogfooding.

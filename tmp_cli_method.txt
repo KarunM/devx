@@ -2,7 +2,7 @@ static async Task<int> ReferencesAsync(string connectionString, string[] args, s
 {
     if (args.Length < 2)
     {
-        Console.Error.WriteLine("Usage: ecp references <symbol> --session <id>");
+        Console.Error.WriteLine("Usage: devx references <symbol> --session <id>");
         return 1;
     }
 

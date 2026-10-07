@@ -43,7 +43,7 @@ GET_METHOD
 ## CLI
 
 ```bash
-./ecp callers <method> --session <id> --format json
+./devx callers <method> --session <id> --format json
 ```
 
 Support:
@@ -94,15 +94,15 @@ Do **not** return method implementation.
 ## Validation
 
 ```bash
-./ecp index .
-SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
+./devx index .
+SESSION_ID=$(./devx session create --format json | jq -r '.Data.SessionId')
 
-./ecp search symbol HandleAsync --session "$SESSION_ID" --format json
-./ecp callers HandleAsync --session "$SESSION_ID" --format json
+./devx search symbol HandleAsync --session "$SESSION_ID" --format json
+./devx callers HandleAsync --session "$SESSION_ID" --format json
 
-./ecp build --session "$SESSION_ID" --format json
-./ecp test --session "$SESSION_ID" --format json
-./ecp report --session "$SESSION_ID" --format json
+./devx build --session "$SESSION_ID" --format json
+./devx test --session "$SESSION_ID" --format json
+./devx report --session "$SESSION_ID" --format json
 ```
 
 ---
@@ -110,7 +110,7 @@ SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
 ## Acceptance Criteria
 
 - `GET_CALLERS` implemented.
-- CLI supports `./ecp callers`.
+- CLI supports `./devx callers`.
 - Metadata only.
 - No source code returned.
 - Session and metrics updated.

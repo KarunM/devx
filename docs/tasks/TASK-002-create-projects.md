@@ -6,13 +6,13 @@
 
 ## Objective
 
-Create the initial project structure for the ECP system.
+Create the initial project structure for the DevX system.
 
 Each project should have a clear responsibility and avoid circular dependencies.
 
 ## Prerequisites
 
-- `Ecp.sln` exists
+- `DevX.sln` exists
 - `src/` and `tests/` directories exist
 
 ## Inputs
@@ -24,81 +24,81 @@ Each project should have a clear responsibility and avoid circular dependencies.
 ## Projects to Create
 
 ```text
-src/Ecp.Cli/
-src/Ecp.Core/
-src/Ecp.Protocol/
-src/Ecp.Indexer/
-src/Ecp.Storage/
-src/Ecp.Patching/
-src/Ecp.Build/
+src/DevX.Cli/
+src/DevX.Core/
+src/DevX.Protocol/
+src/DevX.Indexer/
+src/DevX.Storage/
+src/DevX.Patching/
+src/DevX.Build/
 
-tests/Ecp.Tests/
+tests/DevX.Tests/
 ```
 
 ## Responsibilities
 
-### Ecp.Cli
+### DevX.Cli
 
 Command-line entry point.
 
-### Ecp.Core
+### DevX.Core
 
 Shared domain abstractions and core models.
 
-### Ecp.Protocol
+### DevX.Protocol
 
 Protocol request and response models.
 
-### Ecp.Indexer
+### DevX.Indexer
 
 Repository indexing pipeline and parser abstractions.
 
-### Ecp.Storage
+### DevX.Storage
 
 SQLite persistence and query layer.
 
-### Ecp.Patching
+### DevX.Patching
 
 Structured patch validation and application.
 
-### Ecp.Build
+### DevX.Build
 
 Build, test, and diagnostics orchestration.
 
-### Ecp.Tests
+### DevX.Tests
 
 Unit and integration tests.
 
 ## Implementation Steps
 
 1. Create class library projects for core libraries.
-2. Create console project for `Ecp.Cli`.
-3. Create test project for `Ecp.Tests`.
+2. Create console project for `DevX.Cli`.
+3. Create test project for `DevX.Tests`.
 4. Add all projects to the solution.
 5. Configure references.
 
 ## Suggested References
 
 ```text
-Ecp.Cli -> Ecp.Core, Ecp.Protocol, Ecp.Indexer, Ecp.Storage, Ecp.Patching, Ecp.Build
+DevX.Cli -> DevX.Core, DevX.Protocol, DevX.Indexer, DevX.Storage, DevX.Patching, DevX.Build
 
-Ecp.Protocol -> Ecp.Core
+DevX.Protocol -> DevX.Core
 
-Ecp.Indexer -> Ecp.Core, Ecp.Storage
+DevX.Indexer -> DevX.Core, DevX.Storage
 
-Ecp.Storage -> Ecp.Core
+DevX.Storage -> DevX.Core
 
-Ecp.Patching -> Ecp.Core
+DevX.Patching -> DevX.Core
 
-Ecp.Build -> Ecp.Core
+DevX.Build -> DevX.Core
 
-Ecp.Tests -> all production projects as needed
+DevX.Tests -> all production projects as needed
 ```
 
 ## Acceptance Criteria
 
 - All projects exist.
-- All projects are included in `Ecp.sln`.
+- All projects are included in `DevX.sln`.
 - Project references compile.
 - `dotnet build` succeeds.
 
@@ -118,12 +118,12 @@ dotnet build
 
 ## Definition of Done
 
-The solution contains all initial ECP projects with clean project references and a successful build.
+The solution contains all initial DevX projects with clean project references and a successful build.
 
 ## Completion
 
 - **Completed:** 2026-07-02
 - **Implemented By:** Codex
 - **Verification:**
-  - `dotnet sln Ecp.sln list`
+  - `dotnet sln DevX.sln list`
   - `dotnet build`

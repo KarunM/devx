@@ -10,9 +10,9 @@ Avoid rebuilding the repository index when nothing has changed.
 ## CLI
 
 ``` bash
-./ecp index .
-./ecp index . --incremental
-./ecp index status
+./devx index .
+./devx index . --incremental
+./devx index status
 ```
 
 ## Requirements
@@ -48,12 +48,12 @@ Avoid rebuilding the repository index when nothing has changed.
 ## Validation
 
 ``` bash
-./ecp index .
-./ecp index --incremental .
-./ecp index status
-./ecp build --session <id> --format json
-./ecp test --session <id> --format json
-./ecp report --session <id> --format json
+./devx index .
+./devx index --incremental .
+./devx index status
+./devx build --session <id> --format json
+./devx test --session <id> --format json
+./devx report --session <id> --format json
 ```
 
 ## Acceptance Criteria

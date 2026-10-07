@@ -3,7 +3,7 @@
   "operations": [
     {
       "operation": "AddUsing",
-      "path": "src/Ecp.Protocol/ProtocolEngine.cs",
+      "path": "src/DevX.Protocol/ProtocolEngine.cs",
       "namespace": "System.Text.RegularExpressions"
     }
   ]

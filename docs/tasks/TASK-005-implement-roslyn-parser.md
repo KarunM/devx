@@ -11,8 +11,8 @@ Implement the initial C# parser using Roslyn to extract namespaces, types, metho
 ## Prerequisites
 
 - File indexing pipeline works
-- `Ecp.Indexer` project exists
-- `Ecp.Storage` can persist indexed metadata
+- `DevX.Indexer` project exists
+- `DevX.Storage` can persist indexed metadata
 
 ## Inputs
 

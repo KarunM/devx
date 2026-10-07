@@ -1,18 +1,18 @@
 # SPEC-010: Structured Patch Engine
 
 **Status:** Draft  
-**Phase:** ECP Editing Layer  
+**Phase:** DevX Editing Layer  
 **Depends On:** SPEC-009
 
 ## Objective
 
-Make ECP the primary editing surface for agents by supporting safe, structured source edits through patch preview, validation, apply, and rollback.
+Make DevX the primary editing surface for agents by supporting safe, structured source edits through patch preview, validation, apply, and rollback.
 
-Agents should avoid IDE Apply Patch for repository source when the required edit can be represented as an ECP patch.
+Agents should avoid IDE Apply Patch for repository source when the required edit can be represented as an DevX patch.
 
 ## Motivation
 
-ECP now supports deterministic source reads:
+DevX now supports deterministic source reads:
 
 ```text
 search symbol → read --id
@@ -143,10 +143,10 @@ unless a future explicit override is introduced.
 Existing commands remain:
 
 ```bash
-./ecp patch preview <patch-file> --session <id> --format json
-./ecp patch validate <patch-file> --session <id> --format json
-./ecp patch apply <patch-file> --session <id> --format json
-./ecp patch rollback <patch-file> --session <id> --format json
+./devx patch preview <patch-file> --session <id> --format json
+./devx patch validate <patch-file> --session <id> --format json
+./devx patch apply <patch-file> --session <id> --format json
+./devx patch rollback <patch-file> --session <id> --format json
 ```
 
 ## Patch File Examples
@@ -159,7 +159,7 @@ Existing commands remain:
   "operations": [
     {
       "operation": "ReplaceMethod",
-      "path": "src/Ecp.Protocol/ProtocolEngine.cs",
+      "path": "src/DevX.Protocol/ProtocolEngine.cs",
       "methodName": "HandlePatchAsync",
       "replacementText": "private async Task<ProtocolResponse> HandlePatchAsync(...)\n{\n    ...\n}"
     }
@@ -175,7 +175,7 @@ Existing commands remain:
   "operations": [
     {
       "operation": "InsertMethod",
-      "path": "src/Ecp.Cli/Program.cs",
+      "path": "src/DevX.Cli/Program.cs",
       "containingType": "Program",
       "position": "EndOfType",
       "methodText": "static int NewCommand()\n{\n    return 0;\n}"
@@ -192,7 +192,7 @@ Existing commands remain:
   "operations": [
     {
       "operation": "AddUsing",
-      "path": "src/Ecp.Protocol/ProtocolEngine.cs",
+      "path": "src/DevX.Protocol/ProtocolEngine.cs",
       "namespace": "System.Text.RegularExpressions"
     }
   ]
@@ -296,7 +296,7 @@ Add tests for:
 
 ## Metrics
 
-`ecp report` should include patch operation counts:
+`devx report` should include patch operation counts:
 
 - patch preview count
 - patch validate count
@@ -307,7 +307,7 @@ Add tests for:
 
 ## Acceptance Criteria
 
-- Agents can use ECP patches for common source edits.
+- Agents can use DevX patches for common source edits.
 - Whole-source-file replacement remains blocked.
 - Preview, validate, apply, and rollback work for supported operations.
 - Tests cover success and failure paths.
@@ -317,4 +317,4 @@ Add tests for:
 
 ## Definition of Done
 
-An agent can read code through ECP, produce a structured ECP patch, preview it, validate it, apply it, and verify the result without using IDE Apply Patch for normal source edits.
+An agent can read code through DevX, produce a structured DevX patch, preview it, validate it, apply it, and verify the result without using IDE Apply Patch for normal source edits.

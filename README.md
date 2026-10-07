@@ -1,71 +1,74 @@
-# ECP
+# DevX
 
-ECP is a local code intelligence and engineering loop tool. On macOS, the simplest way to update an existing install is to rebuild the CLI tool from this repo and reinstall it.
+DevX is a local code-intelligence and engineering-loop CLI. It indexes repositories, returns narrowly scoped source context, applies structured patches, and runs build/test validation.
 
-## Install Or Update On Mac
+
+> **History:** developed privately from June 2026 (Azure DevOps) and moved to GitHub on 7 October 2026 with its original commit history.
+
+## Install or update
 
 From the repository root:
 
 ```bash
-dotnet tool uninstall --tool-path ./.tools ecp 2>/dev/null || true
-dotnet pack src/Ecp.Cli -c Release -o ./artifacts/tools
-dotnet tool install --tool-path ./.tools --add-source ./artifacts/tools Ecp.Cli
-./.tools/ecp --help
+dotnet tool uninstall --global devx.cli 2>/dev/null || true
+dotnet pack src/DevX.Cli -c Release -o ./artifacts/tools
+dotnet tool install --global --add-source ./artifacts/tools DevX.Cli
+devx --version
 ```
 
-If you want to update a local repo install, rerun the pack and install commands above. If you previously installed the tool globally from a published NuGet feed, update it with:
+The package is `DevX.Cli` and the installed command is `devx`. The repo-local `./devx` wrapper runs the current source directly.
+
+DevX stores workspace state in `.devx/devx.db`.
+
+Install or refresh agent instructions in the current repository with `devx init --agents claude,codex`. Add `--global` to target `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`. The command owns only its marked DevX block, so rerunning it updates the rules without replacing other instructions.
+
+## Core workflow
 
 ```bash
-dotnet tool update --global Ecp.Cli
+devx index .
+SESSION_ID=$(devx session create --format json | jq -r '.Data.sessionId')
+devx search text "needle" --session "$SESSION_ID" --agent orchestrator
+devx read section 'docs/plan.md#Implementation' --session "$SESSION_ID" --agent worker-1
+devx test tests/unit_test.py tests/beta_gate_check.py --session "$SESSION_ID" --timeout 120 --agent worker-1
+devx report --session "$SESSION_ID" --format json
 ```
 
-That global update command will fail unless `Ecp.Cli` has been published to a NuGet feed available on your machine. For this repo today, the supported path is the local tool install shown above. If the installed tool still looks unchanged, uninstall it first and reinstall from the freshly packed local artifact.
+Symbol search results include the defining file and line range. Symbol reads accept IDs, short names, or qualified names; plain output prints `path:line` followed by unescaped source. Missing and ambiguous reads return the attempted name, a failure reason, and up to five suggestions. `search text` searches indexed file contents and returns file, line, column, and preview data.
+
+`devx test <files>` detects pytest files and plain Python check scripts, runs them sequentially with a five-minute default timeout, and prints a compact result. Failures include `file:line`, a one-line message, and a full-log path. Test summaries, per-agent calls, response character counts, and estimated output tokens are recorded in `devx report`.
+
+`devx index update` accepts multiple files in one call. JSON and HTML files are indexed as documents, and Git worktrees, where `.git` is a pointer file, are treated as healthy repositories.
+
+## Build and test
+
+Export a self-contained local HTML report across workspace sessions:
 
 ```bash
-dotnet tool uninstall --global ecp.cli
-dotnet pack src/Ecp.Cli -c Release -o ./artifacts/tools
-dotnet tool install --global --add-source ./artifacts/tools ecp.cli
+devx report html --period 30d --output devx-report.html
+devx report html --session "$SESSION_ID" --format json --output devx-report.json
 ```
 
-If you want to run the CLI directly from the repo without installing a tool, use:
+Organization aggregation is a preview for the Enterprise reporting capability. Supply a normalized event file (`AnalyticsInput`: `Organization` and `Events`) with globally unique event IDs and explicit repository, team, developer, agent, and session attribution:
 
 ```bash
-dotnet run --project src/Ecp.Cli -- --help
+devx report html --input org-events.json --org acme --team payments --repo backend --output devx-org-report.html
 ```
 
-## Build And Test
+HTML and JSON share the same aggregation model. Reports compare the selected period with the preceding equal-length period, count validation runs, show measured output characters and labeled token estimates, and make evidence-based recommendations. Missing policy, audit, merge-quality, and savings data is shown as unavailable. Organization preview input is not authenticated; enterprise RBAC, subscription enforcement, and central collection still require implementation. Existing output files are never overwritten. Local reports include session-attributed events for the current repository; unscoped operations are excluded.
 
 ```bash
-dotnet build
-dotnet test
+dotnet build DevX.sln
+dotnet test DevX.sln
 ```
 
-## ECP Core Patch Baseline Freeze
+## Uninstall
 
-The current baseline is tagged as `ECP-Core-Patch-Baseline-v0` and is the boundary for the core mutation workflow work.
+```bash
+dotnet tool uninstall --global DevX.Cli
+```
 
-Freeze scope:
+## Notes
 
-- `ecp patch create`
-- `ecp artifact create/delete/path`
-- `ecp patch preview/validate/apply/rollback`
-- `ecp build/test`
-- `ecp capabilities/help` updates
-
-Freeze caveats:
-
-- Some earlier certification runs used non-ECP inspection commands.
-- Final mutations used the ECP patch workflow.
-- ReplaceMethod rollback is functionally certified.
-- Runtime discovery for multi-app repos is intentionally out of scope for this baseline.
-- MCP server work is intentionally out of scope for this baseline.
-
-The next branch, `ecp-runtime-discovery-v0`, is reserved for runtime discovery work.
-
-## Contribute
-
-Please keep changes focused and follow the existing solution structure under `src/` and `tests/`.
-
-## Ask Session
-export SESSION_ID=$(ecp session create --format json | jq -r '.sessionId')
-ecp ask "can you create a health command on cli tool" --session "$SESSION_ID"
+- Workspace-scoped commands evaluate the current working directory.
+- `build`, `test`, and `report` require `--session <id>`.
+- The MCP reference server is currently an integration-tested library surface, not a packaged long-running server command.

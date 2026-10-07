@@ -7,7 +7,7 @@
 
 Implement the `GET_FILE_SNAPSHOT` protocol operation that returns a **metadata-only** view of a source file.
 
-This is the first context expansion operation in ECP.
+This is the first context expansion operation in DevX.
 
 ## Why
 
@@ -54,7 +54,7 @@ Return only:
 ## CLI
 
 ```bash
-ecp snapshot <file> --session <id> --format json
+devx snapshot <file> --session <id> --format json
 ```
 
 ## Protocol Operation

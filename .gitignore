@@ -5,7 +5,7 @@
 
 # dotenv files
 .env
-.ecp/
+.devx/
 *.exp
 exp.db
 
@@ -487,3 +487,10 @@ $RECYCLE.BIN/
 .tools*
 mlx_env
 .aider*
+
+# Local-only (added when moving to GitHub, 2026-10-07)
+mlx_env/
+artifacts/
+.aider*
+.DS_Store
+.ecp/

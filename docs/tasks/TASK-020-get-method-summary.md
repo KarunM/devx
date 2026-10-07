@@ -4,9 +4,9 @@
 **Completed:** 2026-07-02  
 **Implemented By:** Codex  
 **Verification:**
-- `./ecp build --session d5ff50dc-3e57-47b0-9959-83883ed58637 --format json`
-- `./ecp test --session d5ff50dc-3e57-47b0-9959-83883ed58637 --format json`
-- `./ecp method summary Run --session d5ff50dc-3e57-47b0-9959-83883ed58637 --format json`
+- `./devx build --session d5ff50dc-3e57-47b0-9959-83883ed58637 --format json`
+- `./devx test --session d5ff50dc-3e57-47b0-9959-83883ed58637 --format json`
+- `./devx method summary Run --session d5ff50dc-3e57-47b0-9959-83883ed58637 --format json`
 **Phase:** v0.2 – Context Expansion  
 **Depends On:** TASK-016, TASK-019
 
@@ -24,7 +24,7 @@ It must not return method source code.
 
 ## Motivation
 
-ECP currently supports repository search and file snapshots.
+DevX currently supports repository search and file snapshots.
 
 The next context expansion step is method-level discovery:
 
@@ -55,14 +55,14 @@ GET_METHOD_SUMMARY
 Add:
 
 ```bash
-ecp method summary <method> --session <session-id> --format json
+devx method summary <method> --session <session-id> --format json
 ```
 
 Optional supported forms:
 
 ```bash
-ecp method summary <method-id> --session <session-id> --format json
-ecp method summary <qualified-method-name> --session <session-id> --format json
+devx method summary <method-id> --session <session-id> --format json
+devx method summary <qualified-method-name> --session <session-id> --format json
 ```
 
 ---
@@ -82,7 +82,7 @@ Example protocol payload:
 ```json
 {
   "method": "HandleAsync",
-  "file": "src/Ecp.Protocol/ProtocolEngine.cs",
+  "file": "src/DevX.Protocol/ProtocolEngine.cs",
   "type": "ProtocolEngine"
 }
 ```
@@ -124,11 +124,11 @@ Do **not** return method source code.
 {
   "methodId": "...",
   "name": "HandleAsync",
-  "qualifiedName": "Ecp.Protocol.ProtocolEngine.HandleAsync",
+  "qualifiedName": "DevX.Protocol.ProtocolEngine.HandleAsync",
   "containingType": "ProtocolEngine",
-  "filePath": "src/Ecp.Protocol/ProtocolEngine.cs",
-  "project": "Ecp.Protocol",
-  "namespace": "Ecp.Protocol",
+  "filePath": "src/DevX.Protocol/ProtocolEngine.cs",
+  "project": "DevX.Protocol",
+  "namespace": "DevX.Protocol",
   "signature": "Task<ProtocolResponse> HandleAsync(ProtocolRequest request, CancellationToken cancellationToken)",
   "parameters": [
     {
@@ -176,7 +176,7 @@ When a method summary is requested:
    - if multiple methods match, return a structured ambiguity error with candidates.
 5. Add `GET_METHOD_SUMMARY` handling to the ProtocolEngine.
 6. Add CLI command:
-   - `ecp method summary ...`
+   - `devx method summary ...`
 7. Update session metrics/working set.
 8. Add tests for:
    - method lookup by exact name
@@ -207,31 +207,31 @@ Ambiguous method responses should include candidate metadata, but not source cod
 ## Acceptance Criteria
 
 - `GET_METHOD_SUMMARY` works through the ProtocolEngine.
-- CLI supports `ecp method summary`.
+- CLI supports `devx method summary`.
 - Method summaries return metadata only.
 - No implementation source code is returned.
 - Ambiguous methods are handled with structured errors.
 - Session working set is updated.
-- ECP metrics record the operation.
+- DevX metrics record the operation.
 - `dotnet build` succeeds.
 - `dotnet test` succeeds.
-- `./ecp report --session <id> --format json` reflects the operation.
+- `./devx report --session <id> --format json` reflects the operation.
 
 ---
 
 ## Verification Commands
 
 ```bash
-./ecp index .
-SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
+./devx index .
+SESSION_ID=$(./devx session create --format json | jq -r '.Data.SessionId')
 
-./ecp search symbol ProtocolEngine --session "$SESSION_ID" --format json
-./ecp snapshot src/Ecp.Protocol/ProtocolEngine.cs --session "$SESSION_ID" --format json
-./ecp method summary HandleAsync --session "$SESSION_ID" --format json
+./devx search symbol ProtocolEngine --session "$SESSION_ID" --format json
+./devx snapshot src/DevX.Protocol/ProtocolEngine.cs --session "$SESSION_ID" --format json
+./devx method summary HandleAsync --session "$SESSION_ID" --format json
 
-./ecp build --session "$SESSION_ID" --format json
-./ecp test --session "$SESSION_ID" --format json
-./ecp report --session "$SESSION_ID" --format json
+./devx build --session "$SESSION_ID" --format json
+./devx test --session "$SESSION_ID" --format json
+./devx report --session "$SESSION_ID" --format json
 ```
 
 If `jq` is unavailable, copy the session ID manually.
@@ -252,6 +252,6 @@ These belong to later tasks.
 
 ## Definition of Done
 
-An AI client can request a method summary through ECP and receive enough metadata to decide whether it needs to request the full method implementation later.
+An AI client can request a method summary through DevX and receive enough metadata to decide whether it needs to request the full method implementation later.
 
 This completes the Level 2 method-level metadata step in the progressive context retrieval workflow.

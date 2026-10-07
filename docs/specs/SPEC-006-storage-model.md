@@ -5,7 +5,7 @@
 
 # Purpose
 
-Defines the canonical persistence model for ECP repository state.
+Defines the canonical persistence model for DevX repository state.
 
 The storage model is entity-first. It is not a database schema specification.
 SQLite is an implementation detail of one storage backend.

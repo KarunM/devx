@@ -5,7 +5,7 @@
 
 # Purpose
 
-The Repository Index defines the canonical structural representation of a source repository exposed by the Engineering Context Protocol (ECP).
+The Repository Index defines the canonical structural representation of a source repository exposed by the Engineering Context Protocol (DevX).
 
 The index provides deterministic repository discovery without exposing source code unless explicitly requested.
 
@@ -163,7 +163,7 @@ The MVP does not require:
 
 These capabilities may be added in future revisions.
 
-# Relationship to ECP
+# Relationship to DevX
 
 The Repository Index is the authoritative data source for protocol operations such as:
 

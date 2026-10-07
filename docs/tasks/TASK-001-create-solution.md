@@ -6,7 +6,7 @@
 
 ## Objective
 
-Create the initial .NET solution structure for the ECP CLI project.
+Create the initial .NET solution structure for the DevX CLI project.
 
 This task establishes the repository skeleton that all later implementation work depends on.
 
@@ -14,7 +14,7 @@ This task establishes the repository skeleton that all later implementation work
 
 - .NET SDK installed
 - Repository initialized with Git
-- `docs/` directory already contains the ECP vision, ADRs, specs, and plans
+- `docs/` directory already contains the DevX vision, ADRs, specs, and plans
 
 ## Inputs
 
@@ -25,7 +25,7 @@ This task establishes the repository skeleton that all later implementation work
 ## Files to Create
 
 ```text
-Ecp.sln
+DevX.sln
 src/
 tests/
 ```
@@ -35,20 +35,20 @@ tests/
 1. Create the root solution file.
 2. Create the `src/` directory.
 3. Create the `tests/` directory.
-4. Ensure the solution name is `Ecp`.
+4. Ensure the solution name is `DevX`.
 5. Do not create implementation projects in this task unless they are required by tooling.
 
 ## Command Example
 
 ```bash
-dotnet new sln -n Ecp
+dotnet new sln -n DevX
 mkdir -p src
 mkdir -p tests
 ```
 
 ## Acceptance Criteria
 
-- `Ecp.sln` exists at the repository root.
+- `DevX.sln` exists at the repository root.
 - `src/` exists.
 - `tests/` exists.
 - `dotnet sln list` succeeds.
@@ -78,4 +78,4 @@ The repository contains a valid .NET solution with empty `src/` and `tests/` dir
 - **Completed:** 2026-07-02
 - **Implemented By:** Codex
 - **Verification:**
-  - `dotnet sln Ecp.sln list`
+  - `dotnet sln DevX.sln list`

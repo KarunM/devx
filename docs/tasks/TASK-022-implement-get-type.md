@@ -17,7 +17,7 @@ Return a metadata-only structural view of a type (class, interface, struct, reco
 ## CLI
 
 ```bash
-./ecp type get <type> --session <id> --format json
+./devx type get <type> --session <id> --format json
 ```
 
 Support:
@@ -69,21 +69,21 @@ Do not return source code.
 ## Validation
 
 ```bash
-./ecp index .
-SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
+./devx index .
+SESSION_ID=$(./devx session create --format json | jq -r '.Data.SessionId')
 
-./ecp search symbol ProtocolEngine --session "$SESSION_ID" --format json
-./ecp type get ProtocolEngine --session "$SESSION_ID" --format json
+./devx search symbol ProtocolEngine --session "$SESSION_ID" --format json
+./devx type get ProtocolEngine --session "$SESSION_ID" --format json
 
-./ecp build --session "$SESSION_ID" --format json
-./ecp test --session "$SESSION_ID" --format json
-./ecp report --session "$SESSION_ID" --format json
+./devx build --session "$SESSION_ID" --format json
+./devx test --session "$SESSION_ID" --format json
+./devx report --session "$SESSION_ID" --format json
 ```
 
 ## Acceptance Criteria
 
 - GET_TYPE implemented.
-- CLI supports `./ecp type get`.
+- CLI supports `./devx type get`.
 - Metadata only.
 - No implementation source.
 - Session and metrics updated.

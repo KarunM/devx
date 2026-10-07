@@ -5,7 +5,7 @@
 
 ## Objective
 
-Prevent destructive whole-file replacement of source files through the ECP patch engine.
+Prevent destructive whole-file replacement of source files through the DevX patch engine.
 
 Recent attempts showed that `UpdateFile` patches can replace an entire `.cs` file, which is unsafe for normal development and can destroy unrelated code.
 
@@ -62,15 +62,15 @@ Add tests covering:
 ## Validation
 
 ```bash
-./ecp index .
-SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
+./devx index .
+SESSION_ID=$(./devx session create --format json | jq -r '.Data.SessionId')
 
-./ecp patch validate tests/patches/updatefile-source.patch.json --session "$SESSION_ID" --format json
-./ecp patch validate tests/patches/replace-method.patch.json --session "$SESSION_ID" --format json
+./devx patch validate tests/patches/updatefile-source.patch.json --session "$SESSION_ID" --format json
+./devx patch validate tests/patches/replace-method.patch.json --session "$SESSION_ID" --format json
 
-./ecp build --session "$SESSION_ID" --format json
-./ecp test --session "$SESSION_ID" --format json
-./ecp report --session "$SESSION_ID" --format json
+./devx build --session "$SESSION_ID" --format json
+./devx test --session "$SESSION_ID" --format json
+./devx report --session "$SESSION_ID" --format json
 ```
 
 ---

@@ -1,6 +1,6 @@
-# ECP Documentation Index
+# DevX Documentation Index
 
-> Engineering Context Protocol (ECP) Documentation Guide
+> Engineering Context Protocol (DevX) Documentation Guide
 
 ## Purpose
 
@@ -34,7 +34,7 @@ Read first to understand the project's purpose, mission, principles, scope, and 
 
 `docs/adr/`
 
-- ADR-001 — ECP as a Protocol, Not a Coding Assistant
+- ADR-001 — DevX as a Protocol, Not a Coding Assistant
 - ADR-002 — Local Repository Discovery
 - ADR-003 — Progressive Context Retrieval
 - ADR-004 — CLI-Owned Session State

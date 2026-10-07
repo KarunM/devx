@@ -1,12 +1,12 @@
-# Engineering Context Protocol (ECP)
+# Engineering Context Protocol (DevX)
 
 > **Vision**
 
 ## Purpose
 
-The Engineering Context Protocol (ECP) aims to establish an open, vendor-neutral standard for how AI systems interact with software repositories.
+The Engineering Context Protocol (DevX) aims to establish an open, vendor-neutral standard for how AI systems interact with software repositories.
 
-Rather than treating a repository as a collection of text files, ECP exposes it as a structured engineering system that can be queried progressively.
+Rather than treating a repository as a collection of text files, DevX exposes it as a structured engineering system that can be queried progressively.
 
 The protocol separates deterministic repository navigation from probabilistic language model reasoning.
 
@@ -18,7 +18,7 @@ AI should reason about software—not waste tokens discovering it.
 
 Repositories already contain rich structural information such as projects, namespaces, types, methods, dependencies, references, and tests. This information should be discovered locally and exposed through a consistent protocol, allowing language models to request only the context they require.
 
-ECP enables repositories to behave like APIs instead of documents.
+DevX enables repositories to behave like APIs instead of documents.
 
 ---
 
@@ -79,9 +79,9 @@ Future versions may add:
 
 # Long-Term Goal
 
-Establish ECP as the standard protocol for AI-assisted software engineering.
+Establish DevX as the standard protocol for AI-assisted software engineering.
 
-Just as HTTP standardized communication between clients and servers, ECP seeks to standardize communication between engineering repositories and AI systems.
+Just as HTTP standardized communication between clients and servers, DevX seeks to standardize communication between engineering repositories and AI systems.
 
 The protocol should allow any compliant repository, CLI, IDE, or language model to collaborate through explicit, deterministic, and token-efficient context retrieval.
 

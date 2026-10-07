@@ -1,8 +1,8 @@
-# ECP Runtime Build/Test Discovery — Implementation Plan
+# DevX Runtime Build/Test Discovery — Implementation Plan
 
 ## 1. Problem Statement
 
-`DotnetBuildTestService` is hardcoded to `dotnet build` / `dotnet test` and only discovers `.sln` / `.csproj` files. This makes ECP unusable for:
+`DotnetBuildTestService` is hardcoded to `dotnet build` / `dotnet test` and only discovers `.sln` / `.csproj` files. This makes DevX unusable for:
 - Node.js / npm / pnpm / yarn
 - Python / poetry / pytest
 - Rust / Cargo
@@ -14,17 +14,17 @@
 
 1. **Runtime discovery**: Detect build/test tooling from project files without user intervention.
 2. **Language agnostic**: Support any project type via a plugin-style discovery map.
-3. **Configurable**: Allow explicit `.ecp/config.json` overrides when auto-discovery is insufficient.
+3. **Configurable**: Allow explicit `.devx/config.json` overrides when auto-discovery is insufficient.
 4. **Pluggable diagnostics**: Parse build errors/warnings from any tool (MSBuild, ESLint, cargo, gcc, etc.).
 5. **Backward compatible**: Existing .NET repos continue to work unchanged.
 
 ## 3. Proposed Architecture
 
-### 3.1 Configuration Layer (`.ecp/config.json`)
+### 3.1 Configuration Layer (`.devx/config.json`)
 
-Yes — ECP **should** read a per-repository configuration file. Auto-discovery is a best-effort default; real-world repos need overrides.
+Yes — DevX **should** read a per-repository configuration file. Auto-discovery is a best-effort default; real-world repos need overrides.
 
-**Default config file**: `.ecp/config.json` (auto-created on first `ecp index` if absent)
+**Default config file**: `.devx/config.json` (auto-created on first `devx index` if absent)
 
 **Schema**:
 ```json
@@ -33,13 +33,13 @@ Yes — ECP **should** read a per-repository configuration file. Auto-discovery 
   "projectType": "auto",
   "build": {
     "command": "dotnet",
-    "args": ["build", "Ecp.sln"],
+    "args": ["build", "DevX.sln"],
     "workingDirectory": ".",
     "env": null
   },
   "test": {
     "command": "dotnet",
-    "args": ["test", "Ecp.sln", "--verbosity", "normal"],
+    "args": ["test", "DevX.sln", "--verbosity", "normal"],
     "workingDirectory": ".",
     "env": null
   },
@@ -51,7 +51,7 @@ Yes — ECP **should** read a per-repository configuration file. Auto-discovery 
 
 - `projectType: "auto"` → discovery engine scans repo.
 - `projectType: "custom"` → use explicit `build` / `test` blocks.
-- If `.ecp/config.json` is missing, discovery runs and writes the inferred config.
+- If `.devx/config.json` is missing, discovery runs and writes the inferred config.
 
 ### 3.1a Custom Commands — Deep Dive
 
@@ -170,13 +170,13 @@ The `BuildConfig` record has four fields:
 
 1. **Shell script** (recommended): `command: "./scripts/build.sh"` — the script contains all steps.
 2. **Make / Just**: `command: "just"`, `args: ["build"]` — the `justfile` defines the multi-step recipe.
-3. **ECP multi-step** (future v2): `"build.steps": [{"command": "npm", "args": ["install"]}, {"command": "npm", "args": ["run", "build"]}]` — out of scope for v1.
+3. **DevX multi-step** (future v2): `"build.steps": [{"command": "npm", "args": ["install"]}, {"command": "npm", "args": ["run", "build"]}]` — out of scope for v1.
 
 #### Unknown Project Type — What Happens When Discovery Fails?
 
 When the discovery engine finds **no recognizable config files**:
 
-1. **If `.ecp/config.json` exists**: Use it (even if `projectType` is unknown — the user knows best).
+1. **If `.devx/config.json` exists**: Use it (even if `projectType` is unknown — the user knows best).
 2. **If no config exists**: Discovery writes a "placeholder" config:
    ```json
    {
@@ -187,8 +187,8 @@ When the discovery engine finds **no recognizable config files**:
      "diagnostics": { "parser": "generic" }
    }
    ```
-   ECP prints a warning: `No build system detected. Create .ecp/config.json or run ecp config --wizard.`
-   `ecp build` and `ecp test` return a helpful error with a link to docs.
+   DevX prints a warning: `No build system detected. Create .devx/config.json or run devx config --wizard.`
+   `devx build` and `devx test` return a helpful error with a link to docs.
 
 #### Command Resolution Strategy
 
@@ -223,7 +223,7 @@ Discovery algorithm:
 2. Score each candidate by file count (e.g., 5 `.csproj` = strong .NET signal)
 3. Pick highest-confidence match
 4. Check that the command exists on `PATH` (`which dotnet`, `which cargo`, etc.)
-5. Write inferred config to `.ecp/config.json`
+5. Write inferred config to `.devx/config.json`
 
 ### 3.3 Replace `DotnetBuildTestService` → `BuildTestService`
 
@@ -243,7 +243,7 @@ public sealed class BuildTestService : IBuildTestService
         var config = await _discovery.GetConfigAsync(repositoryRoot);
         if (config.Build is null)
         {
-            return ExecutionRecord.Failed("No build command configured. Run 'ecp config' to set up.");
+            return ExecutionRecord.Failed("No build command configured. Run 'devx config' to set up.");
         }
         return await RunCommandAsync(config.Build, repositoryRoot, ct);
     }
@@ -267,14 +267,14 @@ Each parser converts raw tool output into `DiagnosticRecord` (Severity, Code, Me
 ### 3.5 Protocol & CLI Changes
 
 - `ProtocolEngine` passes `repositoryRoot` to `BuildTestService`.
-- `BuildTestService` loads `.ecp/config.json` or discovers.
-- `ecp build` and `ecp test` stay the same from a user perspective.
-- New CLI: `ecp config` (or `ecp build config`) to show inferred config and allow manual editing.
-- New CLI: `ecp config --wizard` — interactive prompt to generate config.
+- `BuildTestService` loads `.devx/config.json` or discovers.
+- `devx build` and `devx test` stay the same from a user perspective.
+- New CLI: `devx config` (or `devx build config`) to show inferred config and allow manual editing.
+- New CLI: `devx config --wizard` — interactive prompt to generate config.
 
 ### 3.6 Report Composer Updates
 
-`EcpReportComposer` currently hardcodes `metric.Operation == "build"` and `"test"`. Update to:
+`DevXReportComposer` currently hardcodes `metric.Operation == "build"` and `"test"`. Update to:
 - Read operation names from config
 - Support arbitrary operation names (e.g., `lint`, `typecheck`, `format-check`)
 
@@ -288,45 +288,45 @@ Minimal — `ExecutionRecord` and `DiagnosticRecord` are already generic enough.
 
 | Phase | Scope | Files | Est. Effort |
 |---|---|---|---|
-| **1. Config + Discovery** | `.ecp/config.json` schema, `BuildSystemDiscoveryService`, detection map | New: `BuildSystemDiscoveryService.cs`, `BuildConfig.cs` | Medium |
+| **1. Config + Discovery** | `.devx/config.json` schema, `BuildSystemDiscoveryService`, detection map | New: `BuildSystemDiscoveryService.cs`, `BuildConfig.cs` | Medium |
 | **2. Generic BuildTestService** | Replace `DotnetBuildTestService`, keep backward compat | `DotnetBuildTestService.cs` → `BuildTestService.cs`, `ProtocolEngine.cs` | Medium |
 | **3. Diagnostic Parsers** | `IDiagnosticParser` + `MsBuildParser`, `CargoParser`, `GenericParser` | New: `DiagnosticParsers/` directory | Medium |
-| **4. CLI & Protocol** | `ecp config` command, `config` protocol op, update capabilities | `Program.cs`, `ProtocolModels.cs`, `ProtocolEngine.cs` | Small |
-| **5. Tests** | Discovery tests, parser tests, cross-toolchain integration tests | `tests/Ecp.Tests/Build/` | Medium |
-| **6. Report Metrics** | Generic operation tracking, update `EcpReportComposer` | `EcpReport.cs`, `EcpReportComposer.cs` | Small |
+| **4. CLI & Protocol** | `devx config` command, `config` protocol op, update capabilities | `Program.cs`, `ProtocolModels.cs`, `ProtocolEngine.cs` | Small |
+| **5. Tests** | Discovery tests, parser tests, cross-toolchain integration tests | `tests/DevX.Tests/Build/` | Medium |
+| **6. Report Metrics** | Generic operation tracking, update `DevXReportComposer` | `DevXReport.cs`, `DevXReportComposer.cs` | Small |
 
 ## 5. Open Questions
 
-1. **Should discovery be cached?** Yes — write `.ecp/config.json` after first `ecp index` so subsequent `build`/`test` calls skip scanning.
+1. **Should discovery be cached?** Yes — write `.devx/config.json` after first `devx index` so subsequent `build`/`test` calls skip scanning.
 2. **Monorepo support?** Config can support multiple profiles: `build.frontend`, `build.backend`, etc. Out of scope for v1; future work.
-3. **Should the user edit `config.json` or via CLI?** Both — `ecp config` shows current, `ecp config set build.command "npm run build"` edits.
+3. **Should the user edit `config.json` or via CLI?** Both — `devx config` shows current, `devx config set build.command "npm run build"` edits.
 4. **What about Docker / remote build?** Future — add `build.remote: { dockerfile, image }` to config schema later.
 
 ## 6. Files to Create / Modify
 
 **New files:**
-- `src/Ecp.Indexer/BuildSystemDiscoveryService.cs`
-- `src/Ecp.Indexer/BuildConfig.cs`
-- `src/Ecp.Indexer/IDiagnosticParser.cs`
-- `src/Ecp.Indexer/DiagnosticParsers/MsBuildDiagnosticParser.cs`
-- `src/Ecp.Indexer/DiagnosticParsers/GenericDiagnosticParser.cs`
-- `tests/Ecp.Tests/Build/BuildSystemDiscoveryTests.cs`
-- `tests/Ecp.Tests/Build/DiagnosticParserTests.cs`
+- `src/DevX.Indexer/BuildSystemDiscoveryService.cs`
+- `src/DevX.Indexer/BuildConfig.cs`
+- `src/DevX.Indexer/IDiagnosticParser.cs`
+- `src/DevX.Indexer/DiagnosticParsers/MsBuildDiagnosticParser.cs`
+- `src/DevX.Indexer/DiagnosticParsers/GenericDiagnosticParser.cs`
+- `tests/DevX.Tests/Build/BuildSystemDiscoveryTests.cs`
+- `tests/DevX.Tests/Build/DiagnosticParserTests.cs`
 
 **Modified files:**
-- `src/Ecp.Indexer/DotnetBuildTestService.cs` → rename to `BuildTestService.cs`
-- `src/Ecp.Protocol/ProtocolEngine.cs` (inject `BuildTestService`)
-- `src/Ecp.Cli/Program.cs` (add `ecp config`)
-- `src/Ecp.Cli/CapabilitiesComposer.cs` (add `config` command)
-- `src/Ecp.Domain/Entities.cs` (extend `ExecutionRecord` if needed)
-- `src/Ecp.Cli/EcpReport.cs` (generic operation names)
+- `src/DevX.Indexer/DotnetBuildTestService.cs` → rename to `BuildTestService.cs`
+- `src/DevX.Protocol/ProtocolEngine.cs` (inject `BuildTestService`)
+- `src/DevX.Cli/Program.cs` (add `devx config`)
+- `src/DevX.Cli/CapabilitiesComposer.cs` (add `config` command)
+- `src/DevX.Domain/Entities.cs` (extend `ExecutionRecord` if needed)
+- `src/DevX.Cli/DevXReport.cs` (generic operation names)
 
 ## 7. Verification Criteria
 
-- [ ] `ecp build` and `ecp test` work on a .NET repo without any config file (backward compat)
-- [ ] `ecp build` and `ecp test` work on a Node.js repo after `ecp index` (auto-discovery)
-- [ ] `.ecp/config.json` is created on first `ecp index` with the inferred settings
-- [ ] Editing `.ecp/config.json` overrides auto-discovery
+- [ ] `devx build` and `devx test` work on a .NET repo without any config file (backward compat)
+- [ ] `devx build` and `devx test` work on a Node.js repo after `devx index` (auto-discovery)
+- [ ] `.devx/config.json` is created on first `devx index` with the inferred settings
+- [ ] Editing `.devx/config.json` overrides auto-discovery
 - [ ] Custom shell script (`./build.sh`) works when configured manually
 - [ ] Build diagnostics are parsed for at least 3 toolchains (dotnet, cargo, npm)
 - [ ] All existing tests pass (0 regressions)

@@ -3,7 +3,7 @@
   "operations": [
     {
       "operation": "InsertMethod",
-      "path": "src/Ecp.Cli/Program.cs",
+      "path": "src/DevX.Cli/Program.cs",
       "containingType": "Program",
       "position": "EndOfType",
       "methodText": "static int StructuredPatchEngineProbe()\n{\n    return 0;\n}"

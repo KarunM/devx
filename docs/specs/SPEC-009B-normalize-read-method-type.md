@@ -1,12 +1,12 @@
 # SPEC-009B: Normalize Read Method and Read Type Responses
 
 **Status:** Ready  
-**Parent:** SPEC-009 – ECP Source Read API  
+**Parent:** SPEC-009 – DevX Source Read API  
 **Phase:** Source Read Consistency
 
 ## Objective
 
-Make `ecp read method` and `ecp read type` return consistent source-read responses instead of simply delegating raw existing `GET_METHOD` and `GET_TYPE` responses.
+Make `devx read method` and `devx read type` return consistent source-read responses instead of simply delegating raw existing `GET_METHOD` and `GET_TYPE` responses.
 
 ## Current State
 
@@ -21,7 +21,7 @@ Make `ecp read method` and `ecp read type` return consistent source-read respons
 Command:
 
 ```bash
-./ecp read method <method> --session <id> --format json
+./devx read method <method> --session <id> --format json
 ```
 
 Return:
@@ -44,7 +44,7 @@ This may internally reuse `GET_METHOD`, but the external response should be norm
 Command:
 
 ```bash
-./ecp read type <type> --session <id> --format json
+./devx read type <type> --session <id> --format json
 ```
 
 Default behavior:
@@ -66,7 +66,7 @@ Return:
 Optional future:
 
 ```bash
-./ecp read type <type> --source --session <id> --format json
+./devx read type <type> --source --session <id> --format json
 ```
 
 ## Response Examples
@@ -77,8 +77,8 @@ Optional future:
 {
   "Kind": "method",
   "SymbolId": "...",
-  "QualifiedName": "Ecp.Protocol.ProtocolEngine.HandlePatchAsync",
-  "Path": "src/Ecp.Protocol/ProtocolEngine.cs",
+  "QualifiedName": "DevX.Protocol.ProtocolEngine.HandlePatchAsync",
+  "Path": "src/DevX.Protocol/ProtocolEngine.cs",
   "StartLine": 120,
   "EndLine": 180,
   "ReturnedLines": 61,
@@ -93,8 +93,8 @@ Optional future:
 {
   "Kind": "type",
   "SymbolId": "...",
-  "QualifiedName": "Ecp.Protocol.ProtocolEngine",
-  "Path": "src/Ecp.Protocol/ProtocolEngine.cs",
+  "QualifiedName": "DevX.Protocol.ProtocolEngine",
+  "Path": "src/DevX.Protocol/ProtocolEngine.cs",
   "SourceReturned": false,
   "Metadata": {}
 }
@@ -112,11 +112,11 @@ Record:
 ## Validation
 
 ```bash
-./ecp read method HandlePatchAsync --session <id> --format json
-./ecp read type ProtocolEngine --session <id> --format json
-./ecp build --session <id> --format json
-./ecp test --session <id> --format json
-./ecp report --session <id> --format json
+./devx read method HandlePatchAsync --session <id> --format json
+./devx read type ProtocolEngine --session <id> --format json
+./devx build --session <id> --format json
+./devx test --session <id> --format json
+./devx report --session <id> --format json
 ```
 
 ## Acceptance Criteria

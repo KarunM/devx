@@ -6,7 +6,7 @@
     "sessionId": "ce4e2ac3-47ad-4998-8e49-b8f99fd1e323",
     "repositoryId": "82d33f36-5b23-88e5-bbb5-b2cb87e978d3",
     "affectedFiles": [
-      "src/Ecp.Protocol/ProtocolEngine.cs"
+      "src/DevX.Protocol/ProtocolEngine.cs"
     ],
     "operationHashes": [
       "e0fff42617f7affbf91e42b50a80c2aa6f6d2aa4902e40db8bcea319674c4604"
@@ -15,7 +15,7 @@
   "operations": [
     {
       "operation": "ReplaceLineRange",
-      "path": "src/Ecp.Protocol/ProtocolEngine.cs",
+      "path": "src/DevX.Protocol/ProtocolEngine.cs",
       "content": "            if (operation.Operation.Equals(\u0022ReplaceMethod\u0022, StringComparison.OrdinalIgnoreCase) \u0026\u0026 string.IsNullOrWhiteSpace(operation.ReplacementText))\n            {\n                errors.Add(new ProtocolDiagnostic(\u0022ValidationError\u0022, \u0022ReplaceMethod requires replacementText.\u0022));\n            }\n\n            if (operation.Operation.Equals(\u0022ReplaceMethod\u0022, StringComparison.OrdinalIgnoreCase) \u0026\u0026 !string.IsNullOrWhiteSpace(operation.MethodName) \u0026\u0026 IOFile.Exists(absolutePath))\n            {\n                var replaceMethodText = IOFile.ReadAllText(absolutePath);\n                var replaceMethodPattern = $@\u0022(?m)^[ \\t]*(?:public|private|protected|internal|static|async|sealed|override|partial|virtual|extern|unsafe|new|readonly|ref)[^\\n]*\\b{System.Text.RegularExpressions.Regex.Escape(operation.MethodName)}\\b[^\\n]*$\u0022;\n                var replaceMethodMatches = System.Text.RegularExpressions.Regex.Matches(replaceMethodText, replaceMethodPattern).Count;\n                if (replaceMethodMatches == 0)\n                {\n                    errors.Add(new ProtocolDiagnostic(\u0022ValidationError\u0022, $\u0022ReplaceMethod target [{operation.MethodName}] was not found in [{operation.Path}].\u0022));\n                }\n                else if (replaceMethodMatches \u003E 1)\n                {\n                    errors.Add(new ProtocolDiagnostic(\u0022ValidationError\u0022, $\u0022ReplaceMethod target [{operation.MethodName}] is ambiguous in [{operation.Path}] ({replaceMethodMatches} matches).\u0022));\n                }\n            }",
       "position": "911:914"
     }

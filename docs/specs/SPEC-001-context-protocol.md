@@ -3,14 +3,14 @@
 - **Status:** Draft
 - **Version:** 0.1.0
 - **Date:** 2026-07-02
-- **Owner:** ECP Project
+- **Owner:** DevX Project
 - **Related ADRs:** ADR-001
 
 ---
 
 ## 1. Purpose
 
-The Engineering Context Protocol (ECP) defines how a Large Language Model interacts with a source code repository through a local orchestration CLI.
+The Engineering Context Protocol (DevX) defines how a Large Language Model interacts with a source code repository through a local orchestration CLI.
 
 The protocol exists to prevent the LLM from receiving an entire repository by default.
 
@@ -53,7 +53,7 @@ Those concerns are defined in separate specifications.
 
 ## 3. Protocol Goals
 
-ECP must:
+DevX must:
 
 1. Minimize token usage.
 2. Make repository context retrieval explicit.
@@ -70,7 +70,7 @@ ECP must:
 
 ## 4. Non-Goals
 
-ECP is not:
+DevX is not:
 
 - a coding assistant product
 - an IDE
@@ -80,7 +80,7 @@ ECP is not:
 - a free-form file editing protocol
 - a prompt template format
 
-ECP may integrate with these systems, but it is not defined by them.
+DevX may integrate with these systems, but it is not defined by them.
 
 ---
 
@@ -118,7 +118,7 @@ The repository index exposes symbols, files, relationships, references, tests, a
 
 A provider-specific integration layer.
 
-The adapter translates between ECP messages and the selected model provider.
+The adapter translates between DevX messages and the selected model provider.
 
 ### 5.5 LLM
 
@@ -146,7 +146,7 @@ Implementation source code is only returned when explicitly requested.
 
 ## 7. Session Lifecycle
 
-A typical ECP session follows this lifecycle:
+A typical DevX session follows this lifecycle:
 
 ```text
 Start Session
@@ -206,7 +206,7 @@ The CLI must preserve enough metadata to make prior context requests reproducibl
 
 ## 9. Context Levels
 
-ECP exposes repository context through progressive levels.
+DevX exposes repository context through progressive levels.
 
 ### 9.1 Level 0 — Search
 
@@ -638,7 +638,7 @@ Metadata helps the CLI and LLM reason about freshness, size, and compatibility.
 
 ## 20. Versioning
 
-ECP uses semantic versioning.
+DevX uses semantic versioning.
 
 Protocol messages must include a protocol version.
 
@@ -702,7 +702,7 @@ The following questions remain unresolved:
 3. Should token budgets be enforced by the CLI or suggested to the LLM?
 4. How should secret detection and redaction be standardized?
 5. How should protocol compatibility be negotiated with adapters?
-6. Should ECP support streaming responses?
+6. Should DevX support streaming responses?
 7. How should multi-repository workspaces be represented?
 
 ---
@@ -731,4 +731,4 @@ The CLI owns repository navigation and session state.
 
 The LLM owns reasoning.
 
-This separation allows ECP to minimize token usage, reduce repeated repository discovery, and provide a model-agnostic foundation for AI-assisted software engineering.
+This separation allows DevX to minimize token usage, reduce repeated repository discovery, and provide a model-agnostic foundation for AI-assisted software engineering.

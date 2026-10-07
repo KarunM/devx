@@ -9,7 +9,7 @@
 
 ## Objective
 
-Improve the ECP patch engine so agents can make precise, structured multi-file code changes without using unsafe whole-file replacement.
+Improve the DevX patch engine so agents can make precise, structured multi-file code changes without using unsafe whole-file replacement.
 
 This task exists because TASK-029 exposed a limitation: the current patch model can express simple file creation and basic replacement, but it is not expressive enough for safe feature implementation across multiple C# files.
 
@@ -28,7 +28,7 @@ That is unsafe because it can:
 - bypass semantic validation
 - make large diffs hard to review
 
-ECP needs more precise structured edit operations.
+DevX needs more precise structured edit operations.
 
 ---
 
@@ -174,10 +174,10 @@ No new top-level CLI command is required.
 Existing commands must support the new patch operations:
 
 ```bash
-./ecp patch preview <patch-file> --session <id> --format json
-./ecp patch validate <patch-file> --session <id> --format json
-./ecp patch apply <patch-file> --session <id> --format json
-./ecp patch rollback <patch-file> --session <id> --format json
+./devx patch preview <patch-file> --session <id> --format json
+./devx patch validate <patch-file> --session <id> --format json
+./devx patch apply <patch-file> --session <id> --format json
+./devx patch rollback <patch-file> --session <id> --format json
 ```
 
 ---
@@ -203,31 +203,31 @@ Suggested fixtures:
 
 ## Acceptance Criteria
 
-- ECP can preview structured multi-file patches.
-- ECP can validate structured multi-file patches.
-- ECP can apply structured edits without replacing whole files.
+- DevX can preview structured multi-file patches.
+- DevX can validate structured multi-file patches.
+- DevX can apply structured edits without replacing whole files.
 - Existing patch operations still work.
 - Unsafe whole-file replacement is not required for normal feature work.
 - Tests cover success and failure cases.
 - `dotnet build` succeeds.
 - `dotnet test` succeeds.
-- `ecp report` records preview/validate/apply operations.
+- `devx report` records preview/validate/apply operations.
 
 ---
 
 ## Validation Commands
 
 ```bash
-./ecp index .
-SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
+./devx index .
+SESSION_ID=$(./devx session create --format json | jq -r '.Data.SessionId')
 
-./ecp patch preview tests/patches/insert-method.patch.json --session "$SESSION_ID" --format json
-./ecp patch validate tests/patches/insert-method.patch.json --session "$SESSION_ID" --format json
-./ecp patch apply tests/patches/insert-method.patch.json --session "$SESSION_ID" --format json
+./devx patch preview tests/patches/insert-method.patch.json --session "$SESSION_ID" --format json
+./devx patch validate tests/patches/insert-method.patch.json --session "$SESSION_ID" --format json
+./devx patch apply tests/patches/insert-method.patch.json --session "$SESSION_ID" --format json
 
-./ecp build --session "$SESSION_ID" --format json
-./ecp test --session "$SESSION_ID" --format json
-./ecp report --session "$SESSION_ID" --format json
+./devx build --session "$SESSION_ID" --format json
+./devx test --session "$SESSION_ID" --format json
+./devx report --session "$SESSION_ID" --format json
 ```
 
 If `jq` is unavailable, copy the session ID manually.
@@ -246,6 +246,6 @@ If `jq` is unavailable, copy the session ID manually.
 
 ## Definition of Done
 
-Agents can express normal implementation changes as structured ECP patches instead of direct IDE edits or unsafe whole-file replacement.
+Agents can express normal implementation changes as structured DevX patches instead of direct IDE edits or unsafe whole-file replacement.
 
 Once this task is complete, resume TASK-029: Incremental Indexing.

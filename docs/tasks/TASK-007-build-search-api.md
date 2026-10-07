@@ -6,7 +6,7 @@
 
 ## Objective
 
-Implement repository search operations used by the ECP protocol.
+Implement repository search operations used by the DevX protocol.
 
 ## Prerequisites
 
@@ -85,7 +85,7 @@ dotnet test
 
 ## Definition of Done
 
-The storage/query layer can satisfy Level 0 ECP search operations.
+The storage/query layer can satisfy Level 0 DevX search operations.
 
 ## Completion
 

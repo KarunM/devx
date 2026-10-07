@@ -41,7 +41,7 @@ before making changes.
 ## CLI
 
 ```bash
-./ecp references <symbol> --session <id> --format json
+./devx references <symbol> --session <id> --format json
 ```
 
 Support:
@@ -95,15 +95,15 @@ Do **not** return source code.
 ## Validation
 
 ```bash
-./ecp index .
-SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
+./devx index .
+SESSION_ID=$(./devx session create --format json | jq -r '.Data.SessionId')
 
-./ecp search symbol ProtocolEngine --session "$SESSION_ID" --format json
-./ecp references ProtocolEngine --session "$SESSION_ID" --format json
+./devx search symbol ProtocolEngine --session "$SESSION_ID" --format json
+./devx references ProtocolEngine --session "$SESSION_ID" --format json
 
-./ecp build --session "$SESSION_ID" --format json
-./ecp test --session "$SESSION_ID" --format json
-./ecp report --session "$SESSION_ID" --format json
+./devx build --session "$SESSION_ID" --format json
+./devx test --session "$SESSION_ID" --format json
+./devx report --session "$SESSION_ID" --format json
 ```
 
 ---
@@ -111,7 +111,7 @@ SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
 ## Acceptance Criteria
 
 - `GET_REFERENCES` implemented.
-- CLI supports `./ecp references`.
+- CLI supports `./devx references`.
 - Metadata only.
 - No implementation source returned.
 - Session working set remains unique.
@@ -123,4 +123,4 @@ SESSION_ID=$(./ecp session create --format json | jq -r '.Data.SessionId')
 
 ## Definition of Done
 
-An AI agent can determine every indexed usage of a symbol without opening source files, completing ECP's core repository discovery capabilities.
+An AI agent can determine every indexed usage of a symbol without opening source files, completing DevX's core repository discovery capabilities.

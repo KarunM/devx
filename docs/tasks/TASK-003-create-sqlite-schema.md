@@ -12,8 +12,8 @@ The schema should persist the canonical engineering model without relying on emb
 
 ## Prerequisites
 
-- `Ecp.Infrastructure` project exists
-- `Ecp.Domain` project exists
+- `DevX.Infrastructure` project exists
+- `DevX.Domain` project exists
 - Solution builds successfully
 
 ## Inputs
@@ -51,8 +51,8 @@ Session
 
 ## Implementation Steps
 
-1. Define storage contracts in `Ecp.Domain`.
-2. Add SQLite package dependency to `Ecp.Infrastructure`.
+1. Define storage contracts in `DevX.Domain`.
+2. Add SQLite package dependency to `DevX.Infrastructure`.
 3. Create a database initializer and storage bootstrapper.
 4. Create schema migration or bootstrap SQL.
 5. Create indexes for common lookups:
@@ -80,7 +80,7 @@ dotnet test
 Optionally inspect the database:
 
 ```bash
-sqlite3 .ecp/index.db ".tables"
+sqlite3 .devx/index.db ".tables"
 ```
 
 ## Out of Scope
@@ -93,7 +93,7 @@ sqlite3 .ecp/index.db ".tables"
 
 ## Definition of Done
 
-`Ecp.Infrastructure.Storage.SQLite` can initialize an empty ECP repository database with all required MVP entities.
+`DevX.Infrastructure.Storage.SQLite` can initialize an empty DevX repository database with all required MVP entities.
 
 ## Completion
 

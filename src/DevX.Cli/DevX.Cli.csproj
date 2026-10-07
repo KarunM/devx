@@ -1,0 +1,22 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>devx</ToolCommandName>
+    <PackageId>DevX.Cli</PackageId>
+    <Version>1.5.0</Version>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DevX.Application\DevX.Application.csproj" />
+    <ProjectReference Include="..\DevX.Domain\DevX.Domain.csproj" />
+    <ProjectReference Include="..\DevX.Protocol\DevX.Protocol.csproj" />
+    <ProjectReference Include="..\DevX.Infrastructure\DevX.Infrastructure.csproj" />
+    <ProjectReference Include="..\DevX.Indexer\DevX.Indexer.csproj" />
+  </ItemGroup>
+
+</Project>
