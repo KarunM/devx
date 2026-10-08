@@ -837,6 +837,9 @@ public sealed class ProtocolEngine : IProtocolEngine
         var suggestions = _repositoryStore is ISymbolStore symbols
             ? (await symbols.FindClosestSymbolsAsync(query, cancellationToken: cancellationToken)).Select(symbol => symbol.QualifiedName).Where(name => !string.Equals(name, query, StringComparison.OrdinalIgnoreCase)).ToList()
             : [];
+        // Distinct/Take here too: Fail() clamps the structured list, but the sentence below is
+        // built from the raw names and was printing the same suggestion twice.
+        suggestions = suggestions.Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToList();
         var suffix = suggestions.Count == 0 ? string.Empty : $" Did you mean: {string.Join(", ", suggestions)}?";
         return Fail("NotFound", $"{kind} '{query}' was not found.{suffix}", query, suggestions);
     }

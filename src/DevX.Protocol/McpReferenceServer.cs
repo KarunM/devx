@@ -115,7 +115,7 @@ public sealed class McpReferenceServer
         return new McpToolCallResult(!response.Success, JsonSerializer.SerializeToElement(new { success = response.Success, text = AgentText(response) }, JsonOptions));
     }
 
-    private static string AgentText(ProtocolResponse response)
+    internal static string AgentText(ProtocolResponse response)
     {
         if (response.Data is { ValueKind: JsonValueKind.Object } executionData)
         {
@@ -127,9 +127,17 @@ public sealed class McpReferenceServer
         if (!response.Success) return string.Join("\n", response.Errors.Select(error => $"error: {error.Message}"));
         if (response.Data is not { } data) return string.Empty;
         if (TryGetPropertyIgnoreCase(data, "symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array && symbols.GetArrayLength() > 0)
-            return string.Join("\n", symbols.EnumerateArray().Select(item => $"{Text(item, "kind").ToLowerInvariant()} {Text(item, "qualifiedName")} {RelativePath(Text(item, "filePath"))}:{Text(item, "startLine")}-{Text(item, "endLine")}"));
+        {
+            var hits = symbols.EnumerateArray().Take(10).Select(item => $"{Text(item, "kind").ToLowerInvariant()} {Text(item, "qualifiedName")} {RelativePath(Text(item, "filePath"))}:{Text(item, "startLine")}-{Text(item, "endLine")}").ToList();
+            if (symbols.GetArrayLength() > hits.Count) hits.Add($"... {symbols.GetArrayLength() - hits.Count} more");
+            return string.Join("\n", hits);
+        }
         if (TryGetPropertyIgnoreCase(data, "contentMatches", out var matches) && matches.ValueKind == JsonValueKind.Array)
-            return string.Join("\n", matches.EnumerateArray().Select(item => { var preview = Text(item, "preview").Trim(); return $"{RelativePath(Text(item, "path"))}:{Text(item, "line")}: {preview[..Math.Min(160, preview.Length)]}"; }));
+        {
+            var hits = matches.EnumerateArray().Take(10).Select(item => { var preview = Text(item, "preview").Trim(); return $"{RelativePath(Text(item, "path"))}:{Text(item, "line")}: {preview[..Math.Min(120, preview.Length)]}"; }).ToList();
+            if (matches.GetArrayLength() > hits.Count) hits.Add($"... {matches.GetArrayLength() - hits.Count} more");
+            return string.Join("\n", hits);
+        }
         foreach (var collection in new[] { "callers", "callees", "references" })
         {
             if (!TryGetPropertyIgnoreCase(data, collection, out var items)) continue;
@@ -429,7 +437,41 @@ public sealed class McpReferenceServer
         var response = await _protocolEngine.ExecuteAsync(new ProtocolRequest("1.0", operation, sessionId, JsonSerializer.SerializeToElement(new { query })), cancellationToken);
         if (implicitKind && operation == ProtocolOperations.SearchSymbol && response.Success && response.Data is { ValueKind: JsonValueKind.Object } data && TryGetPropertyIgnoreCase(data, "symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array && symbols.GetArrayLength() == 0)
             response = await _protocolEngine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.SearchText, sessionId, JsonSerializer.SerializeToElement(new { query })), cancellationToken);
-        return FormatResult(response, AgentFormat(arguments));
+        var autoRead = string.Empty;
+        if (AgentFormat(arguments) != "json" && operation == ProtocolOperations.SearchSymbol && response.Success && response.Data is { ValueKind: JsonValueKind.Object } searchData && TryGetPropertyIgnoreCase(searchData, "symbols", out var singleHits) && singleHits.ValueKind == JsonValueKind.Array && singleHits.GetArrayLength() == 1)
+        {
+            var hit = singleHits[0];
+            var id = Text(hit, "id");
+            var kind = Text(hit, "kind");
+            if (id.Length > 0)
+            {
+                var readOperation = kind is "Class" or "Type" or "Record" or "Interface" or "Struct" or "Enum" ? "READ_TYPE" : "READ_METHOD";
+                var read = await _protocolEngine.ExecuteAsync(new ProtocolRequest("1.0", readOperation, sessionId, JsonSerializer.SerializeToElement(new { id })), cancellationToken);
+                // The hit line stays in the result; the source is appended, and only when the
+                // span is small enough that an unasked-for read cannot flood the context.
+                if (read.Success) autoRead = AutoReadText(read);
+            }
+        }
+        if (autoRead.Length == 0) return FormatResult(response, AgentFormat(arguments));
+        var combined = AgentText(response) + "\n" + autoRead;
+        return new McpToolCallResult(!response.Success, JsonSerializer.SerializeToElement(new { success = response.Success, text = combined }, JsonOptions));
+    }
+
+    // Mirrors the CLI's AutoReadText: an explicit read always returns its source, this cap
+    // only applies to source the agent did not ask for.
+    private static string AutoReadText(ProtocolResponse read)
+    {
+        const int autoReadMaxLines = 80;
+        var text = AgentText(read);
+        if (read.Data is not { ValueKind: JsonValueKind.Object } data) return text;
+        var head = text.Split('\n')[0];
+        if (!int.TryParse(Text(data, "startLine"), out var start) || !int.TryParse(Text(data, "endLine"), out var end) || start <= 0 || end < start)
+            return text;
+        var span = end - start + 1;
+        if (span <= autoReadMaxLines) return text;
+        var body = text.Contains('\n') ? text[(text.IndexOf('\n') + 1)..] : string.Empty;
+        var first = body.Split('\n').FirstOrDefault(line => !string.IsNullOrWhiteSpace(line))?.Trim() ?? string.Empty;
+        return $"{head} {first}\nread to get {span} lines";
     }
 
     private async Task<McpToolCallResult> ExecuteReadAsync(JsonElement arguments, CancellationToken cancellationToken)

@@ -20,7 +20,10 @@ static async Task<int> RunAsync(string[] args)
     OperationContext.TaskLabel.Value = GetOption(args, "--task");
     if (args.Length == 0 || args[0] is "--help" or "-h")
     {
-        PrintHelp();
+        // An agent asking for help wants the ten commands, not the manual: 17 of the 64
+        // unexplained calls in the v2 arm-B transcripts were `devx --help`.
+        if (args.Contains("--agent", StringComparer.Ordinal)) PrintAgentHelp();
+        else PrintHelp();
         return 0;
     }
 
@@ -164,9 +167,60 @@ static async Task<int> RunAsync(string[] args)
             return await McpServeAsync(connectionString);
 
         default:
-            Console.Error.WriteLine($"Unknown command '{command}'.");
+            Console.Error.WriteLine($"Unknown command '{command}'."
+                + (ClosestCommand(command) is { } near ? $" Did you mean '{near}'?" : " Run 'devx --help --agent' for the command list."));
             return 1;
     }
+}
+
+// The commands an agent actually reaches for. Used only to turn a typo into a fix.
+static string? ClosestCommand(string command)
+{
+    string[] KnownCommands =
+    {
+        "init", "index", "search", "read", "snapshot", "session", "capabilities",
+        "test", "build", "patch", "replace", "mcp", "ask", "report", "version"
+    };
+    string? best = null;
+    var bestDistance = int.MaxValue;
+    foreach (var candidate in KnownCommands)
+    {
+        var distance = Levenshtein(command, candidate);
+        if (distance < bestDistance) { bestDistance = distance; best = candidate; }
+    }
+    // Only suggest an actual neighbour; "frobnicate" should get the help line instead.
+    return bestDistance <= Math.Max(2, command.Length / 3) ? best : null;
+}
+
+static int Levenshtein(string a, string b)
+{
+    var previous = new int[b.Length + 1];
+    var current = new int[b.Length + 1];
+    for (var j = 0; j <= b.Length; j++) previous[j] = j;
+    for (var i = 1; i <= a.Length; i++)
+    {
+        current[0] = i;
+        for (var j = 1; j <= b.Length; j++)
+            current[j] = Math.Min(Math.Min(current[j - 1] + 1, previous[j] + 1),
+                previous[j - 1] + (char.ToLowerInvariant(a[i - 1]) == char.ToLowerInvariant(b[j - 1]) ? 0 : 1));
+        (previous, current) = (current, previous);
+    }
+    return previous[b.Length];
+}
+
+// Deliberately <= 10 lines: this is the whole point of it existing next to PrintHelp.
+static void PrintAgentHelp()
+{
+    Console.WriteLine("devx --agent cheat sheet (add --session <id> and --format agent)");
+    Console.WriteLine("  devx index .                      index the repo (or: index update <files>)");
+    Console.WriteLine("  devx search symbol <name>         find it; one hit returns its source too");
+    Console.WriteLine("  devx search text <literal>        literal text search");
+    Console.WriteLine("  devx read method \"<Qualified>\"    read ONE function; \"<file#Heading>\" for a doc section");
+    Console.WriteLine("  devx read <Name> <Name>          several symbols in ONE call, not one call each");
+    Console.WriteLine("  devx snapshot <file>              map a file: classes + functions, no bodies");
+    Console.WriteLine("  devx patch create|validate|apply  whole-function edits by name");
+    Console.WriteLine("  devx test [<files>]               run tests; exit 0 = pass");
+    Console.WriteLine("  devx capabilities                 what this build can do");
 }
 
 static async Task<int> McpServeAsync(string connectionString)
@@ -446,8 +500,27 @@ static async Task<int> SearchAsync(string connectionString, string[] args, strin
         response = await engine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.SearchText, sessionId, JsonSerializer.SerializeToElement(new { query })));
         searchKind = "text";
     }
+    // Search and read in one call. Only for a SINGLE hit: several equal hits must always be
+    // listed, never silently resolved to one. The hit line is printed first, so the agent
+    // keeps the identity (qualified name, path, span) as well as the source. Agent format
+    // only -- --format json keeps its exact shape.
+    string? autoRead = null;
+    if (format == "agent" && searchKind == "symbol" && response.Success && response.Data is { ValueKind: JsonValueKind.Object } searchData && TryGetPropertyIgnoreCase(searchData, "Symbols", out var singleHits) && singleHits.ValueKind == JsonValueKind.Array && singleHits.GetArrayLength() == 1)
+    {
+        var hit = singleHits[0];
+        var id = JsonPropertyText(hit, "Id");
+        var kind = JsonPropertyText(hit, "Kind");
+        if (id.Length > 0)
+        {
+            var operation = kind is "Class" or "Type" or "Record" or "Interface" or "Struct" or "Enum" ? "READ_TYPE" : "READ_METHOD";
+            var read = await engine.ExecuteAsync(new ProtocolRequest("1.0", operation, sessionId, JsonSerializer.SerializeToElement(new { id })));
+            if (read.Success) autoRead = AutoReadText(read);
+        }
+    }
+
     await store.AddOperationMetricAsync(new OperationMetric($"search {searchKind}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, query), GetAgentLabel(args)));
     WriteResponse(response, format);
+    if (autoRead is not null) Console.WriteLine(autoRead);
     return response.Success ? 0 : 1;
 }
 
@@ -1122,7 +1195,26 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
         var separator = args[2].LastIndexOf('#');
         if (separator <= 0 || separator == args[2].Length - 1)
         {
-            Console.Error.WriteLine("Usage: devx read section <file>#<heading> --session <id>");
+            // 19 of 23 `read section` calls in the v2 arm-B transcripts failed on exactly
+            // this -- a missing '#Heading'. Answer with the headings rather than an error,
+            // so the retry is a paste instead of another search.
+            var snapshot = await engine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.GetFileSnapshot, sessionId, JsonSerializer.SerializeToElement(new { query = args[2] }), GetAgentLabel(args)));
+            Console.Error.WriteLine("devx read section needs a heading: devx read section <file>#<heading>");
+            var headings = new List<string>();
+            var payload = snapshot.Data;
+            // The snapshot payload nests its collections under Data.Snapshot.
+            if (payload is { ValueKind: JsonValueKind.Object } outer && TryGetPropertyIgnoreCase(outer, "Snapshot", out var inner))
+                payload = inner;
+            if (snapshot.Success && payload is { ValueKind: JsonValueKind.Object } snapData)
+                foreach (var collection in new[] { "Types", "Methods" })
+                    if (TryGetPropertyIgnoreCase(snapData, collection, out var items) && items.ValueKind == JsonValueKind.Array)
+                        headings.AddRange(items.EnumerateArray().Select(item => JsonPropertyText(item, "Name")).Where(name => name.Length > 0));
+            if (headings.Count == 0) Console.Error.WriteLine($"no headings found in '{args[2]}' (is it indexed?)");
+            else
+            {
+                Console.Error.WriteLine($"headings in {args[2]}:");
+                foreach (var heading in headings) Console.Error.WriteLine($"  devx read section \"{args[2]}#{heading}\"");
+            }
             return 1;
         }
 
@@ -2060,9 +2152,17 @@ static string FormatAgentResponse(ProtocolResponse response)
     if (!response.Success) return string.Join("\n", response.Errors.Select(error => $"error: {error.Message}"));
     if (response.Data is not { } data) return string.Empty;
     if (TryGetPropertyIgnoreCase(data, "symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array && symbols.GetArrayLength() > 0)
-        return string.Join("\n", symbols.EnumerateArray().Select(item => $"{JsonPropertyText(item, "Kind").ToLowerInvariant()} {JsonPropertyText(item, "QualifiedName")} {RelativeAgentPath(JsonPropertyText(item, "FilePath"))}:{JsonPropertyText(item, "StartLine")}-{JsonPropertyText(item, "EndLine")}"));
+    {
+        var hits = symbols.EnumerateArray().Take(10).Select(item => $"{JsonPropertyText(item, "Kind").ToLowerInvariant()} {JsonPropertyText(item, "QualifiedName")} {RelativeAgentPath(JsonPropertyText(item, "FilePath"))}:{JsonPropertyText(item, "StartLine")}-{JsonPropertyText(item, "EndLine")}").ToList();
+        if (symbols.GetArrayLength() > hits.Count) hits.Add($"... {symbols.GetArrayLength() - hits.Count} more");
+        return string.Join("\n", hits);
+    }
     if (TryGetPropertyIgnoreCase(data, "contentMatches", out var matches) && matches.ValueKind == JsonValueKind.Array)
-        return string.Join("\n", matches.EnumerateArray().Select(item => { var preview = JsonPropertyText(item, "Preview").Trim(); return $"{RelativeAgentPath(JsonPropertyText(item, "Path"))}:{JsonPropertyText(item, "Line")}: {preview[..Math.Min(160, preview.Length)]}"; }));
+    {
+        var hits = matches.EnumerateArray().Take(10).Select(item => { var preview = JsonPropertyText(item, "Preview").Trim(); return $"{RelativeAgentPath(JsonPropertyText(item, "Path"))}:{JsonPropertyText(item, "Line")}: {preview[..Math.Min(120, preview.Length)]}"; }).ToList();
+        if (matches.GetArrayLength() > hits.Count) hits.Add($"... {matches.GetArrayLength() - hits.Count} more");
+        return string.Join("\n", hits);
+    }
     foreach (var collection in new[] { "Callers", "Callees", "References" })
     {
         if (!TryGetPropertyIgnoreCase(data, collection, out var items)) continue;
@@ -2088,6 +2188,24 @@ static string FormatAgentResponse(ProtocolResponse response)
         return $"{p}:{start}-{end}{(string.IsNullOrEmpty(name) ? "" : $" {name}")}{(string.IsNullOrEmpty(kind) ? "" : $" [{kind}]")}\n{source.GetString()}";
     }
     return data.GetRawText();
+}
+
+// The source an auto-read appends to a single-hit search result. An EXPLICIT read always
+// returns its source (the 1.6.1 paging stands); this cap is only for source the agent did
+// not ask for, so an unlucky one-hit search cannot dump a 900-line method into the context.
+static string AutoReadText(ProtocolResponse read)
+{
+    const int AutoReadMaxLines = 80;
+    var text = FormatAgentResponse(read);
+    if (read.Data is not { ValueKind: JsonValueKind.Object } data) return text;
+    var head = text.Split('\n')[0];
+    int.TryParse(JsonPropertyText(data, "StartLine"), out var start);
+    int.TryParse(JsonPropertyText(data, "EndLine"), out var end);
+    var span = end >= start && start > 0 ? end - start + 1 : 0;
+    if (span <= AutoReadMaxLines) return text;
+    var body = text.Contains('\n') ? text[(text.IndexOf('\n') + 1)..] : string.Empty;
+    var first = body.Split('\n').FirstOrDefault(line => !string.IsNullOrWhiteSpace(line))?.Trim() ?? string.Empty;
+    return $"{head} {first}\nread to get {span} lines";
 }
 
 static string RelativeAgentPath(string path) => string.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path) ? path : Path.GetRelativePath(Environment.CurrentDirectory, path);
