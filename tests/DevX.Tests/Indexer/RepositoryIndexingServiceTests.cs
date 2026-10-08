@@ -26,6 +26,36 @@ public sealed class RepositoryIndexingServiceTests
         finally { Directory.Delete(root, recursive: true); }
     }
 
+    /// <summary>
+    /// The count a whole-repository run would rewrite. The CLI's `index` short-circuit asks this
+    /// question of the path the caller typed, so an unindexed path must answer 0 rather than the
+    /// count of some other repository.
+    /// </summary>
+    [Fact]
+    public async Task CountIndexedFilesAsync_AnswersForThePathItWasGiven()
+    {
+        var root = Directory.CreateTempSubdirectory("devx-index-count").FullName;
+        var other = Directory.CreateTempSubdirectory("devx-index-count-other").FullName;
+        await System.IO.File.WriteAllTextAsync(Path.Combine(root, "App.csproj"), "<Project />");
+        await System.IO.File.WriteAllTextAsync(Path.Combine(root, "Widget.cs"), "public class Widget { public int Frobnicate() => 1; }");
+        var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = Path.Combine(root, "index.db") }.ToString());
+
+        try
+        {
+            var service = new RepositoryIndexingService(store);
+            var result = await service.IndexAsync(root);
+
+            Assert.True(result.FilesIndexed > 0);
+            Assert.Equal(result.FilesIndexed, await service.CountIndexedFilesAsync(root));
+            Assert.Equal(0, await service.CountIndexedFilesAsync(other));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+            Directory.Delete(other, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task IndexAsync_IndexesTopLevelFunctionsAfterUsingsAndReturnStatement()
     {

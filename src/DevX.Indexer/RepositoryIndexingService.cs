@@ -555,6 +555,15 @@ public sealed class RepositoryIndexingService
         return new IndexRefreshResult("files", updated, skippedFiles.Count, normalized, full, skippedFiles);
     }
 
+    /// <summary>
+    /// How many files the index holds for the repository rooted at <paramref name="repositoryPath"/>,
+    /// 0 when that path has never been indexed. The repository id is derived exactly as
+    /// <see cref="IndexAsync(string, CancellationToken)"/> derives it, so the count is about the
+    /// index a whole-repository run would rewrite -- which is what lets a caller skip that run.
+    /// </summary>
+    public Task<int> CountIndexedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default)
+        => _repositoryStore.CountIndexedFilesAsync(new RepositoryId(StableId(Path.GetFullPath(repositoryPath))), cancellationToken);
+
     public async Task<IndexRefreshResult> ReindexChangedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default)
     {
         var changedFiles = await GetChangedFilesAsync(repositoryPath, cancellationToken);

@@ -76,7 +76,7 @@ static async Task<int> RunAsync(string[] args)
                 return 1;
             }
 
-            await IndexAsync(connectionString, args[1], GetAgentLabel(args));
+            await IndexAsync(connectionString, args[1], args, GetAgentLabel(args));
             return 0;
 
         case "search":
@@ -280,17 +280,60 @@ static async Task<int> InitAsync(string[] args, string format)
     }
 }
 
-static async Task IndexAsync(string connectionString, string repositoryPath, string? agentLabel)
+static async Task IndexAsync(string connectionString, string repositoryPath, string[] args, string? agentLabel)
 {
     var started = DateTimeOffset.UtcNow;
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
     var indexer = new RepositoryIndexingService(store);
+
+    // `devx index .` on an untouched checkout used to walk and re-parse every file: on Django
+    // that is 3,292 files and over 13 minutes of work to arrive at the index that was already
+    // on disk. And on a checkout with one edited file it did the same 13 minutes, because the
+    // CLI had no notion of a changed file at all. The MCP server got both answers; the CLI --
+    // the way the benchmark drives it -- did not, which is the call that looked like a hang.
+    if (!args.Contains("--force", StringComparer.Ordinal) && await CurrentIndexAsync(indexer, repositoryPath) is { } answer)
+    {
+        await store.AddOperationMetricAsync(new OperationMetric("index", started, DateTimeOffset.UtcNow - started, true, null, AgentLabel: agentLabel));
+        Console.WriteLine(answer);
+        return;
+    }
+
     var result = await indexer.IndexAsync(repositoryPath);
     await store.AddOperationMetricAsync(new OperationMetric("index", started, DateTimeOffset.UtcNow - started, true, null, AgentLabel: agentLabel));
     Console.WriteLine(result.Reason is null
         ? $"Indexed {result.FilesIndexed} files."
         : $"Indexed {result.FilesIndexed} files. Reason: {result.Reason}.");
+}
+
+/// <summary>
+/// What `devx index .` should say instead of doing the full run, or null when the full run is
+/// genuinely needed. Git being unavailable (a plain folder, no repository) means DevX cannot
+/// tell what changed, and the answer to "cannot tell" is to do the work.
+/// </summary>
+static async Task<string?> CurrentIndexAsync(RepositoryIndexingService indexer, string repositoryPath)
+{
+    IReadOnlyList<string> changed;
+    try
+    {
+        changed = await indexer.GetChangedFilesAsync(repositoryPath);
+    }
+    catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+    {
+        return null;
+    }
+
+    var indexed = await indexer.CountIndexedFilesAsync(repositoryPath);
+
+    // Nothing is indexed yet, so there is nothing to bring up to date file by file.
+    if (indexed == 0) return null;
+    if (changed.Count == 0) return $"already current ({indexed} files).";
+
+    // A repository that is already indexed and has a handful of edited files is the common
+    // case an agent is in, and re-parsing its whole tree for those files is the expensive
+    // mistake. Only the files git names are re-indexed.
+    var refreshed = await indexer.ReindexChangedFilesAsync(repositoryPath);
+    return $"Indexed {refreshed.UpdatedFiles} files (re-indexed the {changed.Count} files git reports as changed, out of {indexed}).";
 }
 
 static async Task<int> IndexUpdateAsync(string connectionString, string[] args, string format)
