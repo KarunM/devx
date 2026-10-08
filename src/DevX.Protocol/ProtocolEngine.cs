@@ -401,11 +401,13 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var resolution = ResolveValidationContext(root, request.Payload, ValidationMode.Build);
-        if (!resolution.Success || resolution.Context is null || resolution.SelectedTarget is null)
+        var configured = DevXCommandConfig.TryRead(root, "build") is not null;
+        if ((!resolution.Success || resolution.Context is null || resolution.SelectedTarget is null) && !configured)
         {
             return Fail("ValidationError", resolution.Errors.FirstOrDefault() ?? "Runtime target resolution failed.");
         }
 
+        var (buildContext, buildTarget) = ResolvedOrConfigured(root, resolution, "build");
         var execution = await _buildTestService.RunBuildAsync(root, resolution.TargetSelector, cancellationToken);
         await _sessionStore.AddExecutionAsync(new AddExecutionRequest(session.Id, execution), cancellationToken);
         foreach (var diagnostic in execution.Diagnostics)
@@ -413,7 +415,7 @@ public sealed class ProtocolEngine : IProtocolEngine
             await _sessionStore.AddDiagnosticAsync(new AddDiagnosticRequest(session.Id, diagnostic), cancellationToken);
         }
 
-        var response = new ValidationExecutionResponse("build", resolution.Context, resolution.SelectedTarget, execution);
+        var response = new ValidationExecutionResponse("build", buildContext, buildTarget, execution);
         return new ProtocolResponse(execution.Success, JsonSerializer.SerializeToElement(response), [], execution.Success ? [] : [new ProtocolError("ValidationError", CompactFailure("Build", execution, root))]);
     }
 
@@ -426,13 +428,18 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var resolution = ResolveValidationContext(root, request.Payload, ValidationMode.Test);
-        if (!resolution.Success || resolution.Context is null || resolution.SelectedTarget is null)
+        var configured = DevXCommandConfig.TryRead(root, "test") is not null;
+        if ((!resolution.Success || resolution.Context is null || resolution.SelectedTarget is null) && !configured)
         {
             return Fail("ValidationError", resolution.Errors.FirstOrDefault() ?? "Runtime target resolution failed.");
         }
 
         var targets = ReadStringArray(request.Payload, "targets");
-        if (targets.Count == 0 && !string.IsNullOrWhiteSpace(resolution.TargetSelector))
+        // A target the caller did not name is filled in from runtime discovery -- but only when
+        // the repository has not answered for itself. A configured test command takes `{target}`
+        // as the caller wrote it, and a bare `devx test` must leave it empty: substituting the
+        // discovered project path would run `runtests.py .` instead of `runtests.py`.
+        if (targets.Count == 0 && !configured && !string.IsNullOrWhiteSpace(resolution.TargetSelector))
         {
             targets = [resolution.TargetSelector];
         }
@@ -445,7 +452,8 @@ public sealed class ProtocolEngine : IProtocolEngine
             await _sessionStore.AddDiagnosticAsync(new AddDiagnosticRequest(session.Id, diagnostic), cancellationToken);
         }
 
-        var response = new ValidationExecutionResponse("test", resolution.Context, resolution.SelectedTarget, execution);
+        var (testContext, testTarget) = ResolvedOrConfigured(root, resolution, "test");
+        var response = new ValidationExecutionResponse("test", testContext, testTarget, execution);
         return new ProtocolResponse(execution.Success, JsonSerializer.SerializeToElement(response), [], execution.Success ? [] : [new ProtocolError("ValidationError", CompactFailure("Tests", execution, root))]);
     }
 
@@ -1038,6 +1046,31 @@ public sealed class ProtocolEngine : IProtocolEngine
         => payload.ValueKind == JsonValueKind.Object
             && payload.TryGetProperty(propertyName, out var element)
             && element.ValueKind == JsonValueKind.True;
+
+    /// <summary>
+    /// The real runtime context when discovery found one, and a stand-in for a repository that
+    /// declares its own command when it did not. Discovery can legitimately find nothing to run
+    /// -- a documentation tree, or tests driven by a script DevX cannot guess -- and the
+    /// repository's own answer in `.devx/config.json` is then the only answer there is.
+    /// Refusing before reading it is the old behaviour that sent an agent to Bash.
+    /// </summary>
+    private static (RuntimeContext Context, RuntimeTargetDescriptor Target) ResolvedOrConfigured(
+        string root, RuntimeContextResolution resolution, string capability)
+    {
+        if (resolution is { Success: true, Context: not null, SelectedTarget: not null })
+        {
+            return (resolution.Context, resolution.SelectedTarget);
+        }
+
+        return (
+            new RuntimeContext(root, root, DevXCommandConfig.RelativePath, "configured", "default"),
+            new RuntimeTargetDescriptor(
+                "configured",
+                $"{capability} command declared in {DevXCommandConfig.RelativePath}",
+                DevXCommandConfig.RelativePath,
+                "Healthy",
+                []));
+    }
 
     private RuntimeContextResolution ResolveValidationContext(string repositoryRoot, JsonElement payload, ValidationMode mode)
     {

@@ -67,11 +67,15 @@ public sealed class DotnetBuildTestService
             // A selector that names something on disk is a path; anything else is a runner
             // label -- `queries.tests.QueriesTests` for Django, a class name for pytest. A
             // label is only meaningful to the runner that understands it, so it is handed to
-            // the configured command or to runtests.py rather than to `dotnet test`.
+            // runtests.py rather than to `dotnet test`.
             var label = File.Exists(path) || Directory.Exists(path) ? null : selector;
-            if (selectors.Count == 1 && label is not null && DevXCommandConfig.TryRead(root, "test") is { } configured)
+            // The repository's own answer wins for EVERY target: a path, a label, or nothing.
+            // Consulting it only for a label meant the config the benchmark hands arm B was
+            // inert for `devx test tests/test_utils.py` -- the run fell through to discovery
+            // and the configured runner was never used, which is the defect 1.6.10 fixes.
+            if (DevXCommandConfig.TryRead(root, "test") is { } configured)
             {
-                executions.Add(await RunConfiguredAsync(root, configured, label, remaining, token, "test"));
+                executions.Add(await RunConfiguredAsync(root, configured, selector, remaining, token, "test"));
             }
             else if (selectors.Count == 1 && label is not null && DjangoTestScript(root) is { } runtests)
             {

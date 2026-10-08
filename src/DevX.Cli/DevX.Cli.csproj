@@ -8,7 +8,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>devx</ToolCommandName>
     <PackageId>DevX.Cli</PackageId>
-    <Version>1.6.9</Version>
+    <Version>1.6.10</Version>
   </PropertyGroup>
 
   <ItemGroup>

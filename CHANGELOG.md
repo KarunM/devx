@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.6.10
+
+- **A configured test or build command now applies to every call, whatever the target.** `.devx/config.json` was
+  consulted only when the caller named a runner *label*: a selector that named something on disk (`devx test
+  tests/test_utils.py`, `devx test tests/DevX.Tests/DevX.Tests.csproj`) was treated as a path and skipped the config
+  entirely, so the repository's own answer was ignored for most real calls. The config is now read first and wins for
+  bare, path and label targets alike, with `{target}` substituted from whatever the caller named (empty when bare).
+  Bare calls no longer have the discovered project path substituted into `{target}`, which on Django meant
+  `runtests.py .` -- not a label.
+- **A repository that declares a command can build and test even when discovery finds nothing.** `devx build` and
+  `devx test` used to fail with "No runtime target to run" before reading the config, which left a documentation tree
+  -- or any repository whose tests are driven by a script -- with no way to run through DevX at all.
+
 ## 1.6.9
 
 Two bugs found by using 1.6.8 rather than by reading it.
