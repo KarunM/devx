@@ -86,6 +86,36 @@ public sealed class McpToolContractTests
     }
 
 
+    [Fact]
+    public async Task EveryToolAnswersTheAgentInOneShape_OnSuccessAndOnError()
+    {
+        var (server, session, _) = await CreateServerAsync("devx-mcp-shape");
+        var id = session.Id.Value.ToString();
+
+        // Tools disagreed with each other: `search` answered a one-line success while the next
+        // tool returned a raw JSON envelope on failure -- and raw JSON is exactly what an
+        // agent asked to avoid when it did not pass format:json.
+        var success = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new { sessionId = id, kind = "symbol", query = "Run" }));
+        // A failing call from a tool that used to leak `{"error": "..."}` as its answer.
+        var failure = await server.CallToolAsync("read", JsonSerializer.SerializeToElement(new { sessionId = id, target = "NoSuch.Symbol" }));
+        var index = await server.CallToolAsync("index", JsonSerializer.SerializeToElement(new { sessionId = id }));
+
+        foreach (var result in new[] { success, failure, index })
+        {
+            Assert.Equal(JsonValueKind.Object, result.Content.ValueKind);
+            Assert.True(result.Content.TryGetProperty("text", out var text), result.Content.GetRawText());
+            Assert.Equal(JsonValueKind.String, text.ValueKind);
+        }
+
+        Assert.True(failure.IsError);
+        Assert.StartsWith("error: ", failure.Content.GetProperty("text").GetString());
+
+        // format:json is the one way to still get the envelope, and it is unchanged.
+        var json = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new { sessionId = id, kind = "symbol", query = "Run", format = "json" }));
+        Assert.Contains("symbols", json.Content.GetRawText(), StringComparison.OrdinalIgnoreCase);
+    }
+
+
     private static string TextOf(McpToolCallResult result)
         => result.Content.ValueKind == JsonValueKind.Object && result.Content.TryGetProperty("text", out var text)
             ? text.GetString() ?? string.Empty

@@ -72,7 +72,7 @@ public sealed class McpReferenceServer
                 ? new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = hint }, JsonOptions))
                 : new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { success = false, text = $"error: {hint}" }, JsonOptions));
         }
-        return toolName switch
+        var dispatched = toolName switch
         {
             "search" => await ExecuteSearchAsync(arguments, cancellationToken),
             "read" => await ExecuteReadAsync(arguments, cancellationToken),
@@ -98,6 +98,46 @@ public sealed class McpReferenceServer
             "report" => await GetReportAsync(RequiredSessionId(arguments), cancellationToken),
             _ => new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = $"Unknown MCP tool '{toolName}'." }, JsonOptions))
         };
+        return NormalizeToolResult(dispatched, arguments);
+    }
+
+    // One shape for every tool: the compact agent text, on success and on failure alike.
+    // Some tools already returned that and others returned a raw JSON envelope, so an agent
+    // met a one-line success from `search` and several thousand bytes of {"error":"..."}
+    // from the next tool -- and raw JSON is exactly what it asked to avoid by not passing
+    // format:json. Errors keep the `error: ` prefix the CLI uses.
+    private static McpToolCallResult NormalizeToolResult(McpToolCallResult result, JsonElement arguments)
+    {
+        if (AgentFormat(arguments) == "json") return result;
+        if (result.Content.ValueKind == JsonValueKind.Object
+            && result.Content.TryGetProperty("text", out var compact)
+            && compact.ValueKind == JsonValueKind.String)
+        {
+            return result;
+        }
+        return new McpToolCallResult(result.IsError, JsonSerializer.SerializeToElement(
+            new { success = !result.IsError, text = CompactToolText(result.Content) }, JsonOptions));
+    }
+
+    private static string CompactToolText(JsonElement content)
+    {
+        if (content.ValueKind != JsonValueKind.Object) return content.GetRawText();
+        if (content.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String)
+        {
+            return $"error: {error.GetString()}";
+        }
+        var lines = new List<string>();
+        foreach (var property in content.EnumerateObject())
+        {
+            // A nested value is summarised, not dumped: the report is the one tool whose
+            // payload is a metrics blob, and an agent that wants all of it says format:json.
+            var rendered = property.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array
+                ? property.Value.GetRawText()
+                : property.Value.ToString();
+            if (rendered.Length > 200) rendered = rendered[..200] + "...";
+            lines.Add($"{property.Name}: {rendered}");
+        }
+        return string.Join("\n", lines);
     }
 
     private async Task<McpToolCallResult> ExecuteProtocolAsync(string operation, string sessionId, JsonElement payload, CancellationToken cancellationToken, string format = "json")
