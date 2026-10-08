@@ -262,18 +262,27 @@ public sealed class DotnetBuildTestService
         {
             if (runtime == "test" && !HasTestSummary(combined))
             {
-                var message = FormatNoTestSummary(combined, process.ExitCode);
-                var log = string.IsNullOrEmpty(combined) ? string.Empty : SaveFullLog(root, combined);
-                var logText = string.IsNullOrEmpty(log) ? string.Empty : $" Log: {log}";
-                return new ExecutionRecord(arguments, true, log, [], $"PASS tests — {message}{logText}");
+                var log = SaveFullLog(root, combined);
+                return new ExecutionRecord(arguments, true, log, [], RunSummaryFormatter.FormatTests(combined, true, timer.Elapsed, log, root));
             }
-            return new ExecutionRecord(arguments, true, string.Empty, [], FormatRunnerSummary(combined, runtime, timer.Elapsed));
+            var successLogPath = SaveFullLog(root, combined);
+            var summary = runtime == "test"
+                ? RunSummaryFormatter.FormatTests(combined, true, timer.Elapsed, successLogPath, root)
+                : runtime == "check"
+                    ? FormatRunnerSummary(combined, runtime, timer.Elapsed) + $" log: {Path.GetRelativePath(root, successLogPath)}"
+                    : RunSummaryFormatter.FormatBuild(combined, true, timer.Elapsed, successLogPath, root);
+            return new ExecutionRecord(arguments, true, successLogPath, [], summary);
         }
         var logPath = SaveFullLog(root, combined);
         var all = ParseDiagnostics(combined, logPath, runtime == "test" && fileName == "dotnet" ? "dotnet-test" : runtime);
         var diagnostics = all.Take(10).ToList();
         if (all.Count > diagnostics.Count) diagnostics.Add(new DiagnosticRecord("error", "MORE", $"(+{all.Count - diagnostics.Count} more)", null, null, null, logPath));
-        return new ExecutionRecord(arguments, false, logPath, diagnostics);
+        var failureSummary = runtime == "test"
+            ? RunSummaryFormatter.FormatTests(combined, false, timer.Elapsed, logPath, root)
+            : runtime == "check"
+                ? string.Empty
+                : RunSummaryFormatter.FormatBuild(combined, false, timer.Elapsed, logPath, root);
+        return new ExecutionRecord(arguments, false, logPath, diagnostics, failureSummary);
     }
 
     private static ExecutionRecord TimeoutRecord(string selector, string root, TimeSpan timeout)
@@ -341,33 +350,9 @@ public sealed class DotnetBuildTestService
             || Regex.IsMatch(output, @"Passed!\s+-\s+Failed:\s*\d+,\s*Passed:\s*\d+", RegexOptions.IgnoreCase);
 
     public static string FormatRunnerSummary(string output, string? runtime, TimeSpan elapsed, int exitCode = 0)
-    {
-        if (runtime == "test" && !HasTestSummary(output))
-        {
-            return FormatNoTestSummary(output, exitCode);
-        }
-        if (runtime == "test")
-        {
-            var pytest = Regex.Match(output, @"(?<count>\d+)\s+passed\b.*?in\s+(?<time>[0-9.]+s)", RegexOptions.IgnoreCase);
-            if (pytest.Success)
-            {
-                return $"PASS {pytest.Groups["count"].Value} tests in {pytest.Groups["time"].Value}";
-            }
+        => RunSummaryFormatter.FormatRunnerSummary(output, runtime, elapsed, exitCode);
 
-            var dotnet = Regex.Match(output, @"Passed:\s*(?<count>\d+).*?Duration:\s*(?<time>[^\r\n]+)", RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            if (dotnet.Success) return $"PASS {dotnet.Groups["count"].Value} tests in {dotnet.Groups["time"].Value.Trim()}";
-            var modernDotnet = Regex.Match(output, @"Passed!\s+-\s+Failed:\s*\d+,\s*Passed:\s*(?<count>\d+)", RegexOptions.IgnoreCase);
-            return modernDotnet.Success ? $"PASS {modernDotnet.Groups["count"].Value} tests" : $"PASS tests in {elapsed.TotalSeconds:0.0}s";
-        }
-        if (runtime == "check")
-        {
-            var checks = Regex.Match(output, @"(?<passed>\d+)\s*/\s*(?<total>\d+)\s+checks?\s+passed", RegexOptions.IgnoreCase);
-            return checks.Success
-                ? $"PASS {checks.Groups["passed"].Value}/{checks.Groups["total"].Value} checks in {elapsed.TotalSeconds:0.0}s"
-                : $"PASS check script in {elapsed.TotalSeconds:0.0}s";
-        }
-        return $"PASS build in {elapsed.TotalSeconds:0.0}s";
-    }
+    public static int CountWarnings(string output) => RunSummaryFormatter.CountWarnings(output);
 
     private static string SaveFullLog(string root, string output)
     {

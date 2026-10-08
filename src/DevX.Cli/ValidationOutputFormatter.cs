@@ -20,6 +20,7 @@ public static class ValidationOutputFormatter
 
         if (payload?.Execution is { } execution)
         {
+            if (!string.IsNullOrWhiteSpace(execution.Summary)) return execution.Summary;
             var detail = execution.Diagnostics.FirstOrDefault();
             var headline = detail is null
                 ? $"FAIL {label}"

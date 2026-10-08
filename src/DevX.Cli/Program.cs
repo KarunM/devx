@@ -160,10 +160,10 @@ static async Task<int> McpServeAsync(string connectionString)
 {
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
-    var root = Path.GetFullPath(Environment.CurrentDirectory);
+    var root = FindRepositoryRoot(Environment.CurrentDirectory);
     var repository = new Repository(new RepositoryId(StableId(root)), Path.GetFileName(root), root);
     await store.UpsertRepositoryAsync(repository);
-    var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+    var session = await AutomaticSessionResolver.GetOrCreateAsync(store, root, repository);
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
     var indexer = new RepositoryIndexingService(store);
     var reference = new McpReferenceServer(
@@ -472,28 +472,21 @@ static async Task<string[]> AddAutomaticSessionAsync(string[] args)
     var connectionString = new SqliteConnectionStringBuilder { DataSource = ResolveDatabasePath() }.ToString();
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
-    var root = Path.GetFullPath(Environment.CurrentDirectory);
+    var root = FindRepositoryRoot(Environment.CurrentDirectory);
+    var repository = new Repository(new RepositoryId(StableId(root)), Path.GetFileName(root), root);
+    var session = await AutomaticSessionResolver.GetOrCreateAsync(store, root, repository);
+    return [.. args, "--session", session.Id.Value.ToString()];
+}
+
+static string FindRepositoryRoot(string path)
+{
+    var root = Path.GetFullPath(path);
     for (var directory = new DirectoryInfo(root); directory is not null; directory = directory.Parent)
     {
         if (Directory.Exists(Path.Combine(directory.FullName, ".devx")) || Directory.Exists(Path.Combine(directory.FullName, ".git")) || IOFile.Exists(Path.Combine(directory.FullName, ".git")))
-        {
-            root = directory.FullName;
-            break;
-        }
+            return directory.FullName;
     }
-    var repository = new Repository(new RepositoryId(StableId(root)), Path.GetFileName(root), root);
-    await store.UpsertRepositoryAsync(repository);
-    var sessionFile = Path.Combine(root, ".devx", "auto-session");
-    SessionState? session = null;
-    if (IOFile.Exists(sessionFile) && Guid.TryParse((await IOFile.ReadAllTextAsync(sessionFile)).Trim(), out var sessionGuid))
-        session = await store.GetSessionAsync(new GetSessionRequest(new SessionId(sessionGuid)));
-    if (session is null)
-    {
-        session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
-        Directory.CreateDirectory(Path.GetDirectoryName(sessionFile)!);
-        await IOFile.WriteAllTextAsync(sessionFile, session.Id.Value.ToString());
-    }
-    return [.. args, "--session", session.Id.Value.ToString()];
+    return root;
 }
 
 static async Task EnsureAutomaticIndexAsync()
@@ -709,7 +702,8 @@ static async Task<int> RunBuildAsync(string connectionString, string[] args, str
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
     await store.AddOperationMetricAsync(new OperationMetric("build", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, GetOption(args, "--target")), GetAgentLabel(args)));
-    WriteResponse(response, format);
+    if (format == "json") WriteResponse(response, format);
+    else Console.WriteLine(ValidationOutputFormatter.Format(response, "build"));
     return response.Success ? 0 : 1;
 }
 

@@ -80,8 +80,8 @@ public sealed class McpReferenceServer
             "callees" => await ExecuteQueryToolAsync(ProtocolOperations.GetCallees, arguments, cancellationToken, AgentFormat(arguments)),
             "references" => await ExecuteQueryToolAsync(ProtocolOperations.GetReferences, arguments, cancellationToken, AgentFormat(arguments)),
             "patch.preview" => await ExecuteProtocolAsync("PATCH_PREVIEW", RequiredSessionId(arguments), RequiredObject(arguments, "patch"), cancellationToken),
-            "build" => await ExecuteProtocolAsync(ProtocolOperations.RunBuild, RequiredSessionId(arguments), BuildRuntimePayload(arguments), cancellationToken),
-            "test" => await ExecuteProtocolAsync(ProtocolOperations.RunTests, RequiredSessionId(arguments), BuildTestPayload(arguments), cancellationToken),
+            "build" => await ExecuteProtocolAsync(ProtocolOperations.RunBuild, RequiredSessionId(arguments), BuildRuntimePayload(arguments), cancellationToken, AgentFormat(arguments)),
+            "test" => await ExecuteProtocolAsync(ProtocolOperations.RunTests, RequiredSessionId(arguments), BuildTestPayload(arguments), cancellationToken, AgentFormat(arguments)),
             "patch.validate" => await ExecuteProtocolAsync(
                 "PATCH_VALIDATE",
                 RequiredSessionId(arguments),
@@ -114,6 +114,13 @@ public sealed class McpReferenceServer
 
     private static string AgentText(ProtocolResponse response)
     {
+        if (response.Data is { ValueKind: JsonValueKind.Object } executionData)
+        {
+            var execution = TryGetPropertyIgnoreCase(executionData, "execution", out var executionElement)
+                ? executionElement.Deserialize<ExecutionRecord>(JsonOptions)
+                : null;
+            if (!string.IsNullOrWhiteSpace(execution?.Summary)) return execution.Summary;
+        }
         if (!response.Success) return string.Join("\n", response.Errors.Select(error => $"error: {error.Message}"));
         if (response.Data is not { } data) return string.Empty;
         if (TryGetPropertyIgnoreCase(data, "symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array && symbols.GetArrayLength() > 0)

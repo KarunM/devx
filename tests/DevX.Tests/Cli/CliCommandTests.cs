@@ -1,7 +1,13 @@
 using DevX.Cli;
+using DevX.Domain;
+using DevX.Indexer;
+using DevX.Infrastructure.Storage.SQLite;
+using DevX.Protocol;
+using Microsoft.Data.Sqlite;
 using System.Text;
 using System.Text.Json;
 using Xunit;
+using File = System.IO.File;
 
 namespace DevX.Tests.Cli;
 
@@ -197,6 +203,18 @@ public sealed class CliCommandTests
             Assert.Contains("(indexed", firstOutput);
             var sessionPath = Path.Combine(root, ".devx", "auto-session");
             var firstSession = await File.ReadAllTextAsync(sessionPath);
+            var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = Path.Combine(root, ".devx", "devx.db") }.ToString());
+            await store.InitializeAsync();
+            var repositoryHash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(root.ToLowerInvariant()));
+            var repository = new Repository(new RepositoryId(new Guid(repositoryHash.AsSpan(0, 16))), Path.GetFileName(root), root);
+            var mcpSession = await AutomaticSessionResolver.GetOrCreateAsync(store, root, repository);
+            var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+            var mcpOne = new McpReferenceServer(engine, store, store, mcpSession.Id.Value.ToString());
+            var mcpTwo = new McpReferenceServer(engine, store, store, mcpSession.Id.Value.ToString());
+            var mcpOneReport = await mcpOne.CallToolAsync("report", JsonSerializer.SerializeToElement(new { }));
+            var mcpTwoReport = await mcpTwo.CallToolAsync("report", JsonSerializer.SerializeToElement(new { }));
+            Assert.Contains(firstSession.Trim(), mcpOneReport.Content.GetRawText());
+            Assert.Contains(firstSession.Trim(), mcpTwoReport.Content.GetRawText());
             var (secondCode, _) = await InvokeCliAsync("search", "NormalizeName");
             Assert.Equal(0, secondCode);
             Assert.Equal(firstSession, await File.ReadAllTextAsync(sessionPath));

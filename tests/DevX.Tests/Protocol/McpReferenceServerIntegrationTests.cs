@@ -96,6 +96,23 @@ public sealed class McpReferenceServerIntegrationTests
     }
 
     [Fact]
+    public async Task CallToolAsync_BuildAndTest_UseCompactAgentTextAndKeepJsonPayload()
+    {
+        var (server, session, _) = await CreateServerAsync("devx-mcp-compact-output");
+        var buildArguments = JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString() });
+        var build = await server.CallToolAsync("build", buildArguments);
+        var buildJson = await server.CallToolAsync("build", JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString(), format = "json" }));
+        var test = await server.CallToolAsync("test", JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString() }));
+
+        Assert.False(build.IsError);
+        Assert.Contains("PASS build in", build.Content.GetProperty("text").GetString());
+        Assert.Contains("warnings) log:", build.Content.GetProperty("text").GetString());
+        Assert.True(buildJson.Content.TryGetProperty("data", out _));
+        Assert.Contains("PASS tests", test.Content.GetProperty("text").GetString());
+        Assert.Contains("log:", test.Content.GetProperty("text").GetString());
+    }
+
+    [Fact]
     public async Task CallToolAsync_TextSearchAndSymbolFallback_ReturnAgentMatchLines()
     {
         var (server, session, repositoryRoot) = await CreateServerAsync("devx-mcp-text-agent");
