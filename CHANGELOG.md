@@ -13,6 +13,17 @@
   `devx test` used to fail with "No runtime target to run" before reading the config, which left a documentation tree
   -- or any repository whose tests are driven by a script -- with no way to run through DevX at all.
 
+### Known issue, not fixed here
+
+- **A target-selected `devx build` on a Python repository compiles only the first 200 `.py` files in ordinal-sorted
+  path order, and reports PASS for the prefix.** `RunPythonBuildAsync` caps its `py_compile` sweep at 200 files, so on
+  a large checkout the tail of the tree is never checked and a syntax error past the cap is invisible. The whole-tree
+  `compileall` branch is only reached with a null selector, which no CLI caller supplies -- so a Python repository that
+  consumes Django or sympy is "built" by a prefix and always says OK. Measured on Django `1f0356f`: 200 files, all
+  under `django/`, PASS in 0.1 s. Declare an explicit `build.command` naming your package (for example
+  `python -m compileall -q django`) to get a real build. Left unfixed at the request of the benchmark work: the
+  behaviour is a cap, not a crash, and changing what `devx build` covers would move every pinned benchmark result.
+
 ## 1.6.9
 
 Two bugs found by using 1.6.8 rather than by reading it.
