@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.6.6
+
+Fewer calls per task: search answers with less padding, a one-hit search also returns the source, and the errors that used to dead-end an agent now name the fix.
+
+- Symbol and text searches in agent format are capped at 10 hits with a "... N more" line (explicit `--format json` is unchanged)
+- A symbol search with exactly one hit appends that hit's source (capped at 80 lines; a longer method returns its signature and span plus "read to get N lines"). Several equal hits are always listed, never silently resolved to one. CLI and MCP
+- A failed read returns the closest candidates as ready-to-use qualified names
+- `devx read section <file>` without a `#Heading` lists the file's headings as paste-ready commands
+- An unknown subcommand suggests the nearest one
+- `devx --help --agent` prints a 10-line cheat sheet (the full manual is unchanged without `--agent`), and documents bare `devx read A B` for reading several symbols in one call
+
 ## 1.6.5
 
 - `devx replace` one-shot edit (CLI) and `edit.replace` (MCP) with `--verify`: re-index, build and run relevant tests in one response
