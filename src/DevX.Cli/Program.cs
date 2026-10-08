@@ -665,7 +665,8 @@ static async Task<int> RunTestsAsync(string connectionString, string[] args, str
         runtime = GetOption(args, "--runtime"),
         target = GetOption(args, "--target"),
         targets = testFiles,
-        timeoutSeconds
+        timeoutSeconds,
+        filter = GetOption(args, "--filter")
     }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);

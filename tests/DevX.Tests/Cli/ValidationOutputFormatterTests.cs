@@ -42,6 +42,13 @@ public sealed class ValidationOutputFormatterTests
     }
 
     [Fact]
+    public void ParseDiagnostics_DotnetRunNeverUsesPytestLabelForPythonLookingOutput()
+    {
+        var diagnostic = Assert.Single(DotnetBuildTestService.ParseDiagnostics("tests/helper.py:12: failure", "/tmp/dotnet.log", "dotnet-test"));
+        Assert.Equal("DOTNET_TEST", diagnostic.Code);
+    }
+
+    [Fact]
     public void Format_PytestFailureKeepsPytestLabel()
     {
         var diagnostic = Assert.Single(DotnetBuildTestService.ParseDiagnostics("tests/test_sample.py:3: AssertionError", "/tmp/pytest.log"));

@@ -18,13 +18,14 @@ public sealed class DotnetBuildTestService
         string root,
         IReadOnlyList<string> selectors,
         TimeSpan timeout,
-        CancellationToken token = default)
+        CancellationToken token = default,
+        string? filter = null)
     {
         if (selectors.Count == 0)
         {
             return await RunWithTimeoutAsync(
                 IsDotnetProject(root, null) ? "dotnet" : PythonExecutable(root),
-                IsDotnetProject(root, null) ? GetTestArguments(root, null) : "-m pytest",
+                IsDotnetProject(root, null) ? AddTestFilter(GetTestArguments(root, null), filter) : "-m pytest",
                 root, timeout, token, "test");
         }
 
@@ -57,7 +58,15 @@ public sealed class DotnetBuildTestService
             else if (path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
             {
                 var command = BuildCSharpFileTestCommand(root, path);
-                executions.Add(await RunWithTimeoutAsync(command.FileName, command.Arguments, root, remaining, token, "test"));
+                executions.Add(await RunWithTimeoutAsync(command.FileName, AddTestFilter(command.Arguments, filter), root, remaining, token, "test"));
+            }
+            else if (Directory.Exists(path) && ContainsPytestTestFiles(path))
+            {
+                executions.Add(await RunWithTimeoutAsync(PythonExecutable(root), $"-m pytest \"{path}\"", root, remaining, token, "test"));
+            }
+            else if (Directory.Exists(path) && BuildCSharpDirectoryTestCommand(root, path) is { } directoryCommand)
+            {
+                executions.Add(await RunWithTimeoutAsync(directoryCommand.FileName, AddTestFilter(directoryCommand.Arguments, filter), root, remaining, token, "test"));
             }
             else if (Directory.Exists(path) && Directory.EnumerateFiles(path, "*.py", SearchOption.AllDirectories).Any())
             {
@@ -65,7 +74,7 @@ public sealed class DotnetBuildTestService
             }
             else
             {
-                executions.Add(await RunWithTimeoutAsync("dotnet", $"test \"{path}\"", root, remaining, token, "test"));
+                executions.Add(await RunWithTimeoutAsync("dotnet", AddTestFilter($"test \"{path}\"", filter), root, remaining, token, "test"));
             }
 
             if (!executions[^1].Success)
@@ -76,6 +85,8 @@ public sealed class DotnetBuildTestService
 
         return CombineExecutions(executions, selectors.Count, timer.Elapsed);
     }
+
+    public static string AddTestFilter(string arguments, string? filter) => string.IsNullOrWhiteSpace(filter) ? arguments : arguments + " --filter \"" + filter.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
 
     public static (string FileName, string Arguments) BuildCSharpFileTestCommand(string root, string path)
     {
@@ -90,6 +101,34 @@ public sealed class DotnetBuildTestService
         var filter = classes.Length == 0 ? string.Empty : " --filter \"" + string.Join("|", classes.Select(name => $"FullyQualifiedName~{name}")) + "\"";
         return ("dotnet", $"test \"{project}\"{filter}");
     }
+
+    public static (string FileName, string Arguments)? BuildCSharpDirectoryTestCommand(string root, string path)
+    {
+        var directory = Path.GetFullPath(NormalizeSelector(root, path));
+        if (!Directory.Exists(directory) || ContainsPytestTestFiles(directory)) return null;
+        string? project = null;
+        for (var current = new DirectoryInfo(directory); current is not null && project is null; current = current.Parent)
+            project = current.EnumerateFiles("*.csproj").OrderBy(item => item.FullName, StringComparer.Ordinal).FirstOrDefault()?.FullName;
+        if (project is null)
+            project = Directory.EnumerateFiles(directory, "*.csproj", SearchOption.AllDirectories).OrderBy(item => item.Length).ThenBy(item => item, StringComparer.Ordinal).FirstOrDefault();
+        if (project is null) return null;
+        var classes = Directory.EnumerateFiles(directory, "*.cs", SearchOption.AllDirectories)
+            .SelectMany(file =>
+            {
+                var source = File.ReadAllText(file);
+                var isTestFile = Regex.IsMatch(Path.GetFileName(file), @"(?:Tests?|Test)\.cs$", RegexOptions.IgnoreCase)
+                    || Regex.IsMatch(source, @"\[(?:Fact|Theory|Test|TestMethod)\b", RegexOptions.IgnoreCase);
+                return isTestFile ? Regex.Matches(source, @"\bclass\s+(\w+)").Select(match => match.Groups[1].Value) : Enumerable.Empty<string>();
+            })
+            .Distinct(StringComparer.Ordinal).ToArray();
+        var classFilter = classes.Length == 0 ? string.Empty : " --filter \"" + string.Join("|", classes.Select(name => $"FullyQualifiedName~{name}")) + "\"";
+        return ("dotnet", $"test \"{project}\"{classFilter}");
+    }
+
+    private static bool ContainsPytestTestFiles(string directory)
+        => Directory.EnumerateFiles(directory, "*.py", SearchOption.AllDirectories)
+            .Any(file => Path.GetFileName(file).StartsWith("test_", StringComparison.OrdinalIgnoreCase)
+                || Path.GetFileName(file).EndsWith("_test.py", StringComparison.OrdinalIgnoreCase));
 
     public static (string FileName, string Arguments) BuildPythonFileTestCommand(string root, string path)
     {
@@ -214,9 +253,24 @@ public sealed class DotnetBuildTestService
         var error = await errorTask;
         timer.Stop();
         var combined = string.Join(Environment.NewLine, new[] { output, error }.Where(value => !string.IsNullOrWhiteSpace(value)));
-        if (process.ExitCode == 0) return new ExecutionRecord(arguments, true, string.Empty, [], SuccessSummary(combined, runtime, timer.Elapsed));
+        if (runtime == "test" && fileName == "dotnet" && TryGetFilter(arguments, out var filter) && ReportsZeroDotnetTests(combined))
+        {
+            var log = SaveFullLog(root, combined);
+            return CreateFilteredNoTestsRecord(arguments, filter, log);
+        }
+        if (process.ExitCode == 0)
+        {
+            if (runtime == "test" && !HasTestSummary(combined))
+            {
+                var message = FormatNoTestSummary(combined, process.ExitCode);
+                var log = string.IsNullOrEmpty(combined) ? string.Empty : SaveFullLog(root, combined);
+                var logText = string.IsNullOrEmpty(log) ? string.Empty : $" Log: {log}";
+                return new ExecutionRecord(arguments, true, log, [], $"PASS tests — {message}{logText}");
+            }
+            return new ExecutionRecord(arguments, true, string.Empty, [], FormatRunnerSummary(combined, runtime, timer.Elapsed));
+        }
         var logPath = SaveFullLog(root, combined);
-        var all = ParseDiagnostics(combined, logPath);
+        var all = ParseDiagnostics(combined, logPath, runtime == "test" && fileName == "dotnet" ? "dotnet-test" : runtime);
         var diagnostics = all.Take(10).ToList();
         if (all.Count > diagnostics.Count) diagnostics.Add(new DiagnosticRecord("error", "MORE", $"(+{all.Count - diagnostics.Count} more)", null, null, null, logPath));
         return new ExecutionRecord(arguments, false, logPath, diagnostics);
@@ -256,8 +310,42 @@ public sealed class DotnetBuildTestService
         return new ExecutionRecord(string.Join("; ", executions.Select(execution => execution.Command)), true, string.Empty, [], summary);
     }
 
-    private static string SuccessSummary(string output, string? runtime, TimeSpan elapsed)
+    public static bool ReportsZeroDotnetTests(string output)
+        => Regex.IsMatch(output, @"No test matches the given testcase filter", RegexOptions.IgnoreCase)
+            || Regex.IsMatch(output, @"Total:\s*0\b", RegexOptions.IgnoreCase);
+
+    public static ExecutionRecord CreateFilteredNoTestsRecord(string command, string filter, string logPath)
     {
+        var message = $"no tests matched the filter '{filter}' (0 tests ran)";
+        return new ExecutionRecord(command, false, logPath,
+            [new DiagnosticRecord("error", "DOTNET_FILTER", message, null, null, null, logPath)],
+            $"FAIL tests — {message}");
+    }
+
+    public static string FormatNoTestSummary(string output, int exitCode)
+    {
+        var last = string.Join(" | ", output.Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0).TakeLast(5));
+        return $"no test summary was produced (exit code {exitCode}). Last output: {(last.Length == 0 ? "<none>" : last)}";
+    }
+
+    private static bool TryGetFilter(string arguments, out string filter)
+    {
+        var match = Regex.Match(arguments, @"(?:^|\s)--filter\s+""(?<filter>[^""]+)""");
+        filter = match.Groups["filter"].Value;
+        return match.Success && filter.Length > 0;
+    }
+
+    public static bool HasTestSummary(string output)
+        => Regex.IsMatch(output, @"\d+\s+passed\b.*?in\s+[0-9.]+s", RegexOptions.IgnoreCase)
+            || Regex.IsMatch(output, @"Passed:\s*\d+.*?Duration:", RegexOptions.IgnoreCase | RegexOptions.Singleline)
+            || Regex.IsMatch(output, @"Passed!\s+-\s+Failed:\s*\d+,\s*Passed:\s*\d+", RegexOptions.IgnoreCase);
+
+    public static string FormatRunnerSummary(string output, string? runtime, TimeSpan elapsed, int exitCode = 0)
+    {
+        if (runtime == "test" && !HasTestSummary(output))
+        {
+            return FormatNoTestSummary(output, exitCode);
+        }
         if (runtime == "test")
         {
             var pytest = Regex.Match(output, @"(?<count>\d+)\s+passed\b.*?in\s+(?<time>[0-9.]+s)", RegexOptions.IgnoreCase);
@@ -267,9 +355,9 @@ public sealed class DotnetBuildTestService
             }
 
             var dotnet = Regex.Match(output, @"Passed:\s*(?<count>\d+).*?Duration:\s*(?<time>[^\r\n]+)", RegexOptions.IgnoreCase | RegexOptions.Singleline);
-            return dotnet.Success
-                ? $"PASS {dotnet.Groups["count"].Value} tests in {dotnet.Groups["time"].Value.Trim()}"
-                : $"PASS tests in {elapsed.TotalSeconds:0.0}s";
+            if (dotnet.Success) return $"PASS {dotnet.Groups["count"].Value} tests in {dotnet.Groups["time"].Value.Trim()}";
+            var modernDotnet = Regex.Match(output, @"Passed!\s+-\s+Failed:\s*\d+,\s*Passed:\s*(?<count>\d+)", RegexOptions.IgnoreCase);
+            return modernDotnet.Success ? $"PASS {modernDotnet.Groups["count"].Value} tests" : $"PASS tests in {elapsed.TotalSeconds:0.0}s";
         }
         if (runtime == "check")
         {
@@ -290,14 +378,23 @@ public sealed class DotnetBuildTestService
         return path;
     }
 
-    public static IReadOnlyList<DiagnosticRecord> ParseDiagnostics(string raw, string logPath)
+    public static IReadOnlyList<DiagnosticRecord> ParseDiagnostics(string raw, string logPath, string? runtime = null)
     {
         var diagnostics = new List<DiagnosticRecord>();
         var dotnet = new Regex(@"^(?<file>.*)\((?<line>\d+),(?<column>\d+)\): (?<severity>warning|error) (?<code>[A-Z]+\d+): (?<message>.*)$", RegexOptions.Multiline);
         foreach (Match match in dotnet.Matches(raw)) diagnostics.Add(new DiagnosticRecord(match.Groups["severity"].Value, match.Groups["code"].Value, FirstLine(match.Groups["message"].Value), match.Groups["file"].Value, int.Parse(match.Groups["line"].Value), int.Parse(match.Groups["column"].Value), logPath));
         if (diagnostics.Count > 0) return diagnostics;
-        var pytest = new Regex(@"^(?<file>[^\s:][^:\r\n]*\.py):(?<line>\d+)(?::\d+)?(?:: (?<message>.*))?$", RegexOptions.Multiline);
-        foreach (Match match in pytest.Matches(raw)) diagnostics.Add(new DiagnosticRecord("error", "PYTEST", FirstLine(match.Groups["message"].Value), match.Groups["file"].Value, int.Parse(match.Groups["line"].Value), null, logPath));
+        if (runtime != "dotnet-test")
+        {
+            var pytest = new Regex(@"^(?<file>[^\s:][^:\r\n]*\.py):(?<line>\d+)(?::\d+)?(?:: (?<message>.*))?$", RegexOptions.Multiline);
+            foreach (Match match in pytest.Matches(raw)) diagnostics.Add(new DiagnosticRecord("error", "PYTEST", FirstLine(match.Groups["message"].Value), match.Groups["file"].Value, int.Parse(match.Groups["line"].Value), null, logPath));
+        }
+        if (diagnostics.Count == 0 && runtime == "dotnet-test")
+        {
+            var message = raw.Split('\n').Select(item => item.Trim()).FirstOrDefault(item => item.Length > 0) ?? ".NET test run failed.";
+            diagnostics.Add(new DiagnosticRecord("error", "DOTNET_TEST", FirstLine(message), null, null, null, logPath));
+            return diagnostics;
+        }
         if (diagnostics.Count == 0)
         {
             if (raw.Contains("Test Run Failed", StringComparison.OrdinalIgnoreCase)

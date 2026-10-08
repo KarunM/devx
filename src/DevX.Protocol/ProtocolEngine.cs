@@ -394,7 +394,8 @@ public sealed class ProtocolEngine : IProtocolEngine
             targets = [resolution.TargetSelector];
         }
         var timeoutSeconds = ReadPositiveInt(request.Payload, "timeoutSeconds") ?? 300;
-        var execution = await _buildTestService.RunTestsAsync(root, targets, TimeSpan.FromSeconds(timeoutSeconds), cancellationToken);
+        var testFilter = request.Payload.ValueKind == JsonValueKind.Object && request.Payload.TryGetProperty("filter", out var filterElement) && filterElement.ValueKind == JsonValueKind.String ? filterElement.GetString() : null;
+        var execution = await _buildTestService.RunTestsAsync(root, targets, TimeSpan.FromSeconds(timeoutSeconds), cancellationToken, testFilter);
         await _sessionStore.AddExecutionAsync(new AddExecutionRequest(session.Id, execution), cancellationToken);
         foreach (var diagnostic in execution.Diagnostics)
         {
