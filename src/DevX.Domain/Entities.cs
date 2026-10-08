@@ -84,7 +84,10 @@ public sealed record PatchOperation(
     string? MethodText,
     string? Position,
     string? Namespace,
-    string? BeforeState);
+    string? BeforeState,
+    string? OldText = null,
+    int? Occurrence = null,
+    bool ReplaceAll = false);
 public sealed record DiagnosticRecord(
     string Severity,
     string Code,

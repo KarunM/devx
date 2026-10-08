@@ -129,6 +129,18 @@ public sealed class PatchLifecycleService
                 errors.Add(new ProtocolDiagnostic("ValidationError", $"Target file '{operation.Path}' does not exist."));
             }
 
+            if (IsTextReplace(operation.Operation) && string.IsNullOrEmpty(operation.OldText))
+                errors.Add(new ProtocolDiagnostic("ValidationError", "ReplaceText requires oldText."));
+            if (IsTextReplace(operation.Operation) && operation.ReplacementText is null)
+                errors.Add(new ProtocolDiagnostic("ValidationError", "ReplaceText requires replacementText."));
+            if (IsTextReplace(operation.Operation) && IOFile.Exists(absolutePath) && !string.IsNullOrEmpty(operation.OldText))
+            {
+                var matches = CountOccurrences(IOFile.ReadAllText(absolutePath), operation.OldText);
+                if (matches == 0) errors.Add(new ProtocolDiagnostic("ValidationError", $"ReplaceText old text was not found in [{operation.Path}] (0 matches)."));
+                else if (!operation.ReplaceAll && operation.Occurrence is null && matches > 1) errors.Add(new ProtocolDiagnostic("ValidationError", $"ReplaceText is ambiguous in [{operation.Path}] ({matches} matches); specify occurrence or ReplaceAll."));
+                else if (operation.Occurrence is int occurrence && (occurrence < 1 || occurrence > matches)) errors.Add(new ProtocolDiagnostic("ValidationError", $"ReplaceText occurrence {occurrence} is out of range ({matches} matches)."));
+            }
+
             if (operation.Operation.Equals("ReplaceMethod", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(operation.ReplacementText))
             {
                 errors.Add(new ProtocolDiagnostic("ValidationError", "ReplaceMethod requires replacementText."));
@@ -193,7 +205,7 @@ public sealed class PatchLifecycleService
             return new PatchOperationRollbackContract(true, "Supported", null);
         }
 
-        if (operation.Operation.Equals("ReplaceMethod", StringComparison.OrdinalIgnoreCase)
+        if (IsTextReplace(operation.Operation) || operation.Operation.Equals("ReplaceMethod", StringComparison.OrdinalIgnoreCase)
             || operation.Operation.Equals("InsertMethod", StringComparison.OrdinalIgnoreCase)
             || operation.Operation.Equals("ReplaceLineRange", StringComparison.OrdinalIgnoreCase))
         {
@@ -226,12 +238,38 @@ public sealed class PatchLifecycleService
             "CreateFile" => ApplyCreateFile(targetPath, operation.Content),
             "DeleteFile" => ApplyDeleteFile(targetPath),
             "ReplaceMethod" => ApplyReplaceMethod(targetPath, operation.MethodName, operation.ReplacementText),
+            "ReplaceText" or "TextReplace" => ApplyTextReplace(targetPath, operation.OldText, operation.ReplacementText, operation.Occurrence, operation.ReplaceAll),
             "InsertMethod" => ApplyInsertMethod(targetPath, operation.ContainingType, operation.TypeId, operation.MethodText, operation.Position),
             "AddUsing" => ApplyAddUsing(targetPath, operation.Namespace),
             "InsertText" => ApplyInsertText(targetPath, operation.Content, operation.Position),
             "ReplaceLineRange" => ApplyReplaceLineRange(targetPath, operation.Content, operation.Position),
             _ => (false, "InvalidOperation", $"Unsupported patch operation '{operation.Operation}'.")
         };
+    }
+
+    private static bool IsTextReplace(string operation) => operation.Equals("ReplaceText", StringComparison.OrdinalIgnoreCase) || operation.Equals("TextReplace", StringComparison.OrdinalIgnoreCase);
+    private static int CountOccurrences(string text, string value)
+    {
+        var count = 0; var offset = 0;
+        while ((offset = text.IndexOf(value, offset, StringComparison.Ordinal)) >= 0) { count++; offset += value.Length; }
+        return count;
+    }
+    private static (bool Success, string Code, string Message) ApplyTextReplace(string targetPath, string? oldText, string? replacement, int? occurrence, bool replaceAll)
+    {
+        if (!IOFile.Exists(targetPath)) return (false, "NotFound", "Target file does not exist.");
+        if (string.IsNullOrEmpty(oldText) || replacement is null) return (false, "ValidationError", "ReplaceText requires oldText and replacementText.");
+        var text = IOFile.ReadAllText(targetPath); var count = CountOccurrences(text, oldText);
+        if (count == 0) return (false, "ValidationError", "ReplaceText old text was not found (0 matches).");
+        if (!replaceAll && occurrence is null && count > 1) return (false, "ValidationError", $"ReplaceText is ambiguous ({count} matches); specify occurrence or ReplaceAll.");
+        if (occurrence is int index)
+        {
+            if (index < 1 || index > count) return (false, "ValidationError", $"ReplaceText occurrence {index} is out of range ({count} matches).");
+            var start = -1; var from = 0;
+            for (var i = 0; i < index; i++) { start = text.IndexOf(oldText, from, StringComparison.Ordinal); from = start + oldText.Length; }
+            text = text[..start] + replacement + text[(start + oldText.Length)..];
+        }
+        else text = replaceAll ? text.Replace(oldText, replacement, StringComparison.Ordinal) : text.Replace(oldText, replacement, StringComparison.Ordinal);
+        IOFile.WriteAllText(targetPath, text); return (true, string.Empty, string.Empty);
     }
 
     private static (bool Success, string Code, string Message) ApplyCreateFile(string targetPath, string? content)
@@ -595,6 +633,7 @@ public sealed class PatchLifecycleService
         {
             "CreateFile" => $"--- /dev/null\n+++ {operation.Path}\n@@\n+{operation.Content}",
             "DeleteFile" => $"--- {operation.Path}\n+++ /dev/null\n@@",
+            "ReplaceText" or "TextReplace" => $"--- {operation.Path}\n+++ {operation.Path}\n@@\n-{operation.OldText}\n+{operation.ReplacementText}",
             "ReplaceMethod" => $"--- {operation.Path}\n+++ {operation.Path}\n@@\n-{operation.MethodName}\n+{operation.ReplacementText}",
             "InsertMethod" => $"--- {operation.Path}\n+++ {operation.Path}\n@@\n+{operation.MethodText}",
             "AddUsing" => $"--- {operation.Path}\n+++ {operation.Path}\n@@\n+using {operation.Namespace};",

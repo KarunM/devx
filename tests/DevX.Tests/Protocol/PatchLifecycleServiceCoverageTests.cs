@@ -61,6 +61,76 @@ public sealed class PatchLifecycleServiceCoverageTests
         finally { Directory.Delete(root, recursive: true); }
     }
 
+    [Fact]
+    public void ReplaceText_AppliesUniqueMatch()
+    {
+        WithText("before middle after", (root, original) =>
+        {
+            var patch = new PatchDocument("1.0", [TextReplace("middle", "changed", original)]);
+            var result = new PatchLifecycleService().Apply(root, patch);
+            Assert.Null(result.Error);
+            Assert.Equal("before changed after", System.IO.File.ReadAllText(Path.Combine(root, "Sample.txt")));
+        });
+    }
+
+    [Fact]
+    public void ReplaceText_RejectsAmbiguousAndMissingTextWithMatchCount()
+    {
+        WithText("same same", (root, original) =>
+        {
+            var service = new PatchLifecycleService();
+            var ambiguous = service.ValidateDocument(root, new PatchDocument("1.0", [TextReplace("same", "new", original)]));
+            Assert.Contains(ambiguous.Errors, error => error.Contains("2 matches", StringComparison.Ordinal));
+            var missing = service.ValidateDocument(root, new PatchDocument("1.0", [TextReplace("absent", "new", original)]));
+            Assert.Contains(missing.Errors, error => error.Contains("0 matches", StringComparison.Ordinal));
+        });
+    }
+
+    [Fact]
+    public void ReplaceText_SupportsOccurrenceAndReplaceAll()
+    {
+        WithText("x x x", (root, original) =>
+        {
+            var service = new PatchLifecycleService();
+            var occurrence = TextReplace("x", "y", original) with { Occurrence = 2 };
+            Assert.Null(service.Apply(root, new PatchDocument("1.0", [occurrence])).Error);
+            Assert.Equal("x y x", System.IO.File.ReadAllText(Path.Combine(root, "Sample.txt")));
+            System.IO.File.WriteAllText(Path.Combine(root, "Sample.txt"), original);
+            var all = TextReplace("x", "z", original) with { ReplaceAll = true };
+            Assert.Null(service.Apply(root, new PatchDocument("1.0", [all])).Error);
+            Assert.Equal("z z z", System.IO.File.ReadAllText(Path.Combine(root, "Sample.txt")));
+        });
+    }
+
+    [Fact]
+    public void ReplaceText_RollbackRestoresCapturedBeforeState()
+    {
+        WithText("old text", (root, original) =>
+        {
+            var service = new PatchLifecycleService();
+            var patch = new PatchDocument("1.0", [TextReplace("old", "new", original)]);
+            Assert.Null(service.Apply(root, patch).Error);
+            var (rollback, error) = service.Rollback(root, patch);
+            Assert.Null(error);
+            Assert.True(rollback!.Success);
+            Assert.Equal(original, System.IO.File.ReadAllText(Path.Combine(root, "Sample.txt")));
+        });
+    }
+
+    private static void WithText(string contents, Action<string, string> action)
+    {
+        var root = Directory.CreateTempSubdirectory("devx-text-replace").FullName;
+        try
+        {
+            System.IO.File.WriteAllText(Path.Combine(root, "Sample.txt"), contents);
+            action(root, contents);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    private static PatchOperation TextReplace(string oldText, string replacement, string beforeState) =>
+        new("ReplaceText", "Sample.txt", null, null, replacement, null, null, null, null, null, beforeState, oldText);
+
     private static PatchOperation Operation(string operation, string path, string? content = null) =>
         new(operation, path, content, null, null, null, null, null, null, null, null);
 }

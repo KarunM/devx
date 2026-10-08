@@ -53,7 +53,7 @@ public static class PatchCreateCommand
         var operationName = GetOption(args, "--op");
         if (string.IsNullOrWhiteSpace(operationName))
         {
-            Console.Error.WriteLine("Missing --op. Supported: CreateFile, DeleteFile, ReplaceMethod, InsertMethod, AddUsing, InsertText, ReplaceLineRange.");
+            Console.Error.WriteLine("Missing --op. Supported: CreateFile, DeleteFile, ReplaceMethod, ReplaceText (alias TextReplace), InsertMethod, AddUsing, InsertText, ReplaceLineRange.");
             return 1;
         }
 
@@ -88,7 +88,10 @@ public static class PatchCreateCommand
             MethodText: methodText,
             Position: GetOption(args, "--position"),
             Namespace: GetOption(args, "--namespace"),
-            BeforeState: beforeState);
+            BeforeState: beforeState,
+            OldText: GetOption(args, "--old-text") ?? GetOption(args, "--old"),
+            Occurrence: int.TryParse(GetOption(args, "--occurrence"), out var occurrence) ? occurrence : null,
+            ReplaceAll: HasFlag(args, "--all"));
 
         var operations = new List<PatchOperation>();
         var appending = HasFlag(args, "--append");
@@ -199,7 +202,9 @@ public static class PatchCreateCommand
 
     private static async Task<string?> TryReadBeforeStateAsync(string connectionString, Guid sessionGuid, string operationPath, string operationName)
     {
-        if (!operationName.Equals("ReplaceMethod", StringComparison.OrdinalIgnoreCase)
+        if (!operationName.Equals("ReplaceText", StringComparison.OrdinalIgnoreCase)
+            && !operationName.Equals("TextReplace", StringComparison.OrdinalIgnoreCase)
+            && !operationName.Equals("ReplaceMethod", StringComparison.OrdinalIgnoreCase)
             && !operationName.Equals("InsertMethod", StringComparison.OrdinalIgnoreCase)
             && !operationName.Equals("ReplaceLineRange", StringComparison.OrdinalIgnoreCase))
         {
