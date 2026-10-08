@@ -303,6 +303,10 @@ static void PrintAgentHelp()
     Console.WriteLine("  devx patch create|validate|apply  whole-function edits by name (--op; see --help)");
     Console.WriteLine("  devx test [<files>]               run tests; exit 0 = pass");
     Console.WriteLine("  devx capabilities                 what this build can do");
+    if (IsAskConfigured(Environment.CurrentDirectory))
+    {
+        Console.WriteLine("  devx ask \"<question>\"             ask the configured LLM about this repo");
+    }
 }
 
 static async Task<int> McpServeAsync(string connectionString)
@@ -1521,6 +1525,17 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
     var traceAsk = HasFlag(args, "--trace-ask") || HasFlag(args, "--debug-ask");
     var useContextWorkflow = HasFlag(args, "--context-workflow");
 
+    // Refuse before anything else -- before reading stdin, before touching the index, and
+    // well before any HTTP attempt. `devx ask` with no configured endpoint used to dial
+    // http://localhost:8080 and fail slowly with a bare connection error.
+    var llmConfig = LoadLlmConfig(FindRepositoryRoot(Environment.CurrentDirectory));
+    if (llmConfig is null)
+    {
+        Console.Error.WriteLine(
+            "devx ask is not configured (set llm.endpoint in .devx/config.json)");
+        return 1;
+    }
+
     var promptBuilder = new System.Text.StringBuilder();
     for (var i = 1; i < args.Length; i++)
     {
@@ -1561,7 +1576,7 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
         Console.WriteLine($"session_reused={(!bootstrap.SessionCreated).ToString().ToLowerInvariant()}");
         Console.WriteLine("phase=RepoMap");
 
-        using var contextLlm = LlmClientFactory.Create(LoadLlmConfig(Environment.CurrentDirectory) ?? new LlmConfig("mlx-lm", "mlx-community/Qwen3-8B-4bit", "http://localhost:8080", 0.7, 8192, 8192, 4000, 8));
+        using var contextLlm = LlmClientFactory.Create(llmConfig);
         var contextEngine = new ProtocolEngine(new SearchService(store, (ISymbolStore)store), (ISessionStore)store, store);
         var contextWorkflow = new AskContextWorkflow(contextLlm, contextEngine, traceAsk);
         var contextResult = await contextWorkflow.RunAsync(userPrompt, bootstrap.RepoMap, bootstrap.Session);
@@ -1589,7 +1604,7 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
             return 0;
         }
 
-        var editLlm = LlmClientFactory.Create(LoadLlmConfig(Environment.CurrentDirectory) ?? new LlmConfig("mlx-lm", "mlx-community/Qwen3-8B-4bit", "http://localhost:8080", 0.7, 8192, 8192, 4000, 8));
+        var editLlm = LlmClientFactory.Create(llmConfig);
         var editWorkflow = new AskEditWorkflow(editLlm, traceAsk);
         if (traceAsk)
         {
@@ -1611,7 +1626,9 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
 
     var root = await store.GetRepositoryRootPathAsync(session.RepositoryId);
     var repositoryRoot = root ?? Environment.CurrentDirectory;
-    var llmConfig = LoadLlmConfig(repositoryRoot) ?? new LlmConfig("mlx-lm", "mlx-community/Qwen3-8B-4bit", "http://localhost:8080", 0.7, 8192, 8192, 4000, 8);
+    // The session's own repository root wins if it has a config; otherwise keep the config
+    // the gate above already resolved. Never invent an endpoint (1.6.11).
+    llmConfig = LoadLlmConfig(repositoryRoot) ?? llmConfig;
     llmConfig = ApplyEnvOverrides(llmConfig);
 
     SandboxManager? sandbox = null;
@@ -1806,6 +1823,13 @@ static async Task<int> CapabilitiesAsync(string connectionString, string[] args,
     }
     return 0;
 }
+
+// `devx ask` needs an LLM endpoint the user actually configured. Nothing else in the CLI
+// does, so this is what decides whether `ask` is advertised -- and whether it is allowed to
+// try at all. Before 1.6.11 an unconfigured repo silently fell back to
+// http://localhost:8080 and the call failed minutes later with a connection error that told
+// the agent nothing; the endpoint is never guessed now.
+static bool IsAskConfigured(string path) => LoadLlmConfig(FindRepositoryRoot(path)) is not null;
 
 static LlmConfig? LoadLlmConfig(string repositoryRoot)
 {
@@ -2467,4 +2491,10 @@ Global options:
 Notes:
   build, test, and report require explicit --session selection.
 """);
+    // `ask` only exists for a repo that configured an endpoint, so it is advertised only
+    // there -- an unconfigured repo gets no pointer to a command that will refuse to run.
+    if (IsAskConfigured(Environment.CurrentDirectory))
+    {
+        Console.WriteLine("  devx ask \"<question>\"   ask the LLM configured in .devx/config.json");
+    }
 }
