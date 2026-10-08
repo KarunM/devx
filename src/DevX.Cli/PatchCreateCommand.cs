@@ -53,7 +53,20 @@ public static class PatchCreateCommand
         var operationName = GetOption(args, "--op");
         if (string.IsNullOrWhiteSpace(operationName))
         {
-            Console.Error.WriteLine("Missing --op. Supported: CreateFile, DeleteFile, ReplaceMethod, ReplaceText (alias TextReplace), InsertMethod, AddUsing, InsertText, ReplaceLineRange.");
+            Console.Error.WriteLine(
+                "Missing --op. Supported: " + string.Join(", ", PatchOperationCatalog.Names) + ".");
+            Console.Error.WriteLine(
+                "For a text edit use: devx replace <file> --old <text> --new <text>");
+            return 1;
+        }
+
+        // 1.6.10 regression: this used to write the artifact and let `patch validate` reject
+        // an invented op, so an agent spent a round trip learning the op did not exist. Fail
+        // here instead, name the op it typed, and point at `devx replace`, which is the tool
+        // it was reaching for.
+        if (!PatchOperationCatalog.IsKnown(operationName))
+        {
+            Console.Error.WriteLine(PatchOperationCatalog.UnknownOpMessage(operationName));
             return 1;
         }
 

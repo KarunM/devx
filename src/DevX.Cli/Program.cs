@@ -28,7 +28,11 @@ static async Task<int> RunAsync(string[] args)
         // with the global flags first (`devx --session x --agent codex --task v1 --help`)
         // fell through to the dispatcher and answered "Unknown command '--session'".
         // Help is now recognised wherever it sits among the leading options.
-        if (args.Contains("--agent", StringComparer.Ordinal)) PrintAgentHelp();
+        //
+        // `devx patch create --help` must reach the ops list, not the manual: an agent that
+        // never saw the op names invented them (see PatchOperationCatalog).
+        if (helpCommand is "patch create" or "patch") Console.WriteLine(PatchOperationCatalog.HelpText());
+        else if (args.Contains("--agent", StringComparer.Ordinal)) PrintAgentHelp();
         else PrintHelp();
         return 0;
     }
