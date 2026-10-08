@@ -83,9 +83,13 @@ public static class AgentRulesInitializer
         builder.AppendLine($"devx search text \"<text>\" --session \"$SESSION_ID\" --agent {agent}");
         builder.AppendLine($"devx read method \"<symbol>\" --session \"$SESSION_ID\" --agent {agent}");
         builder.AppendLine($"devx read section 'path/to/file.md#Heading' --session \"$SESSION_ID\" --agent {agent}");
+        builder.AppendLine($"devx replace <file> --old \"<text>\" --new \"<text>\" --session \"$SESSION_ID\" --agent {agent}");
+        builder.AppendLine($"devx patch create <out.json> --op ReplaceMethod --path <file> --session \"$SESSION_ID\" --agent {agent}");
         builder.AppendLine($"devx index update <changed-file> [<changed-file> ...] --session \"$SESSION_ID\" --agent {agent}");
         builder.AppendLine($"devx test [<test-file> ...] --session \"$SESSION_ID\" --timeout 300 --agent {agent}");
         builder.AppendLine("```");
+        builder.AppendLine();
+        builder.AppendLine("The four steps are: find it (`search`), read just it (`read`), change it (`replace` for a text edit, `patch` for a whole function -- `patch create --help` lists the ops), then `test`.");
         builder.AppendLine();
         builder.AppendLine("Use `search text` before grep for repository content. Prefer narrow symbol, method, section, and line-range reads over whole-file reads. Run `index update` after every write, including all changed files in one call. If an older brief says `devx`, run the equivalent `devx` command.");
         builder.Append(EndMarker);

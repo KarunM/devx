@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.6.11
+
+A release about being findable. In the arm-B benchmark transcripts the agent lost up to 8 of 11 failures to the same
+three things: it never saw `devx replace`, it invented patch op names and learned they were wrong a round trip later,
+and it spent a call on `devx ask`, which failed against an endpoint nobody had configured.
+
+- **`devx --help` prints the agent cheat sheet whatever global flags are present.** The help check only looked at
+  `args[0]`, so the invocation the workspace rules produce -- `devx --session <id> --agent codex --task <label> --help`
+  -- fell through to the dispatcher and answered `Unknown command '--session'`. `--help` is now recognised wherever it
+  sits among the leading options, while the first real argument still wins: `devx ask "explain --help"` is a question,
+  not a help request. The cheat sheet also names the edit tool it was missing -- `devx replace <file> --old <text>
+  --new <text>` -- next to `devx patch`; on 1.6.10 it named only `patch`, which is how the op names came to be guessed.
+- **`devx patch create` refuses an op it cannot apply, where the agent typed it.** An unknown op used to be written to
+  the artifact and rejected by `patch validate` one round trip later. It now fails immediately with
+  `unknown op 'replace_text'; for a text edit use: devx replace <file> --old <text> --new <text>`, the list of the eight
+  ops the build accepts, and a `Did you mean 'ReplaceText'?` line for a near miss. Nothing is written. `TextReplace`,
+  accepted since before 1.6.10, still works and is not advertised as its own op; no new aliases were added.
+  `devx patch create --help` lists every op with its flags, which closes the 1.6.8 known issue about the op list being
+  unobtainable without a failing call.
+- **`devx ask` refuses instead of dialling an endpoint nobody configured.** With no `.devx/config.json` it fell back to
+  `http://localhost:8080`: the agent paid for a call, waited on a connection and learned nothing. It now prints
+  `devx ask is not configured (set llm.endpoint in .devx/config.json)` and exits 1 before reading stdin, touching the
+  index or opening a socket -- measured at 0.05 s. The three hard-coded localhost fallbacks are gone, and `ask` is listed
+  in the help only where a config exists.
+- **`devx init --agents` teaches the edit step.** The generated rules described how to find and read code and never how
+  to change it, which is the guidance gap behind the invented op names. They now carry `devx replace`, `devx patch
+  create`, and the four steps spelled out: find it, read just it, change it, test it.
+
 ## 1.6.10
 
 - **A configured test or build command now applies to every call, whatever the target.** `.devx/config.json` was

@@ -25,6 +25,24 @@ public sealed class AgentRulesInitializerTests
     }
 
     [Fact]
+    public async Task InitializeAsync_TeachesTheEditStepAndNotJustReading()
+    {
+        // The v2 arm-B transcripts: the guidance told the agent how to find and read code
+        // and never how to change it, so `devx replace` was never used and patch op names
+        // were invented. The four steps must be in the product's own onboarding text.
+        var root = Directory.CreateTempSubdirectory("devx-init-").FullName;
+
+        await AgentRulesInitializer.InitializeAsync(root, ["codex"], global: false);
+        var content = await File.ReadAllTextAsync(Path.Combine(root, "AGENTS.md"));
+
+        Assert.Contains("devx replace <file> --old", content);
+        Assert.Contains("--new", content);
+        Assert.Contains("devx patch create", content);
+        Assert.Contains("The four steps are", content);
+        Assert.Contains("`test`", content);
+    }
+
+    [Fact]
     public async Task InitializeAsync_ReplacesOnlyTheMarkedBlockOnRerun()
     {
         var root = Directory.CreateTempSubdirectory("devx-init-").FullName;
