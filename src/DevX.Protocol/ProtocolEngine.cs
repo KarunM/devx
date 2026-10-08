@@ -151,6 +151,19 @@ public sealed class ProtocolEngine : IProtocolEngine
             return Fail("NotFound", $"File '{fileIdOrPath}' was not found.");
         }
 
+        var agentFormat = request.Payload.ValueKind == JsonValueKind.Object
+            && request.Payload.TryGetProperty("format", out var outputFormat)
+            && outputFormat.ValueKind == JsonValueKind.String
+            && outputFormat.GetString() == "agent";
+        if (!agentFormat)
+        {
+            snapshot = snapshot with
+            {
+                Types = snapshot.Types.Select(type => type with { StartLine = null, EndLine = null }).ToArray(),
+                Methods = snapshot.Methods.Select(method => method with { Signature = null, StartLine = null, EndLine = null }).ToArray()
+            };
+        }
+
         await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, fileIdOrPath), cancellationToken);
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new FileSnapshotResponse(snapshot)), [], []);
     }

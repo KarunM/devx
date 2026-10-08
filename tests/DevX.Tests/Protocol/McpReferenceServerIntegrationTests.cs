@@ -80,6 +80,93 @@ public sealed class McpReferenceServerIntegrationTests
     }
 
     [Fact]
+    public async Task CallToolAsync_DefaultAgentFormat_AndJsonRoundTrip()
+    {
+        var (server, session, _) = await CreateServerAsync("devx-mcp-agent-format");
+        var args = new { sessionId = session.Id.Value.ToString(), kind = "symbol", query = "Run" };
+
+        var agent = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(args));
+        var json = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new { args.sessionId, args.kind, args.query, format = "json" }));
+
+        Assert.False(agent.IsError);
+        Assert.Contains("method Sample.Program.Run", agent.Content.GetProperty("text").GetString());
+        Assert.True(agent.Content.GetProperty("success").GetBoolean());
+        Assert.True(json.Content.GetProperty("success").GetBoolean());
+        Assert.True(json.Content.TryGetProperty("data", out _));
+    }
+
+    [Fact]
+    public async Task CallToolAsync_TextSearchAndSymbolFallback_ReturnAgentMatchLines()
+    {
+        var (server, session, repositoryRoot) = await CreateServerAsync("devx-mcp-text-agent");
+        await IOFile.WriteAllTextAsync(Path.Combine(repositoryRoot, "notes.md"), "UniquePreview phrase for text search.");
+        var indexed = await server.CallToolAsync("index", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            files = new[] { "notes.md" }
+        }));
+        Assert.False(indexed.IsError);
+
+        var textSearch = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            kind = "text",
+            query = "UniquePreview"
+        }));
+        var fallback = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            query = "UniquePreview"
+        }));
+
+        Assert.Equal("notes.md:1: UniquePreview phrase for text search.", textSearch.Content.GetProperty("text").GetString());
+        Assert.Equal("notes.md:1: UniquePreview phrase for text search.", fallback.Content.GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task StdioServer_SearchDefaultsToPlainAgentLines_AndJsonIsUnchanged()
+    {
+        var (server, session, _) = await CreateServerAsync("devx-mcp-stdio-agent");
+        var id = session.Id.Value.ToString();
+        var requests = string.Join("\n", [
+            $"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"search\",\"arguments\":{{\"sessionId\":\"{id}\",\"kind\":\"symbol\",\"query\":\"Run\"}}}}}}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"search\",\"arguments\":{{\"sessionId\":\"{id}\",\"kind\":\"symbol\",\"query\":\"Run\",\"format\":\"json\"}}}}}}"
+        ]) + "\n";
+        var output = new StringWriter();
+
+        await new McpStdioServer(server).RunAsync(new StringReader(requests), output);
+
+        var responses = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => JsonDocument.Parse(line)).ToArray();
+        var agentText = responses[0].RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!;
+        var jsonText = responses[1].RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!;
+        Assert.Contains("method Sample.Program.Run", agentText);
+        Assert.DoesNotContain("{\"success\"", agentText);
+        Assert.Contains("\"success\":true", jsonText);
+        Assert.Contains("\"data\"", jsonText);
+        Assert.Equal(responses[0].RootElement.GetProperty("result").GetProperty("isError").GetBoolean(), responses[1].RootElement.GetProperty("result").GetProperty("isError").GetBoolean());
+    }
+
+    [Fact]
+    public async Task ToolsList_DescriptionsShareOrderedAgentGuidance()
+    {
+        var (server, _, _) = await CreateServerAsync("devx-mcp-guidance");
+        var tools = await server.ListToolsAsync();
+        var guidance = BuildAgentGuidance(tools);
+
+        Assert.True(guidance.Split('\n').Length <= 5);
+        var searchIndex = guidance.IndexOf("search", StringComparison.Ordinal);
+        var readIndex = guidance.IndexOf("read", searchIndex + 1, StringComparison.Ordinal);
+        var replaceIndex = guidance.IndexOf("edit.replace", readIndex + 1, StringComparison.Ordinal);
+        var testIndex = guidance.IndexOf("test", replaceIndex + 1, StringComparison.Ordinal);
+        Assert.True(searchIndex >= 0 && readIndex > searchIndex && replaceIndex > readIndex && testIndex > replaceIndex, guidance);
+        Assert.All(tools, tool => Assert.True(tool.InputSchema.GetProperty("properties").TryGetProperty("format", out _)));
+    }
+
+    private static string BuildAgentGuidance(IReadOnlyList<McpToolDescriptor> tools)
+        => string.Join("\n", new[] { "search", "read", "edit.replace", "test" }
+            .Select(name => tools.Single(tool => tool.Name == name).Description));
+
+    [Fact]
     public async Task McpTools_DefaultSearchKindAndReadKindAndAcceptMultipleTargetsWithoutSessionId()
     {
         var (server, _, _) = await CreateServerAsync("devx-mcp-short-forms");

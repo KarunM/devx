@@ -63,17 +63,22 @@ public sealed class McpReferenceServer
             arguments = JsonSerializer.SerializeToElement(withSession, JsonOptions);
         }
         if (RequiresIndex(toolName) && await IsRepositoryUnindexedAsync(arguments, cancellationToken))
-            return new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = "repository not indexed: call the `index` tool first (omit `files` to index the whole repository)" }, JsonOptions));
+        {
+            const string hint = "repository not indexed: call the `index` tool first (omit `files` to index the whole repository)";
+            return AgentFormat(arguments) == "json"
+                ? new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = hint }, JsonOptions))
+                : new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { success = false, text = $"error: {hint}" }, JsonOptions));
+        }
         return toolName switch
         {
             "search" => await ExecuteSearchAsync(arguments, cancellationToken),
             "read" => await ExecuteReadAsync(arguments, cancellationToken),
-            "snapshot" => await ExecuteQueryToolAsync(ProtocolOperations.GetFileSnapshot, arguments, cancellationToken),
+            "snapshot" => await ExecuteQueryToolAsync(ProtocolOperations.GetFileSnapshot, arguments, cancellationToken, AgentFormat(arguments)),
             "index" => await IndexFilesAsync(arguments, cancellationToken),
             "edit.replace" => await ReplaceTextAsync(arguments, cancellationToken),
-            "callers" => await ExecuteQueryToolAsync(ProtocolOperations.GetCallers, arguments, cancellationToken),
-            "callees" => await ExecuteQueryToolAsync(ProtocolOperations.GetCallees, arguments, cancellationToken),
-            "references" => await ExecuteQueryToolAsync(ProtocolOperations.GetReferences, arguments, cancellationToken),
+            "callers" => await ExecuteQueryToolAsync(ProtocolOperations.GetCallers, arguments, cancellationToken, AgentFormat(arguments)),
+            "callees" => await ExecuteQueryToolAsync(ProtocolOperations.GetCallees, arguments, cancellationToken, AgentFormat(arguments)),
+            "references" => await ExecuteQueryToolAsync(ProtocolOperations.GetReferences, arguments, cancellationToken, AgentFormat(arguments)),
             "patch.preview" => await ExecuteProtocolAsync("PATCH_PREVIEW", RequiredSessionId(arguments), RequiredObject(arguments, "patch"), cancellationToken),
             "build" => await ExecuteProtocolAsync(ProtocolOperations.RunBuild, RequiredSessionId(arguments), BuildRuntimePayload(arguments), cancellationToken),
             "test" => await ExecuteProtocolAsync(ProtocolOperations.RunTests, RequiredSessionId(arguments), BuildTestPayload(arguments), cancellationToken),
@@ -92,10 +97,65 @@ public sealed class McpReferenceServer
         };
     }
 
-    private async Task<McpToolCallResult> ExecuteProtocolAsync(string operation, string sessionId, JsonElement payload, CancellationToken cancellationToken)
+    private async Task<McpToolCallResult> ExecuteProtocolAsync(string operation, string sessionId, JsonElement payload, CancellationToken cancellationToken, string format = "json")
     {
         var response = await _protocolEngine.ExecuteAsync(new ProtocolRequest("1.0", operation, sessionId, payload), cancellationToken);
-        return new McpToolCallResult(!response.Success, JsonSerializer.SerializeToElement(response, JsonOptions));
+        return FormatResult(response, format);
+    }
+
+    private static string AgentFormat(JsonElement arguments)
+        => TryGetString(arguments, "format", out var format) && format.Equals("json", StringComparison.OrdinalIgnoreCase) ? "json" : "agent";
+
+    private static McpToolCallResult FormatResult(ProtocolResponse response, string format)
+    {
+        if (format == "json") return new McpToolCallResult(!response.Success, JsonSerializer.SerializeToElement(response, JsonOptions));
+        return new McpToolCallResult(!response.Success, JsonSerializer.SerializeToElement(new { success = response.Success, text = AgentText(response) }, JsonOptions));
+    }
+
+    private static string AgentText(ProtocolResponse response)
+    {
+        if (!response.Success) return string.Join("\n", response.Errors.Select(error => $"error: {error.Message}"));
+        if (response.Data is not { } data) return string.Empty;
+        if (TryGetPropertyIgnoreCase(data, "symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array && symbols.GetArrayLength() > 0)
+            return string.Join("\n", symbols.EnumerateArray().Select(item => $"{Text(item, "kind").ToLowerInvariant()} {Text(item, "qualifiedName")} {RelativePath(Text(item, "filePath"))}:{Text(item, "startLine")}-{Text(item, "endLine")}"));
+        if (TryGetPropertyIgnoreCase(data, "contentMatches", out var matches) && matches.ValueKind == JsonValueKind.Array)
+            return string.Join("\n", matches.EnumerateArray().Select(item => { var preview = Text(item, "preview").Trim(); return $"{RelativePath(Text(item, "path"))}:{Text(item, "line")}: {preview[..Math.Min(160, preview.Length)]}"; }));
+        foreach (var collection in new[] { "callers", "callees", "references" })
+        {
+            if (!TryGetPropertyIgnoreCase(data, collection, out var items)) continue;
+            if (items.ValueKind == JsonValueKind.Object && TryGetPropertyIgnoreCase(items, collection, out var nested)) items = nested;
+            if (items.ValueKind == JsonValueKind.Array)
+                return string.Join("\n", items.EnumerateArray().Select(item => $"{RelativePath(Text(item, "filePath"))}:{Text(item, collection == "references" ? "lineNumber" : "callSiteLine")}: {Text(item, "qualifiedName")}"));
+        }
+        if (TryGetPropertyIgnoreCase(data, "snapshot", out var snapshot))
+        {
+            var lines = new List<string> { $"{RelativePath(Text(snapshot, "path"))} ({Text(snapshot, "language")}, {Text(snapshot, "approximateLoc")} lines)" };
+            if (TryGetPropertyIgnoreCase(snapshot, "types", out var types) && types.ValueKind == JsonValueKind.Array)
+                lines.AddRange(types.EnumerateArray().Where(type => Text(type, "startLine").Length > 0 && Text(type, "endLine").Length > 0).Select(type => $"type {Text(type, "name")} :{Text(type, "startLine")}-{Text(type, "endLine")}"));
+            if (TryGetPropertyIgnoreCase(snapshot, "methods", out var methods) && methods.ValueKind == JsonValueKind.Array)
+                lines.AddRange(methods.EnumerateArray().Where(method => Text(method, "startLine").Length > 0 && Text(method, "endLine").Length > 0).Select(method => $"  method {Text(method, "name")}({SignatureParameters(Text(method, "signature"))}) :{Text(method, "startLine")}-{Text(method, "endLine")}"));
+            return string.Join("\n", lines);
+        }
+        if (TryGetPropertyIgnoreCase(data, "path", out var path) && TryGetPropertyIgnoreCase(data, "source", out var source))
+        {
+            var name = Text(data, "qualifiedName");
+            var kind = Text(data, "kind");
+            return $"{RelativePath(path.GetString() ?? "")}:{Text(data, "startLine")}-{Text(data, "endLine")}{(name.Length == 0 ? "" : $" {name}")}{(kind.Length == 0 ? "" : $" [{kind}]")}\n{source.GetString()}";
+        }
+        return data.GetRawText();
+    }
+
+    private static string Text(JsonElement element, string name)
+        => TryGetPropertyIgnoreCase(element, name, out var value) && value.ValueKind != JsonValueKind.Null ? value.ToString() : string.Empty;
+
+    private static string RelativePath(string path)
+        => string.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path) ? path : Path.GetRelativePath(Environment.CurrentDirectory, path);
+
+    private static string SignatureParameters(string signature)
+    {
+        var start = signature.IndexOf('(');
+        var end = signature.IndexOf(')', start + 1);
+        return start >= 0 && end > start ? signature[(start + 1)..end] : signature;
     }
 
     private async Task<McpToolCallResult> GetReportAsync(string sessionId, CancellationToken cancellationToken)
@@ -253,8 +313,12 @@ public sealed class McpReferenceServer
             _ => throw new InvalidOperationException("Unsupported read kind.")
         };
 
-    private Task<McpToolCallResult> ExecuteQueryToolAsync(string operation, JsonElement arguments, CancellationToken cancellationToken)
-        => ExecuteProtocolAsync(operation, RequiredSessionId(arguments), JsonSerializer.SerializeToElement(new { query = RequiredAliasString(arguments, "target", "query") }), cancellationToken);
+    private Task<McpToolCallResult> ExecuteQueryToolAsync(string operation, JsonElement arguments, CancellationToken cancellationToken, string format = "json")
+    {
+        var payload = new Dictionary<string, string> { ["query"] = RequiredAliasString(arguments, "target", "query") };
+        if (operation == ProtocolOperations.GetFileSnapshot && format == "agent") payload["format"] = "agent";
+        return ExecuteProtocolAsync(operation, RequiredSessionId(arguments), JsonSerializer.SerializeToElement(payload, JsonOptions), cancellationToken, format);
+    }
 
     private async Task<McpToolCallResult> IndexFilesAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
@@ -335,7 +399,7 @@ public sealed class McpReferenceServer
         var response = await _protocolEngine.ExecuteAsync(new ProtocolRequest("1.0", operation, sessionId, JsonSerializer.SerializeToElement(new { query })), cancellationToken);
         if (implicitKind && operation == ProtocolOperations.SearchSymbol && response.Success && response.Data is { ValueKind: JsonValueKind.Object } data && TryGetPropertyIgnoreCase(data, "symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array && symbols.GetArrayLength() == 0)
             response = await _protocolEngine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.SearchText, sessionId, JsonSerializer.SerializeToElement(new { query })), cancellationToken);
-        return new McpToolCallResult(!response.Success, JsonSerializer.SerializeToElement(response, JsonOptions));
+        return FormatResult(response, AgentFormat(arguments));
     }
 
     private async Task<McpToolCallResult> ExecuteReadAsync(JsonElement arguments, CancellationToken cancellationToken)
@@ -348,7 +412,8 @@ public sealed class McpReferenceServer
                 GetReadOperation(arguments),
                 RequiredSessionId(arguments),
                 BuildReadPayload(arguments),
-                cancellationToken);
+                cancellationToken,
+                AgentFormat(arguments));
         }
 
         string[] targets = arguments.TryGetProperty("targets", out var array) && array.ValueKind == JsonValueKind.Array
@@ -364,7 +429,7 @@ public sealed class McpReferenceServer
             var operation = GetReadOperation(item);
             var response = await _protocolEngine.ExecuteAsync(new ProtocolRequest("1.0", operation, RequiredSessionId(item), BuildReadPayload(item)), cancellationToken);
             if (targets.Length > 1) outputs.Add($"=== {target} ===");
-            outputs.Add(JsonSerializer.Serialize(response, JsonOptions));
+            outputs.Add(AgentFormat(arguments) == "json" ? JsonSerializer.Serialize(response, JsonOptions) : AgentText(response));
         }
         return new McpToolCallResult(false, JsonSerializer.SerializeToElement(new { text = string.Join("\n", outputs) }, JsonOptions));
     }
@@ -449,8 +514,8 @@ public sealed class McpReferenceServer
     {
         return
         [
-            CreateTool("edit.replace", "Replace text", "Replace an exact text fragment in one file.", "edit.replace", new { type = "object", properties = new { file = new { type = "string" }, old = new { type = "string" }, @new = new { type = "string" }, all = new { type = "boolean" }, occurrence = new { type = "integer" }, sessionId = new { type = "string" } }, required = new[] { "file", "old", "new" } }),
-            CreateTool("search", "Search", "Search indexed symbols or text through the runtime capability layer.", "search", new
+            CreateTool("edit.replace", "Replace text", "Step 3: Use edit.replace for a simple text edit after search and read. Add all or occurrence to select matches.", "edit.replace", new { type = "object", properties = new { file = new { type = "string" }, old = new { type = "string" }, @new = new { type = "string" }, all = new { type = "boolean" }, occurrence = new { type = "integer" }, sessionId = new { type = "string" } }, required = new[] { "file", "old", "new" } }),
+            CreateTool("search", "Search", "Step 1: Use search to find symbols or text in the indexed repository; it falls back to text when no symbol matches.", "search", new
             {
                 type = "object",
                 properties = new
@@ -461,7 +526,7 @@ public sealed class McpReferenceServer
                 },
                 required = new[] { "query" }
             }),
-            CreateTool("read", "Read", "Read file, method, or type content through the runtime capability layer.", "read", new
+            CreateTool("read", "Read", "Step 2: Use read to inspect a symbol, file, or section before editing.", "read", new
             {
                 type = "object",
                 properties = new
@@ -475,7 +540,7 @@ public sealed class McpReferenceServer
                 },
                 required = Array.Empty<string>()
             }),
-            CreateTool("patch.validate", "Patch Validate", "Validate a structured patch through the runtime capability layer.", "patch.validate", new
+            CreateTool("patch.validate", "Patch Validate", "For structured or multi-file edits only. Simple text edits should use edit.replace.", "patch.validate", new
             {
                 type = "object",
                 properties = new
@@ -485,7 +550,7 @@ public sealed class McpReferenceServer
                 },
                 required = new[] { "patch" }
             }),
-            CreateTool("patch.apply", "Patch Apply", "Apply a structured patch through the runtime capability layer.", "patch.apply", new
+            CreateTool("patch.apply", "Patch Apply", "For structured or multi-file edits only. Simple text edits should use edit.replace.", "patch.apply", new
             {
                 type = "object",
                 properties = new
@@ -495,14 +560,14 @@ public sealed class McpReferenceServer
                 },
                 required = new[] { "patch" }
             }),
-            CreateTool("patch.preview", "Patch Preview", "Preview a structured patch.", "patch.validate", new { type = "object", properties = new { sessionId = new { type = "string" }, patch = new { type = "object" } }, required = new[] { "patch" } }),
+            CreateTool("patch.preview", "Patch Preview", "For structured or multi-file edits only. Simple text edits should use edit.replace.", "patch.validate", new { type = "object", properties = new { sessionId = new { type = "string" }, patch = new { type = "object" } }, required = new[] { "patch" } }),
             CreateQueryTool("snapshot", "Snapshot", "Get a source file snapshot.", "sessionId", "target"),
             CreateTool("index", "Index files", "Index given paths or the whole repository when files is omitted.", "index", new { type = "object", properties = new { files = new { type = "array", items = new { type = "string" } }, sessionId = new { type = "string" } }, required = Array.Empty<string>() }),
             CreateQueryTool("callers", "Callers", "Find callers of a symbol.", "sessionId", "target"),
             CreateQueryTool("callees", "Callees", "Find callees of a symbol.", "sessionId", "target"),
             CreateQueryTool("references", "References", "Find references to a symbol.", "sessionId", "target"),
             CreateTool("build", "Build", "Run a configured build target.", "build", new { type = "object", properties = new { sessionId = new { type = "string" }, runtime = new { type = "string" }, target = new { type = "string" } }, required = Array.Empty<string>() }),
-            CreateTool("test", "Test", "Run tests through the configured test service.", "test", new { type = "object", properties = new { sessionId = new { type = "string" }, target = new { type = "string" }, testFiles = new { type = "array", items = new { type = "string" } }, timeoutSeconds = new { type = "integer" } }, required = Array.Empty<string>() }),
+            CreateTool("test", "Test", "Step 4: Use test to run the configured build and test summary after editing.", "test", new { type = "object", properties = new { sessionId = new { type = "string" }, target = new { type = "string" }, testFiles = new { type = "array", items = new { type = "string" } }, timeoutSeconds = new { type = "integer" } }, required = Array.Empty<string>() }),
             CreateTool("report", "Report", "Return the current session report through the runtime capability layer.", "report", new
             {
                 type = "object",
@@ -516,7 +581,13 @@ public sealed class McpReferenceServer
     }
 
     private static McpToolDescriptor CreateTool(string name, string title, string description, string capabilityId, object schema)
-        => new(name, title, description, capabilityId, JsonSerializer.SerializeToElement(schema, JsonOptions));
+    {
+        var node = JsonSerializer.SerializeToNode(schema, JsonOptions)!.AsObject();
+        var properties = node["properties"]?.AsObject();
+        if (properties is not null && !properties.ContainsKey("format"))
+            properties["format"] = JsonSerializer.SerializeToNode(new { type = "string", @enum = new[] { "agent", "json" } }, JsonOptions);
+        return new(name, title, description, capabilityId, JsonSerializer.SerializeToElement(node, JsonOptions));
+    }
 
     private static McpToolDescriptor CreateQueryTool(string name, string title, string description, string sessionProperty, string queryProperty)
         => CreateTool(name, title, description, name, new

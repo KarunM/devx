@@ -1,4 +1,5 @@
 using DevX.Cli;
+using System.Text;
 using System.Text.Json;
 using Xunit;
 
@@ -13,7 +14,7 @@ public sealed class CliCommandTests
     private static readonly SemaphoreSlim ProcessStateLock = new(1, 1);
     [Theory]
     [InlineData("--version", 0, "1.6.4")]
-    [InlineData("--help", 0, "Usage")]
+    [InlineData("--help", 0, "1. devx search <name>")]
     [InlineData("unknown-command", 1, "Unknown command")]
     [InlineData("index", 1, "Missing repository path")]
     [InlineData("health", 1, "Status: Unavailable")]
@@ -104,6 +105,80 @@ public sealed class CliCommandTests
             Directory.Delete(root, recursive: true);
             ProcessStateLock.Release();
         }
+    }
+
+    [Fact]
+    public async Task SearchReadAndSnapshot_AgentFormatPrintCompactText()
+    {
+        await ProcessStateLock.WaitAsync();
+        var originalDirectory = Environment.CurrentDirectory;
+        var root = Directory.CreateTempSubdirectory("devx-agent-format").FullName;
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, ".git"));
+            await File.WriteAllTextAsync(Path.Combine(root, "Sample.cs"), "public sealed class AgentFixtureOne { public void RunOne() { } }\npublic sealed class AgentFixtureTwo { public void RunTwo() { } }\npublic sealed class AgentFixtureThree { public void RunThree() { } }");
+            await File.WriteAllTextAsync(Path.Combine(root, "First.cs"), "public sealed class First { public void Run() { } }");
+            await File.WriteAllTextAsync(Path.Combine(root, "Second.cs"), "public sealed class Second { public void Run() { } }");
+            await File.WriteAllTextAsync(Path.Combine(root, "notes.md"), "UniquePreview phrase for text search.");
+            Environment.CurrentDirectory = root;
+            var (searchCode, search) = await InvokeCliAsync("search", "AgentFixture", "--format", "agent");
+            var (searchJsonCode, searchJson) = await InvokeCliAsync("search", "AgentFixture", "--format", "json");
+            var (readCode, read) = await InvokeCliAsync("read", "AgentFixtureOne.RunOne", "--format", "agent");
+            var (snapshotCode, snapshot) = await InvokeCliAsync("snapshot", "Sample.cs", "--format", "agent");
+            var (snapshotJsonCode, snapshotJson) = await InvokeCliAsync("snapshot", "Sample.cs", "--format", "json");
+            var (textCode, textSearch) = await InvokeCliAsync("search", "text", "UniquePreview", "--format", "agent");
+            var (errorCode, error) = await InvokeCliAsync("snapshot", "Missing.cs", "--format", "agent");
+            var (ambiguousCode, ambiguous) = await InvokeCliAsync("read", "Run", "--format", "agent");
+            Assert.Equal(0, searchCode); Assert.Equal(0, readCode); Assert.Equal(0, snapshotCode);
+            Assert.Equal(0, searchJsonCode); Assert.Equal(0, snapshotJsonCode);
+            Assert.Equal(0, textCode); Assert.Equal(1, errorCode);
+            Assert.Equal(2, ambiguousCode);
+            var expectedSearchLines = new[]
+            {
+                "class AgentFixtureOne",
+                "method AgentFixtureOne.RunOne",
+                "class AgentFixtureTwo",
+                "method AgentFixtureTwo.RunTwo",
+                "class AgentFixtureThree",
+                "method AgentFixtureThree.RunThree"
+            };
+            var actualSearchLines = search.Trim().Split('\n')
+                .Where(line => !line.StartsWith("(indexed ", StringComparison.Ordinal));
+            Assert.Equal(expectedSearchLines.Length, actualSearchLines.Count());
+            Assert.All(expectedSearchLines, fragment => Assert.Contains(fragment, search));
+            Assert.Contains("Sample.cs:", read);
+            Assert.Contains("[method]", read);
+            Assert.Contains("public void RunOne()", read);
+            Assert.Contains("Sample.cs (C#", snapshot);
+            Assert.Contains("type AgentFixtureOne", snapshot);
+            Assert.Contains("method RunOne", snapshot);
+            Assert.Contains("notes.md:1:", textSearch);
+            Assert.Contains("UniquePreview phrase", textSearch);
+            Assert.Contains("error: File 'Missing.cs'", error);
+            Assert.Contains("ambiguous: Run matches 2 symbols", ambiguous);
+            Assert.Contains("First.Run", ambiguous);
+            Assert.Contains("Second.Run", ambiguous);
+            Assert.DoesNotContain("Id", snapshot, StringComparison.OrdinalIgnoreCase);
+            var searchAgentBytes = Encoding.UTF8.GetByteCount(search);
+            var searchJsonBytes = Encoding.UTF8.GetByteCount(searchJson);
+            var snapshotAgentBytes = Encoding.UTF8.GetByteCount(snapshot);
+            var snapshotJsonBytes = Encoding.UTF8.GetByteCount(snapshotJson);
+            Assert.True(searchAgentBytes <= searchJsonBytes / 2, $"Search agent={searchAgentBytes} JSON={searchJsonBytes}");
+            Assert.True(snapshotAgentBytes <= snapshotJsonBytes / 2, $"Snapshot agent={snapshotAgentBytes} JSON={snapshotJsonBytes}");
+        }
+        finally
+        {
+            Environment.CurrentDirectory = originalDirectory;
+            Directory.Delete(root, recursive: true);
+            ProcessStateLock.Release();
+        }
+    }
+
+    [Fact]
+    public async Task HelpStartsWithAgentQuickStart()
+    {
+        var (_, output) = await InvokeCliAsync("--help");
+        Assert.StartsWith("1. devx search <name>   (symbols; falls back to text)\n2. devx read <name> [more names]   (source of a symbol, file, or file#Heading)\n3. devx replace <file> --old <text> --new <text>   (edit; add --all or --occurrence n)\n4. devx test [file|dir]   (build+test summary)\nAdd --format agent for compact output; no session needed.", output);
     }
 
     [Fact]

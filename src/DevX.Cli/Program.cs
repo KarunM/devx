@@ -903,7 +903,9 @@ static async Task<int> SnapshotAsync(string connectionString, string[] args, str
 
     var store = new SqliteStorageInitializer(connectionString);
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
-    var request = new ProtocolRequest("1.0", ProtocolOperations.GetFileSnapshot, sessionId, JsonSerializer.SerializeToElement(new { query = target }));
+    var snapshotPayload = new Dictionary<string, string> { ["query"] = target };
+    if (format == "agent") snapshotPayload["format"] = format;
+    var request = new ProtocolRequest("1.0", ProtocolOperations.GetFileSnapshot, sessionId, JsonSerializer.SerializeToElement(snapshotPayload));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
     await store.AddOperationMetricAsync(new OperationMetric("snapshot", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, target), GetAgentLabel(args)));
@@ -1131,7 +1133,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
 
     var response = await engine.ExecuteAsync(request);
     await store.AddOperationMetricAsync(new OperationMetric($"read {action}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
-    if (format == "json" || action == "type")
+    if (format is "json" or "agent" || action == "type")
     {
         WriteResponse(response, format);
     }
@@ -2028,6 +2030,12 @@ static void WriteResponse(ProtocolResponse response, string format)
         return;
     }
 
+    if (format == "agent")
+    {
+        Console.WriteLine(FormatAgentResponse(response));
+        return;
+    }
+
     if (response.Success)
     {
         Console.WriteLine(response.Data?.GetRawText() ?? "{}");
@@ -2038,6 +2046,49 @@ static void WriteResponse(ProtocolResponse response, string format)
     {
         Console.Error.WriteLine($"{error.Code}: {error.Message}");
     }
+}
+
+static string FormatAgentResponse(ProtocolResponse response)
+{
+    if (!response.Success) return string.Join("\n", response.Errors.Select(error => $"error: {error.Message}"));
+    if (response.Data is not { } data) return string.Empty;
+    if (TryGetPropertyIgnoreCase(data, "symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array && symbols.GetArrayLength() > 0)
+        return string.Join("\n", symbols.EnumerateArray().Select(item => $"{JsonPropertyText(item, "Kind").ToLowerInvariant()} {JsonPropertyText(item, "QualifiedName")} {RelativeAgentPath(JsonPropertyText(item, "FilePath"))}:{JsonPropertyText(item, "StartLine")}-{JsonPropertyText(item, "EndLine")}"));
+    if (TryGetPropertyIgnoreCase(data, "contentMatches", out var matches) && matches.ValueKind == JsonValueKind.Array)
+        return string.Join("\n", matches.EnumerateArray().Select(item => { var preview = JsonPropertyText(item, "Preview").Trim(); return $"{RelativeAgentPath(JsonPropertyText(item, "Path"))}:{JsonPropertyText(item, "Line")}: {preview[..Math.Min(160, preview.Length)]}"; }));
+    foreach (var collection in new[] { "Callers", "Callees", "References" })
+    {
+        if (!TryGetPropertyIgnoreCase(data, collection, out var items)) continue;
+        if (items.ValueKind == JsonValueKind.Object && TryGetPropertyIgnoreCase(items, collection, out var nested)) items = nested;
+        if (items.ValueKind == JsonValueKind.Array)
+            return string.Join("\n", items.EnumerateArray().Select(item => $"{RelativeAgentPath(JsonPropertyText(item, "FilePath"))}:{JsonPropertyText(item, collection == "References" ? "LineNumber" : "CallSiteLine")}: {JsonPropertyText(item, "QualifiedName")}"));
+    }
+    if (TryGetPropertyIgnoreCase(data, "snapshot", out var snapshot))
+    {
+        var lines = new List<string> { $"{RelativeAgentPath(JsonPropertyText(snapshot, "Path"))} ({JsonPropertyText(snapshot, "Language")}, {JsonPropertyText(snapshot, "ApproximateLoc")} lines)" };
+        if (TryGetPropertyIgnoreCase(snapshot, "types", out var types) && types.ValueKind == JsonValueKind.Array)
+            lines.AddRange(types.EnumerateArray().Where(type => JsonPropertyText(type, "StartLine").Length > 0 && JsonPropertyText(type, "EndLine").Length > 0).Select(type => $"type {JsonPropertyText(type, "Name")} :{JsonPropertyText(type, "StartLine")}-{JsonPropertyText(type, "EndLine")}"));
+        if (TryGetPropertyIgnoreCase(snapshot, "methods", out var methods) && methods.ValueKind == JsonValueKind.Array)
+            lines.AddRange(methods.EnumerateArray().Where(method => JsonPropertyText(method, "StartLine").Length > 0 && JsonPropertyText(method, "EndLine").Length > 0).Select(method => $"  method {JsonPropertyText(method, "Name")}({AgentSignature(JsonPropertyText(method, "Signature"))}) :{JsonPropertyText(method, "StartLine")}-{JsonPropertyText(method, "EndLine")}"));
+        return string.Join("\n", lines);
+    }
+    if (TryGetPropertyIgnoreCase(data, "path", out var path) && TryGetPropertyIgnoreCase(data, "source", out var source))
+    {
+        var p = RelativeAgentPath(path.GetString() ?? "");
+        int.TryParse(JsonPropertyText(data, "StartLine"), out var start); int.TryParse(JsonPropertyText(data, "EndLine"), out var end);
+        var name = JsonPropertyText(data, "QualifiedName");
+        var kind = JsonPropertyText(data, "Kind");
+        return $"{p}:{start}-{end}{(string.IsNullOrEmpty(name) ? "" : $" {name}")}{(string.IsNullOrEmpty(kind) ? "" : $" [{kind}]")}\n{source.GetString()}";
+    }
+    return data.GetRawText();
+}
+
+static string RelativeAgentPath(string path) => string.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path) ? path : Path.GetRelativePath(Environment.CurrentDirectory, path);
+static string AgentSignature(string signature)
+{
+    var start = signature.IndexOf('(');
+    var end = signature.IndexOf(')', start + 1);
+    return start >= 0 && end > start ? signature[(start + 1)..end] : signature;
 }
 
 static void WriteSourceResponse(ProtocolResponse response)
@@ -2083,6 +2134,12 @@ static string GetProductVersion()
 static void PrintHelp()
 {
     Console.WriteLine("""
+1. devx search <name>   (symbols; falls back to text)
+2. devx read <name> [more names]   (source of a symbol, file, or file#Heading)
+3. devx replace <file> --old <text> --new <text>   (edit; add --all or --occurrence n)
+4. devx test [file|dir]   (build+test summary)
+Add --format agent for compact output; no session needed.
+
 Usage:
   devx version [--format json]
   devx --version
@@ -2146,7 +2203,7 @@ Artifact options:
   --content-stdin
 
 Global options:
-  --format <json|text>
+  --format <json|text|agent>
   --session <id>
   --agent <label>
   --task <label>   Attribute recorded calls to a brief/task (caller supplied)

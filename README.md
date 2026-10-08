@@ -34,7 +34,7 @@ Create a session with `devx session create --format json`, then pass its ID to s
 
 ## Editing
 
-Simple edit -> `devx replace`; structured/multi-file edits -> `devx patch`.
+Use `devx replace` for simple text edits. Use `devx patch` for structured or multi-file edits.
 
 ## MCP
 

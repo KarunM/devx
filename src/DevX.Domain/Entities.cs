@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace DevX.Domain;
 
 public readonly record struct RepositoryId(Guid Value);
@@ -139,8 +141,13 @@ public sealed record FileSnapshot(
     IReadOnlyList<string> Dependencies);
 
 public sealed record FileNamespaceSnapshot(string Id, string Name);
-public sealed record FileTypeSnapshot(string Id, string Name, string Namespace);
-public sealed record FileMethodSnapshot(string Id, string Name, string TypeName, string Namespace);
+public sealed record FileTypeSnapshot(string Id, string Name, string Namespace,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? StartLine = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? EndLine = null);
+public sealed record FileMethodSnapshot(string Id, string Name, string TypeName, string Namespace,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Signature = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? StartLine = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? EndLine = null);
 public sealed record FilePropertySnapshot(string Id, string Name, string TypeName, string Namespace);
 public sealed record FileFieldSnapshot(string Id, string Name, string TypeName, string Namespace);
 public sealed record MethodSummary(

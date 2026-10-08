@@ -651,21 +651,25 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
             """, fileId, cancellationToken, row => new FileNamespaceSnapshot(row.GetString(0), row.GetString(1)));
 
         var types = await QueryListAsync(connection, """
-            SELECT t.id, t.name, n.name
+            SELECT t.id, t.name, n.name, s.start_line, s.end_line
             FROM types t
             INNER JOIN namespaces n ON n.id = t.namespace_id
+            LEFT JOIN symbols s ON s.file_id = n.file_id AND s.container_id = n.id AND s.name = t.name
             WHERE n.file_id = $file_id
             ORDER BY n.name, t.name;
-            """, fileId, cancellationToken, row => new FileTypeSnapshot(row.GetString(0), row.GetString(1), row.GetString(2)));
+            """, fileId, cancellationToken, row => new FileTypeSnapshot(row.GetString(0), row.GetString(1), row.GetString(2), row.IsDBNull(3) ? null : row.GetInt32(3), row.IsDBNull(4) ? null : row.GetInt32(4)));
 
         var methods = await QueryListAsync(connection, """
-            SELECT m.id, m.name, t.name, n.name
+            SELECT m.id, m.name, t.name, n.name,
+                   (SELECT s.signature FROM symbols s WHERE s.container_id = t.id AND s.name = m.name ORDER BY s.start_line LIMIT 1),
+                   (SELECT s.start_line FROM symbols s WHERE s.container_id = t.id AND s.name = m.name ORDER BY s.start_line LIMIT 1),
+                   (SELECT s.end_line FROM symbols s WHERE s.container_id = t.id AND s.name = m.name ORDER BY s.start_line LIMIT 1)
             FROM methods m
             INNER JOIN types t ON t.id = m.type_id
             INNER JOIN namespaces n ON n.id = t.namespace_id
             WHERE n.file_id = $file_id
             ORDER BY n.name, t.name, m.name;
-            """, fileId, cancellationToken, row => new FileMethodSnapshot(row.GetString(0), row.GetString(1), row.GetString(2), row.GetString(3)));
+            """, fileId, cancellationToken, row => new FileMethodSnapshot(row.GetString(0), row.GetString(1), row.GetString(2), row.GetString(3), row.IsDBNull(4) ? null : row.GetString(4), row.IsDBNull(5) ? null : row.GetInt32(5), row.IsDBNull(6) ? null : row.GetInt32(6)));
 
         var properties = await QueryListAsync(connection, """
             SELECT p.id, p.name, t.name, n.name
