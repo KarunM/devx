@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.6.9
+
+Two bugs found by using 1.6.8 rather than by reading it.
+
+- **`devx index .` no longer re-indexes a repository that is already indexed.** 1.6.8 gave the MCP `index` tool the
+  "nothing changed, say so and stop" short-circuit but left the CLI command walking and re-parsing every file. On the
+  Django benchmark checkout -- 3,292 files -- that is over 13 minutes of work to arrive at the index already on disk,
+  and it read as a hang. The CLI now answers `already current (N files).` in under a second when git reports nothing
+  changed. When a few files have changed it re-indexes only those files, instead of the whole tree; a repository that has
+  never been indexed, or one where git cannot say what changed, still gets the full run. `devx index . --force` runs the
+  full index regardless.
+- **A configured build or test command that installs now runs.** An agent that has to restore a dependency before it can
+  build anything is not doing something wrong, and refusing it only pushed the install outside any log DevX could see --
+  which is what the Django agent did. `"blockInstall": true` in the same `.devx/config.json` block restores the 1.6.8
+  refusal for a repository that wants it. DevX still never adds an install step of its own.
+- Carried forward, unfixed: `devx patch create --help` prints only top-level usage, so per-op flags are undiscoverable
+  (see 1.6.8 below).
+
 ## 1.6.8
 
 The MCP server had to work end to end for an agent on a repository that is not a .NET solution. These are the failures a
