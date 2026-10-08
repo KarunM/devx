@@ -12,6 +12,10 @@ The transport uses newline-delimited JSON-RPC 2.0 on stdin and stdout; diagnosti
 
 ## Tools
 
+## Editing
+
+Simple edit -> `devx replace` (or MCP `edit.replace`); structured/multi-file edits -> `devx patch`.
+
 The server exposes `index` (incrementally update paths or, when `files` is absent/empty, index the whole repository using the same file selection and `.gitignore` handling as `devx index .`), `search` (symbol or text), `read` (file, method, type, or section), `snapshot`, `callers`, `callees`, `references`, `patch.preview`, `patch.validate`, `patch.apply`, `build`, `test`, and `report`. `index` returns the number of indexed files. The process creates a repository session at startup and applies it to tool calls automatically. Patch tools accept structured patch documents. Tool results are returned as MCP text content containing the DevX protocol response; failed operations set `isError`.
 
 Canonical argument names are shown in `tools/list`. For one release, old names remain accepted as deprecated aliases:

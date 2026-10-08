@@ -24,8 +24,32 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.Contains(response.Tools, tool => tool.Name == "read" && tool.CapabilityId == "read");
         Assert.Contains(response.Tools, tool => tool.Name == "patch.validate" && tool.CapabilityId == "patch.validate");
         Assert.Contains(response.Tools, tool => tool.Name == "patch.apply" && tool.CapabilityId == "patch.apply");
+        Assert.Contains(response.Tools, tool => tool.Name == "edit.replace");
+        Assert.Contains(response.Tools, tool => tool.Name == "patch.preview");
         Assert.Contains(response.Tools, tool => tool.Name == "index" && tool.CapabilityId == "index");
         Assert.Contains(response.Tools, tool => tool.Name == "report" && tool.CapabilityId == "report");
+    }
+
+    [Fact]
+    public async Task StdioServer_InitializeIndexAndReplace_UpdatesFileAndReportsAmbiguity()
+    {
+        var (server, session, root) = await CreateServerAsync("devx-mcp-replace", indexRepository: false, plainFolder: true);
+        var file = Path.Combine(root, "replace.txt");
+        await IOFile.WriteAllTextAsync(file, "first old\nsecond old\n");
+        var id = session.Id.Value.ToString();
+        var requests = string.Join("\n", [
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{{\"name\":\"index\",\"arguments\":{{\"sessionId\":\"{id}\"}}}}}}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{{\"name\":\"edit.replace\",\"arguments\":{{\"sessionId\":\"{id}\",\"file\":\"replace.txt\",\"old\":\"first\",\"new\":\"updated\"}}}}}}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{{\"name\":\"edit.replace\",\"arguments\":{{\"sessionId\":\"{id}\",\"file\":\"replace.txt\",\"old\":\"old\",\"new\":\"new\"}}}}}}"
+        ]) + "\n";
+        var output = new StringWriter(); await new McpStdioServer(server).RunAsync(new StringReader(requests), output);
+        var responses = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => JsonDocument.Parse(line)).ToArray();
+        Assert.Contains("edit.replace", responses[1].RootElement.GetRawText()); Assert.Contains("patch.preview", responses[1].RootElement.GetRawText());
+        Assert.False(responses[3].RootElement.GetProperty("result").GetProperty("isError").GetBoolean());
+        Assert.Equal("updated old\nsecond old\n", await IOFile.ReadAllTextAsync(file));
+        var failed = responses[4].RootElement.GetProperty("result"); Assert.True(failed.GetProperty("isError").GetBoolean()); Assert.Contains("2 times", failed.GetProperty("content")[0].GetProperty("text").GetString());
     }
 
     [Fact]

@@ -76,6 +76,9 @@ static async Task<int> RunAsync(string[] args)
         case "patch":
             return await PatchAsync(connectionString, args, format);
 
+        case "replace":
+            return ReplaceCommand.Run(args, Environment.CurrentDirectory);
+
         case "health":
             return await HealthAsync(connectionString, args, format);
 
@@ -1964,6 +1967,8 @@ Usage:
   devx artifact delete <name>
   devx artifact path <name>
   devx patch create <output-file> --session <id> --op <Operation> --path <relative-path> [options] [--append]
+  devx replace <file> --old <text> --new <text> [--all | --occurrence <n>]
+  Editing: simple edit -> devx replace; structured/multi-file edits -> devx patch
   devx patch preview <patch-file> --session <id>
   devx patch validate <patch-file> --session <id>
   devx patch apply <patch-file> --session <id>

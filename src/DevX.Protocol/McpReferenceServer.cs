@@ -17,6 +17,7 @@ public sealed class McpReferenceServer
     private readonly Func<CancellationToken, Task<RepositoryIndexResult>>? _indexRepositoryAsync;
     private readonly Func<CancellationToken, Task>? _initializeStorageAsync;
     private readonly string _version;
+    private readonly TextReplaceService _textReplaceService = new();
 
     public McpReferenceServer(
         IProtocolEngine protocolEngine,
@@ -80,6 +81,7 @@ public sealed class McpReferenceServer
                 cancellationToken),
             "snapshot" => await ExecuteQueryToolAsync(ProtocolOperations.GetFileSnapshot, arguments, cancellationToken),
             "index" => await IndexFilesAsync(arguments, cancellationToken),
+            "edit.replace" => await ReplaceTextAsync(arguments, cancellationToken),
             "callers" => await ExecuteQueryToolAsync(ProtocolOperations.GetCallers, arguments, cancellationToken),
             "callees" => await ExecuteQueryToolAsync(ProtocolOperations.GetCallees, arguments, cancellationToken),
             "references" => await ExecuteQueryToolAsync(ProtocolOperations.GetReferences, arguments, cancellationToken),
@@ -278,6 +280,17 @@ public sealed class McpReferenceServer
         return new McpToolCallResult(failed, JsonSerializer.SerializeToElement(new { success = !failed, result }, JsonOptions));
     }
 
+    private async Task<McpToolCallResult> ReplaceTextAsync(JsonElement arguments, CancellationToken cancellationToken)
+    {
+        var session = await _sessionStore.GetSessionAsync(new GetSessionRequest(new SessionId(Guid.Parse(RequiredSessionId(arguments)))), cancellationToken);
+        if (session is null) return new(true, JsonSerializer.SerializeToElement(new { error = "Session not found." }, JsonOptions));
+        var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+        if (string.IsNullOrEmpty(root)) return new(true, JsonSerializer.SerializeToElement(new { error = "Repository not found." }, JsonOptions));
+        var result = _textReplaceService.Apply(root, RequiredString(arguments, "file"), RequiredString(arguments, "old"), RequiredString(arguments, "new"), TryGetBoolean(arguments, "all", out var all) && all, arguments.TryGetProperty("occurrence", out var occurrence) && occurrence.TryGetInt32(out var n) ? n : null);
+        if (result.Success && _reindexFilesAsync is not null) await _reindexFilesAsync([RequiredString(arguments, "file")], cancellationToken);
+        return new(!result.Success, JsonSerializer.SerializeToElement(new { text = result.Message + (result.Diff.Length == 0 ? "" : "\n" + result.Diff) }, JsonOptions));
+    }
+
     private async Task<bool> IsRepositoryUnindexedAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
         if (_initializeStorageAsync is not null)
@@ -375,6 +388,7 @@ public sealed class McpReferenceServer
     {
         return
         [
+            CreateTool("edit.replace", "Replace text", "Replace an exact text fragment in one file.", "edit.replace", new { type = "object", properties = new { file = new { type = "string" }, old = new { type = "string" }, @new = new { type = "string" }, all = new { type = "boolean" }, occurrence = new { type = "integer" }, sessionId = new { type = "string" } }, required = new[] { "file", "old", "new" } }),
             CreateTool("search", "Search", "Search indexed symbols or text through the runtime capability layer.", "search", new
             {
                 type = "object",

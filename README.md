@@ -32,6 +32,10 @@ devx search text "TODO" --session <session-id>
 
 Create a session with `devx session create --format json`, then pass its ID to session-scoped commands.
 
+## Editing
+
+Simple edit -> `devx replace`; structured/multi-file edits -> `devx patch`.
+
 ## MCP
 
 See the [MCP setup guide](docs/mcp.md).
