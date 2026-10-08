@@ -1,5 +1,8 @@
 using System.Reflection;
+using File = System.IO.File;
 using DevX.Cli;
+using DevX.Domain;
+using DevX.Indexer;
 using Xunit;
 
 namespace DevX.Tests.Cli;
@@ -14,6 +17,36 @@ public sealed class ReplaceCommandTests
     [Fact] public async Task Replace_MissingMatch_ReturnsOne() => await RunCase("stable", ["--old", "missing", "--new", "two"], 1, "stable", missing: true);
     [Fact] public async Task Replace_All_ReplacesEveryOccurrence() => await RunCase("one one", ["--old", "one", "--new", "two", "--all"], 0, "two two");
     [Fact] public async Task Replace_Occurrence_ReplacesSelectedOccurrence() => await RunCase("one one", ["--old", "one", "--new", "two", "--occurrence", "2"], 0, "one two");
+
+    [Fact]
+    public async Task Replace_VerifyIsOptInAndAddsBuildAndTestLines()
+    {
+        await StateLock.WaitAsync(); var oldOut = Console.Out;
+        var root = Directory.CreateTempSubdirectory("devx-cli-replace-verify").FullName;
+        try
+        {
+            System.IO.File.WriteAllText(Path.Combine(root, "sample.md"), "old");
+            var output = new StringWriter(); Console.SetOut(output);
+            var defaultExit = await ReplaceCommand.RunAsync(["replace", "sample.md", "--old", "old", "--new", "new"], root);
+            Assert.Equal(0, defaultExit);
+            Assert.DoesNotContain("build:", output.ToString());
+
+            System.IO.File.WriteAllText(Path.Combine(root, "sample.md"), "old");
+            output.GetStringBuilder().Clear();
+            var verifiedExit = await ReplaceCommand.RunAsync(["replace", "sample.md", "--old", "old", "--new", "new", "--verify"], root,
+                _ => new VerifyAfterEdit(_ => Task.FromResult(new ExecutionRecord("skip", true, "", [], "skipped (no build step for .md)")), _ => Task.FromResult(new ExecutionRecord("test", true, "", [], "PASS tests")), _ => []));
+            Assert.Equal(0, verifiedExit);
+            Assert.Contains("build: skipped (no build step for .md)", output.ToString());
+            Assert.Contains("tests: PASS tests", output.ToString());
+
+            System.IO.File.WriteAllText(Path.Combine(root, "sample.md"), "old");
+            output.GetStringBuilder().Clear();
+            var noVerifyExit = await ReplaceCommand.RunAsync(["replace", "sample.md", "--old", "old", "--new", "new", "--verify", "--no-verify"], root);
+            Assert.Equal(0, noVerifyExit);
+            Assert.DoesNotContain("build:", output.ToString());
+        }
+        finally { Console.SetOut(oldOut); Directory.Delete(root, true); StateLock.Release(); }
+    }
 
     private static async Task RunCase(string original, string[] options, int expected, string expectedContent, bool ambiguous = false, bool missing = false)
     {

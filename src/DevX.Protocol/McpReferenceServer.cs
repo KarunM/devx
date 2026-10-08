@@ -17,6 +17,7 @@ public sealed class McpReferenceServer
     private readonly Func<CancellationToken, Task<RepositoryIndexResult>>? _indexRepositoryAsync;
     private readonly Func<CancellationToken, Task>? _initializeStorageAsync;
     private readonly string _version;
+    private readonly Func<string, VerifyAfterEdit>? _verifyAfterEditFactory;
     private readonly TextReplaceService _textReplaceService = new();
 
     public McpReferenceServer(
@@ -27,7 +28,8 @@ public sealed class McpReferenceServer
         Func<string[], CancellationToken, Task<IndexRefreshResult>>? reindexFilesAsync = null,
         string version = "1.0",
         Func<CancellationToken, Task<RepositoryIndexResult>>? indexRepositoryAsync = null,
-        Func<CancellationToken, Task>? initializeStorageAsync = null)
+        Func<CancellationToken, Task>? initializeStorageAsync = null,
+        Func<string, VerifyAfterEdit>? verifyAfterEditFactory = null)
     {
         _protocolEngine = protocolEngine;
         _sessionStore = sessionStore;
@@ -36,6 +38,7 @@ public sealed class McpReferenceServer
         _reindexFilesAsync = reindexFilesAsync;
         _indexRepositoryAsync = indexRepositoryAsync;
         _initializeStorageAsync = initializeStorageAsync;
+        _verifyAfterEditFactory = verifyAfterEditFactory;
         _version = version;
     }
 
@@ -354,7 +357,27 @@ public sealed class McpReferenceServer
         if (string.IsNullOrEmpty(root)) return new(true, JsonSerializer.SerializeToElement(new { error = "Repository not found." }, JsonOptions));
         var result = _textReplaceService.Apply(root, RequiredString(arguments, "file"), RequiredString(arguments, "old"), RequiredString(arguments, "new"), TryGetBoolean(arguments, "all", out var all) && all, arguments.TryGetProperty("occurrence", out var occurrence) && occurrence.TryGetInt32(out var n) ? n : null);
         if (result.Success && _reindexFilesAsync is not null) await _reindexFilesAsync([RequiredString(arguments, "file")], cancellationToken);
-        return new(!result.Success, JsonSerializer.SerializeToElement(new { text = result.Message + (result.Diff.Length == 0 ? "" : "\n" + result.Diff) }, JsonOptions));
+        if (!result.Success) return new(true, JsonSerializer.SerializeToElement(new { text = result.Message }, JsonOptions));
+        if (!TryGetBoolean(arguments, "verify", out var verify)) verify = true;
+        if (!verify) return new(false, JsonSerializer.SerializeToElement(new { text = result.Message + (result.Diff.Length == 0 ? "" : "\n" + result.Diff) }, JsonOptions));
+
+        var service = new DotnetBuildTestService();
+        var symbolStore = _repositoryStore as ISymbolStore;
+        var searchService = symbolStore is null ? null : new SearchService(_repositoryStore, symbolStore);
+        var verifier = _verifyAfterEditFactory?.Invoke(root) ?? new VerifyAfterEdit(
+            file => VerifyAfterEdit.RunBuildAsync(service, root, file, cancellationToken),
+            files => service.RunTestsAsync(root, files, TimeSpan.FromSeconds(300), cancellationToken),
+            file => symbolStore is not null && searchService is not null
+                ? VerifyAfterEdit.FindRelevantTestFiles(root, file, symbolStore, searchService)
+                : VerifyAfterEdit.FindRelevantTestFiles(root, file));
+        var verification = await verifier.RunAsync(RequiredString(arguments, "file"));
+        var verifyData = new { Build = new { verification.Build.Success, verification.Build.Summary, verification.Build.Diagnostics }, Tests = verification.Tests is null ? null : new { verification.Tests.Success, verification.Tests.Summary, verification.Tests.Diagnostics } };
+        if (TryGetString(arguments, "format", out var format) && format == "json")
+            return new(false, JsonSerializer.SerializeToElement(new { text = result.Message + (result.Diff.Length == 0 ? "" : "\n" + result.Diff), Verify = verifyData }, JsonOptions));
+        var text = result.Message + (result.Diff.Length == 0 ? "" : "\n" + result.Diff) + "\nbuild: " + verification.Build.Summary;
+        if (verification.Build.Success) text += "\ntests: " + (verification.Tests?.Summary ?? "PASS tests — skipped");
+        else text += "\nedit kept; fix forward or revert";
+        return new(false, JsonSerializer.SerializeToElement(new { text }, JsonOptions));
     }
 
     private async Task<bool> IsRepositoryUnindexedAsync(JsonElement arguments, CancellationToken cancellationToken)
@@ -521,7 +544,7 @@ public sealed class McpReferenceServer
     {
         return
         [
-            CreateTool("edit.replace", "Replace text", "Step 3: Use edit.replace for a simple text edit after search and read. Add all or occurrence to select matches.", "edit.replace", new { type = "object", properties = new { file = new { type = "string" }, old = new { type = "string" }, @new = new { type = "string" }, all = new { type = "boolean" }, occurrence = new { type = "integer" }, sessionId = new { type = "string" } }, required = new[] { "file", "old", "new" } }),
+            CreateTool("edit.replace", "Replace text", "Step 3: Use edit.replace for a simple text edit after search and read. Add all or occurrence to select matches. Edits are verified by default; pass verify:false to skip.", "edit.replace", new { type = "object", properties = new { file = new { type = "string" }, old = new { type = "string" }, @new = new { type = "string" }, all = new { type = "boolean" }, occurrence = new { type = "integer" }, verify = new { type = "boolean" }, format = new { type = "string" }, sessionId = new { type = "string" } }, required = new[] { "file", "old", "new" } }),
             CreateTool("search", "Search", "Step 1: Use search to find symbols or text in the indexed repository; it falls back to text when no symbol matches.", "search", new
             {
                 type = "object",

@@ -34,7 +34,7 @@ Create a session with `devx session create --format json`, then pass its ID to s
 
 ## Editing
 
-Use `devx replace` for simple text edits. Use `devx patch` for structured or multi-file edits.
+Use `devx replace` for simple text edits (`--verify` enables build/test verification; `--no-verify` disables it). Use `devx patch` for structured or multi-file edits. MCP `edit.replace` verifies edits by default and accepts `verify:false` to skip verification. A build failure keeps the edit in place; the agent decides whether to fix forward or revert it.
 
 ## MCP
 

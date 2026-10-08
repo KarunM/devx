@@ -53,6 +53,39 @@ public sealed class McpReferenceServerIntegrationTests
     }
 
     [Fact]
+    public async Task EditReplace_DefaultVerifiesAndVerifyFalseSkips()
+    {
+        var (server, session, root) = await CreateServerAsync("devx-mcp-verify", plainFolder: true,
+            verifyAfterEditFactory: _ => new VerifyAfterEdit(
+                _ => Task.FromResult(new ExecutionRecord("build", true, "", [], "PASS build")),
+                _ => Task.FromResult(new ExecutionRecord("test", true, "", [], "PASS 1 tests")),
+                _ => []));
+        await IOFile.WriteAllTextAsync(Path.Combine(root, "edit.md"), "old");
+        var verified = await server.CallToolAsync("edit.replace", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            file = "edit.md",
+            old = "old",
+            @new = "new"
+        }));
+        Assert.False(verified.IsError);
+        Assert.Contains("build: PASS build", verified.Content.GetProperty("text").GetString());
+        Assert.Contains("tests: PASS 1 tests", verified.Content.GetProperty("text").GetString());
+
+        await IOFile.WriteAllTextAsync(Path.Combine(root, "edit.md"), "old");
+        var skipped = await server.CallToolAsync("edit.replace", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            file = "edit.md",
+            old = "old",
+            @new = "new",
+            verify = false
+        }));
+        Assert.False(skipped.IsError);
+        Assert.DoesNotContain("build:", skipped.Content.GetProperty("text").GetString());
+    }
+
+    [Fact]
     public async Task CallToolAsync_SearchAndRead_ReturnSuccessfulPayloads()
     {
         var (server, session, _) = await CreateServerAsync("devx-mcp-read");
@@ -405,7 +438,7 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.True(missingArguments.RootElement.GetProperty("result").GetProperty("isError").GetBoolean());
     }
 
-    private static async Task<(McpReferenceServer Server, SessionState Session, string RepositoryRoot)> CreateServerAsync(string prefix, bool indexRepository = true, bool plainFolder = false)
+    private static async Task<(McpReferenceServer Server, SessionState Session, string RepositoryRoot)> CreateServerAsync(string prefix, bool indexRepository = true, bool plainFolder = false, Func<string, VerifyAfterEdit>? verifyAfterEditFactory = null)
     {
         var repositoryRoot = Directory.CreateTempSubdirectory(prefix).FullName;
         var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
@@ -452,7 +485,8 @@ public sealed class McpReferenceServerIntegrationTests
             (files, cancellationToken) => indexer.ReindexFilesAsync(repositoryRoot, files, cancellationToken),
             "1.6.4",
             cancellationToken => indexer.IndexAsync(repositoryRoot, cancellationToken),
-            cancellationToken => store.InitializeAsync(cancellationToken));
+            cancellationToken => store.InitializeAsync(cancellationToken),
+            verifyAfterEditFactory);
         return (server, session, repositoryRoot);
     }
 

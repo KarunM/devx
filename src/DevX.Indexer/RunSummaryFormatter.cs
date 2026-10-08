@@ -11,7 +11,9 @@ public static class RunSummaryFormatter
         var log = RelativeLog(logPath, root);
         if (success) return $"PASS build in {duration.TotalSeconds:0.0}s ({warnings} warnings) log: {log}";
         var errors = DotnetDiagnostics(output, logPath).Where(item => item.Severity == "error")
-            .Select(item => FormatDiagnostic(item, root)).Distinct(StringComparer.Ordinal).ToArray();
+            .Select(item => FormatDiagnostic(item, root))
+            .Concat(PyCompileDiagnostics(output, root))
+            .Distinct(StringComparer.Ordinal).ToArray();
         var errorCount = errors.Length;
         var lines = errors.Take(10).ToList();
         lines.Insert(0, $"FAIL build — {errorCount} errors ({warnings} warnings)");
@@ -112,6 +114,20 @@ public static class RunSummaryFormatter
         var regex = new Regex(@"^(?<file>.*)\((?<line>\d+),(?<column>\d+)\): (?<severity>warning|error) (?<code>[A-Z]+\d+): (?<message>.*)$", RegexOptions.Multiline);
         foreach (Match match in regex.Matches(output))
             yield return new DiagnosticRecord(match.Groups["severity"].Value, match.Groups["code"].Value, match.Groups["message"].Value, match.Groups["file"].Value, int.Parse(match.Groups["line"].Value), int.Parse(match.Groups["column"].Value), logPath);
+    }
+
+    private static IEnumerable<string> PyCompileDiagnostics(string output, string root)
+    {
+        var fileRegex = new Regex("File\\s+[\\\"'](?<file>[^\\\"']+)[\\\"'],\\s+line\\s+(?<line>\\d+)(?<details>[\\s\\S]*?)(?=File\\s+[\\\"'][^\\\"']+[\\\"'],\\s+line\\s+\\d+|\\z)", RegexOptions.Multiline);
+        var errorRegex = new Regex(@"(?m)^\s*(?<kind>SyntaxError|IndentationError|TabError):\s*(?<message>[^\r\n]+)");
+        foreach (Match match in fileRegex.Matches(output))
+        {
+            var error = errorRegex.Matches(match.Groups["details"].Value).Cast<Match>().LastOrDefault();
+            if (error is null) continue;
+            var file = match.Groups["file"].Value;
+            if (Path.IsPathRooted(file)) file = Path.GetRelativePath(root, file);
+            yield return $"{file}:{match.Groups["line"].Value}: {error.Groups["kind"].Value} {error.Groups["message"].Value.Trim()}";
+        }
     }
 
     private static IEnumerable<DiagnosticRecord> PytestDiagnostics(string output)

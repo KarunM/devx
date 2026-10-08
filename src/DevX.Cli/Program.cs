@@ -86,7 +86,20 @@ static async Task<int> RunAsync(string[] args)
             return await PatchAsync(connectionString, args, format);
 
         case "replace":
-            return ReplaceCommand.Run(args, Environment.CurrentDirectory);
+            {
+                var replaceStore = new SqliteStorageInitializer(connectionString);
+                await replaceStore.InitializeAsync();
+                var replaceSearch = new SearchService(replaceStore, replaceStore);
+                var replaceIndexer = new RepositoryIndexingService(replaceStore);
+                return await ReplaceCommand.RunAsync(args, Environment.CurrentDirectory, root =>
+                {
+                    var runner = new DotnetBuildTestService();
+                    return new VerifyAfterEdit(
+                        file => VerifyAfterEdit.RunBuildAsync(runner, root, file),
+                        files => runner.RunTestsAsync(root, files, TimeSpan.FromSeconds(300)),
+                        file => VerifyAfterEdit.FindRelevantTestFiles(root, file, replaceStore, replaceSearch));
+                }, async file => { await replaceIndexer.ReindexFilesAsync(Environment.CurrentDirectory, [file]); });
+            }
 
         case "health":
             return await HealthAsync(connectionString, args, format);

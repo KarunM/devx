@@ -12,6 +12,8 @@ public sealed class DotnetBuildTestService
     public Task<ExecutionRecord> RunBuildAsync(string root, CancellationToken token = default) => RunBuildAsync(root, null, token);
     public Task<ExecutionRecord> RunBuildAsync(string root, string? selector, CancellationToken token = default)
         => IsDotnetProject(root, selector) ? RunAsync("dotnet", GetBuildArguments(root, selector), root, token) : RunPythonBuildAsync(root, selector, token);
+    public Task<ExecutionRecord> RunPythonCompileAsync(string root, string file, CancellationToken token = default)
+        => RunPythonBuildAsync(root, file, token);
     public Task<ExecutionRecord> RunTestsAsync(string root, CancellationToken token = default) => RunTestsAsync(root, null, token);
     public Task<ExecutionRecord> RunTestsAsync(string root, string? selector, CancellationToken token = default)
         => IsDotnetProject(root, selector) ? RunAsync("dotnet", GetTestArguments(root, selector), root, token, "test") : RunPythonTestsAsync(root, selector, token);

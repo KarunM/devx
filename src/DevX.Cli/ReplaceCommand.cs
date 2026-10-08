@@ -1,18 +1,48 @@
 using DevX.Protocol;
+using DevX.Domain;
+using DevX.Indexer;
+using System.Text.Json;
 
 namespace DevX.Cli;
 
 public static class ReplaceCommand
 {
     public static int Run(string[] args, string root)
+        => RunAsync(args, root).GetAwaiter().GetResult();
+
+    public static async Task<int> RunAsync(string[] args, string root, Func<string, VerifyAfterEdit>? verifierFactory = null, Func<string, Task>? reindexFile = null)
     {
         string? Option(string key) { var i = Array.IndexOf(args, key); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
         if (args.Length < 2 || Option("--old") is null || Option("--new") is null)
-        { Console.Error.WriteLine("Usage: devx replace <file> --old <text> --new <text> [--all | --occurrence <n>]"); return 1; }
+        { Console.Error.WriteLine("Usage: devx replace <file> --old <text> --new <text> [--all | --occurrence <n>] [--verify | --no-verify] [--format json]"); return 1; }
         int? occurrence = int.TryParse(Option("--occurrence"), out var n) ? n : null;
+        var verify = args.Contains("--verify", StringComparer.Ordinal) && !args.Contains("--no-verify", StringComparer.Ordinal);
         var result = new TextReplaceService().Apply(root, args[1], Option("--old")!, Option("--new")!, args.Contains("--all"), occurrence);
-        Console.WriteLine(result.Message);
-        if (result.Diff.Length > 0) Console.WriteLine(result.Diff);
-        return result.Success ? 0 : 1;
+        if (!result.Success) { Console.WriteLine(result.Message); return 1; }
+        if (reindexFile is not null) await reindexFile(args[1]);
+        if (!verify)
+        {
+            Console.WriteLine(result.Message);
+            if (result.Diff.Length > 0) Console.WriteLine(result.Diff);
+            return 0;
+        }
+
+        var service = new DotnetBuildTestService();
+        var verifier = verifierFactory?.Invoke(root) ?? new VerifyAfterEdit(
+            file => VerifyAfterEdit.RunBuildAsync(service, root, file),
+            files => service.RunTestsAsync(root, files, TimeSpan.FromSeconds(300)),
+            file => VerifyAfterEdit.FindRelevantTestFiles(root, file));
+        var verification = await verifier.RunAsync(args[1]);
+        if (Option("--format") == "json")
+        {
+            Console.WriteLine(JsonSerializer.Serialize(new { result.Message, result.Diff, Verify = new { Build = Summary(verification.Build), Tests = verification.Tests is null ? null : Summary(verification.Tests) } }));
+        }
+        else
+        {
+            foreach (var line in VerifyAfterEdit.FormatLines(result.Message, result.Diff, verification)) Console.WriteLine(line);
+        }
+        return verification.Build.Success && (verification.Tests?.Success ?? true) ? 0 : 1;
     }
+
+    private static object Summary(ExecutionRecord record) => new { record.Success, record.Summary, record.Diagnostics };
 }

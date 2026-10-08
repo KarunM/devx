@@ -43,6 +43,15 @@ public sealed class RunSummaryFormatterTests
     }
 
     [Fact]
+    public void FormatBuild_PyCompileSyntaxErrorIncludesRelativePathLineAndMessage()
+    {
+        const string output = "  File \"mod.py\", line 2\n    return (n.strip(\n                   ^\nSyntaxError: '(' was never closed";
+        var summary = RunSummaryFormatter.FormatBuild(output, false, TimeSpan.FromSeconds(1), "/repo/run.log", "/repo");
+        Assert.Contains("FAIL build — 1 errors (0 warnings)", summary);
+        Assert.Contains("mod.py:2: SyntaxError '(' was never closed", summary);
+    }
+
+    [Fact]
     public void FormatTests_DotnetFailureIncludesCountsNamesAssertionsAndLog()
     {
         var output = "Failed: 2, Passed: 3, Skipped: 0, Total: 5\nFailed Sample.One [FAIL]\nError Message:\nAssert.Equal() Failure: expected 1, actual 2\nFailed Sample.Two [FAIL]\nError Message:\nAssert.True() Failure: false";
