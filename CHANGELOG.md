@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.4
+
+- `devx patch` supports text replacement (`ReplaceText`, alias `TextReplace`) with `--occurrence` and `--all`
+- `devx test` accepts `--filter`, resolves directories inside .NET test projects, never labels .NET runs as pytest, always prints a result, and fails when a filter matches no tests
+
 ## 1.6.3
 
 - C# types declared in the global namespace are now indexed
