@@ -362,6 +362,36 @@ public sealed class ProtocolEngine : IProtocolEngine
             ? Fail("UnsupportedLanguage", $"Call graph queries are not supported for Python symbol '{query}'.")
             : null;
 
+    /// <summary>
+    /// A bare "Build failed." / "Tests failed." is what sent the LG1 agent to grep: the run had
+    /// already parsed the file, the line and the message, and then threw them away in the error.
+    /// The first few are rendered in the same `path:line: message` form the CLI summary uses,
+    /// and the full list stays in the log path the execution record carries.
+    /// </summary>
+    private static string CompactFailure(string verb, ExecutionRecord execution, string root)
+    {
+        var lines = execution.Diagnostics
+            .Where(diagnostic => !string.IsNullOrWhiteSpace(diagnostic.Message))
+            .Take(5)
+            .Select(diagnostic => CompactDiagnostic(diagnostic, root))
+            .ToList();
+        if (lines.Count == 0)
+        {
+            return string.IsNullOrWhiteSpace(execution.Summary) ? $"{verb} failed." : execution.Summary;
+        }
+        return $"{verb} failed:" + Environment.NewLine + string.Join(Environment.NewLine, lines);
+    }
+
+    private static string CompactDiagnostic(DiagnosticRecord diagnostic, string root)
+    {
+        var file = diagnostic.File;
+        if (!string.IsNullOrWhiteSpace(file) && Path.IsPathRooted(file)) file = Path.GetRelativePath(root, file);
+        var message = diagnostic.Message.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return string.IsNullOrWhiteSpace(file)
+            ? $"{diagnostic.Code}: {message}"
+            : $"{file}:{diagnostic.Line ?? 0}: {diagnostic.Code} {message}";
+    }
+
     private async Task<ProtocolResponse> HandleRunBuildAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
     {
         var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
@@ -384,7 +414,7 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var response = new ValidationExecutionResponse("build", resolution.Context, resolution.SelectedTarget, execution);
-        return new ProtocolResponse(execution.Success, JsonSerializer.SerializeToElement(response), [], execution.Success ? [] : [new ProtocolError("ValidationError", "Build failed.")]);
+        return new ProtocolResponse(execution.Success, JsonSerializer.SerializeToElement(response), [], execution.Success ? [] : [new ProtocolError("ValidationError", CompactFailure("Build", execution, root))]);
     }
 
     private async Task<ProtocolResponse> HandleRunTestsAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
@@ -416,7 +446,7 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var response = new ValidationExecutionResponse("test", resolution.Context, resolution.SelectedTarget, execution);
-        return new ProtocolResponse(execution.Success, JsonSerializer.SerializeToElement(response), [], execution.Success ? [] : [new ProtocolError("ValidationError", "Tests failed.")]);
+        return new ProtocolResponse(execution.Success, JsonSerializer.SerializeToElement(response), [], execution.Success ? [] : [new ProtocolError("ValidationError", CompactFailure("Tests", execution, root))]);
     }
 
     private async Task<ProtocolResponse> HandleGetDiagnosticsAsync(SessionState session, CancellationToken cancellationToken)
@@ -559,7 +589,14 @@ public sealed class ProtocolEngine : IProtocolEngine
                     // A dotted miss still has to hand back names the caller can paste. LG1 was
                     // told only "not in this workspace" and left the tool for grep; the index
                     // can always answer for the last segment, which is one prefix shorter.
-                    return await NotFoundWithSuggestionsAsync("Symbol", query, cancellationToken);
+                    // The workspace fact is still worth saying -- it is how a caller knows the
+                    // name belongs to a different checkout rather than being misspelled -- so
+                    // it is kept and the pasteable names are added to it.
+                    return await NotFoundWithSuggestionsAsync(
+                        "Symbol",
+                        query,
+                        cancellationToken,
+                        $"Symbol '{query}' is not in this workspace: {root}.");
                 }
             }
         }
@@ -840,7 +877,11 @@ public sealed class ProtocolEngine : IProtocolEngine
     private static ProtocolResponse Fail(string code, string message, string? attemptedName = null, IEnumerable<string>? suggestions = null)
         => new(false, null, [], [new ProtocolError(code, message, attemptedName, suggestions?.Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToList())]);
 
-    private async Task<ProtocolResponse> NotFoundWithSuggestionsAsync(string kind, string query, CancellationToken cancellationToken)
+    private async Task<ProtocolResponse> NotFoundWithSuggestionsAsync(
+        string kind,
+        string query,
+        CancellationToken cancellationToken,
+        string? message = null)
     {
         var suggestions = await ClosestNamesAsync(query, cancellationToken);
         // A dotted miss is usually one prefix too long -- a Python module path pasted back
@@ -854,7 +895,7 @@ public sealed class ProtocolEngine : IProtocolEngine
         // built from the raw names and was printing the same suggestion twice.
         suggestions = suggestions.Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToList();
         var suffix = suggestions.Count == 0 ? string.Empty : $" Did you mean: {string.Join(", ", suggestions)}?";
-        return Fail("NotFound", $"{kind} '{query}' was not found.{suffix}", query, suggestions);
+        return Fail("NotFound", (message ?? $"{kind} '{query}' was not found.") + suffix, query, suggestions);
     }
 
     private async Task<List<string>> ClosestNamesAsync(string query, CancellationToken cancellationToken)

@@ -280,7 +280,9 @@ public sealed class McpReferenceServerIntegrationTests
     public async Task CallToolAsync_IndexWithoutFilesIndexesWholeRepository()
     {
         var (server, session, _) = await CreateServerAsync("devx-mcp-whole-index", indexRepository: false);
-        var indexed = await server.CallToolAsync("index", JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString() }));
+        // format:json is the only way to get the envelope now; without it every tool answers
+        // the compact agent text. The payload shape is what this test is about.
+        var indexed = await server.CallToolAsync("index", JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString(), format = "json" }));
 
         Assert.False(indexed.IsError);
         Assert.True(indexed.Content.GetProperty("filesIndexed").GetInt32() > 0);
@@ -310,7 +312,8 @@ public sealed class McpReferenceServerIntegrationTests
         var result = await server.CallToolAsync("index", JsonSerializer.SerializeToElement(new
         {
             sessionId = session.Id.Value.ToString(),
-            files = new[] { "src/Sample/Added.cs" }
+            files = new[] { "src/Sample/Added.cs" },
+            format = "json"
         }));
 
         Assert.False(result.IsError);
@@ -320,7 +323,8 @@ public sealed class McpReferenceServerIntegrationTests
         {
             sessionId = session.Id.Value.ToString(),
             kind = "symbol",
-            query = "AddedByMcp"
+            query = "AddedByMcp",
+            format = "json"
         }));
         Assert.True(search.Content.GetProperty("success").GetBoolean());
         Assert.Contains("AddedByMcp", search.Content.GetRawText());
@@ -348,7 +352,8 @@ public sealed class McpReferenceServerIntegrationTests
         var validate = await server.CallToolAsync("patch.validate", JsonSerializer.SerializeToElement(new
         {
             sessionId = session.Id.Value.ToString(),
-            patch
+            patch,
+            format = "json"
         }));
 
         Assert.False(validate.IsError);
@@ -357,7 +362,8 @@ public sealed class McpReferenceServerIntegrationTests
         var apply = await server.CallToolAsync("patch.apply", JsonSerializer.SerializeToElement(new
         {
             sessionId = session.Id.Value.ToString(),
-            patch
+            patch,
+            format = "json"
         }));
 
         Assert.False(apply.IsError);
@@ -366,7 +372,8 @@ public sealed class McpReferenceServerIntegrationTests
 
         var report = await server.CallToolAsync("report", JsonSerializer.SerializeToElement(new
         {
-            sessionId = session.Id.Value.ToString()
+            sessionId = session.Id.Value.ToString(),
+            format = "json"
         }));
 
         Assert.False(report.IsError);

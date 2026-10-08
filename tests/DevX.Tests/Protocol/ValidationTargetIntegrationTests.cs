@@ -76,7 +76,12 @@ public sealed class ValidationTargetIntegrationTests
 
         Assert.False(response.Success);
         Assert.Contains(response.Errors, error => error.Code == "ValidationError");
-        Assert.Contains(response.Errors, error => error.Message.Contains("No runtime target matched", StringComparison.OrdinalIgnoreCase));
+        // The message has to say what was found and what to do about it: an agent told only
+        // that nothing matched has nothing to act on, and leaves the tool.
+        Assert.Contains(response.Errors, error => error.Message.Contains("No runtime target to run", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(response.Errors, error => error.Message.Contains(".devx/config.json", StringComparison.Ordinal));
+        // ... and what it did find, so the caller can see its selector was the wrong part.
+        Assert.Contains(response.Errors, error => error.Message.Contains("GoodApp", StringComparison.Ordinal));
     }
 
     private static async Task<(ProtocolEngine Engine, SessionState Session, string RepositoryRoot)> CreateEngineAsync(string prefix)

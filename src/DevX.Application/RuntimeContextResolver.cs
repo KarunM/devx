@@ -119,12 +119,18 @@ public sealed class RuntimeContextResolver
         var materialized = candidates.ToArray();
         if (materialized.Length == 0)
         {
+            // The old wording named neither what DevX looked for nor what to do about it, so an
+            // agent on a Django checkout was told its target did not match and had nothing to
+            // act on. Naming the config key is the actionable half.
+            var found = discovery.Targets.Count == 0
+                ? "no .sln, .csproj, package.json or Python project was found"
+                : $"found {string.Join(", ", discovery.Targets.Select(target => $"{target.RuntimeKind}:{target.ProjectPath}"))}, none of which matched the runtime/project selection";
             return new RuntimeContextResolution(
                 false,
                 null,
                 null,
                 null,
-                ["No runtime target matched the requested runtime/project selection."],
+                [$"No runtime target to run: {found}. Declare what to run in .devx/config.json -- for example {{\"test\": {{\"command\": \"python\", \"args\": [\"tests/runtests.py\", \"{{target}}\"]}}}} -- or pass an explicit runtime/target."],
                 discovery.Targets);
         }
 

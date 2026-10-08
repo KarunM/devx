@@ -10,13 +10,18 @@ namespace DevX.Indexer;
 public sealed class DotnetBuildTestService
 {
     public Task<ExecutionRecord> RunBuildAsync(string root, CancellationToken token = default) => RunBuildAsync(root, null, token);
+    // The repository's own answer, when it has one, beats DevX's guess about how it is built.
     public Task<ExecutionRecord> RunBuildAsync(string root, string? selector, CancellationToken token = default)
-        => IsDotnetProject(root, selector) ? RunAsync("dotnet", GetBuildArguments(root, selector), root, token) : RunPythonBuildAsync(root, selector, token);
+        => DevXCommandConfig.TryRead(root, "build") is { } configured
+            ? RunConfiguredAsync(root, configured, selector, Timeout.InfiniteTimeSpan, token, "build")
+            : IsDotnetProject(root, selector) ? RunAsync("dotnet", GetBuildArguments(root, selector), root, token) : RunPythonBuildAsync(root, selector, token);
     public Task<ExecutionRecord> RunPythonCompileAsync(string root, string file, CancellationToken token = default)
         => RunPythonBuildAsync(root, file, token);
     public Task<ExecutionRecord> RunTestsAsync(string root, CancellationToken token = default) => RunTestsAsync(root, null, token);
     public Task<ExecutionRecord> RunTestsAsync(string root, string? selector, CancellationToken token = default)
-        => IsDotnetProject(root, selector) ? RunAsync("dotnet", GetTestArguments(root, selector), root, token, "test") : RunPythonTestsAsync(root, selector, token);
+        => DevXCommandConfig.TryRead(root, "test") is { } configured
+            ? RunConfiguredAsync(root, configured, selector, Timeout.InfiniteTimeSpan, token, "test")
+            : IsDotnetProject(root, selector) ? RunAsync("dotnet", GetTestArguments(root, selector), root, token, "test") : RunPythonTestsAsync(root, selector, token);
 
     public async Task<ExecutionRecord> RunTestsAsync(
         string root,
@@ -27,6 +32,20 @@ public sealed class DotnetBuildTestService
     {
         if (selectors.Count == 0)
         {
+            if (DevXCommandConfig.TryRead(root, "test") is { } configured)
+            {
+                return await RunConfiguredAsync(root, configured, null, timeout, token, "test");
+            }
+
+            // Django's suite is not a pytest suite. It is `tests/runtests.py`, optionally with
+            // a dotted label, and running pytest at the root of a Django checkout collects
+            // nothing and reports it as a pass -- which is how the LG1 agent ended up with
+            // "0 failed of 0" and then installing pytest to make the tool agree with it.
+            if (DjangoTestScript(root) is { } runtests)
+            {
+                return await RunWithTimeoutAsync(PythonExecutable(root), $"\"{runtests}\"", root, timeout, token, "test");
+            }
+
             return await RunWithTimeoutAsync(
                 IsDotnetProject(root, null) ? "dotnet" : PythonExecutable(root),
                 IsDotnetProject(root, null) ? AddTestFilter(GetTestArguments(root, null), filter) : "-m pytest",
@@ -45,7 +64,20 @@ public sealed class DotnetBuildTestService
             }
 
             var path = NormalizeSelector(root, selector);
-            if (path.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
+            // A selector that names something on disk is a path; anything else is a runner
+            // label -- `queries.tests.QueriesTests` for Django, a class name for pytest. A
+            // label is only meaningful to the runner that understands it, so it is handed to
+            // the configured command or to runtests.py rather than to `dotnet test`.
+            var label = File.Exists(path) || Directory.Exists(path) ? null : selector;
+            if (selectors.Count == 1 && label is not null && DevXCommandConfig.TryRead(root, "test") is { } configured)
+            {
+                executions.Add(await RunConfiguredAsync(root, configured, label, remaining, token, "test"));
+            }
+            else if (selectors.Count == 1 && label is not null && DjangoTestScript(root) is { } runtests)
+            {
+                executions.Add(await RunWithTimeoutAsync(PythonExecutable(root), $"\"{runtests}\" \"{label}\"", root, remaining, token, "test"));
+            }
+            else if (path.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
             {
                 if (IsStandaloneCheckScript(root, path))
                 {
@@ -176,18 +208,54 @@ public sealed class DotnetBuildTestService
         return !LooksLikePytest(normalizedPath);
     }
 
-    public static ProcessStartInfo CreateProcessStartInfo(string fileName, string arguments, string root)
+    public static ProcessStartInfo CreateProcessStartInfo(
+        string fileName,
+        string arguments,
+        string root,
+        string? workingDirectory = null,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var info = new ProcessStartInfo(fileName, arguments)
         {
-            WorkingDirectory = root,
+            WorkingDirectory = workingDirectory ?? root,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
         };
         foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
             if (entry.Key is string key && entry.Value is string value) info.Environment[key] = value;
+        if (environment is not null)
+            foreach (var pair in environment) info.Environment[pair.Key] = pair.Value;
         return info;
+    }
+
+    /// <summary>
+    /// Only a command that names a path can be checked cheaply: a bare name is looked up on
+    /// PATH by the OS, and guessing at PATH here would refuse commands that work.
+    /// </summary>
+    private static bool IsMissingExecutable(string fileName, string workingDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(fileName)) return true;
+        if (!fileName.Contains('/') && !fileName.Contains(Path.DirectorySeparatorChar) && !fileName.Contains(Path.AltDirectorySeparatorChar)) return false;
+        var resolved = Path.IsPathRooted(fileName) ? fileName : Path.Combine(workingDirectory, fileName);
+        return !File.Exists(resolved);
+    }
+
+    /// <summary>
+    /// Django's suite lives behind `tests/runtests.py`; there is no pytest entry point and no
+    /// project file, so the other runners find nothing and report success on an empty run.
+    /// </summary>
+    internal static string? DjangoTestScript(string root)
+    {
+        foreach (var candidate in new[]
+        {
+            Path.Combine(root, "tests", "runtests.py"),
+            Path.Combine(root, "runtests.py")
+        })
+        {
+            if (File.Exists(candidate)) return candidate;
+        }
+        return null;
     }
 
     private static bool LooksLikePytestTestFile(string path)
@@ -253,14 +321,63 @@ public sealed class DotnetBuildTestService
 
     private static Task<ExecutionRecord> RunPythonBuildAsync(string root, string? selector, CancellationToken token)
     {
-        var files = PythonFiles(root, selector);
-        var args = files.Count == 0 ? "-m compileall -q ." : "-m py_compile " + string.Join(' ', files.Select(path => $"\"{path}\""));
+        // py_compile takes one path per argument, so passing the repository's files joins
+        // thousands of paths onto a single command line: on a real project that overflows
+        // ARG_MAX and the build fails with "Argument list too long" instead of the syntax
+        // error the caller asked about. A whole-repo build is one compileall process, with
+        // the vendored trees excluded so a dependency's broken file is not reported as yours.
+        var args = string.IsNullOrWhiteSpace(selector)
+            ? "-m compileall -q -x \"(^|[/\\\\])(\\.?venv|node_modules|site-packages|__pycache__|build|dist|eggs)([/\\\\]|$)\" ."
+            : "-m py_compile " + string.Join(' ', PythonFiles(root, selector).Take(200).Select(path => $"\"{path}\""));
         return RunAsync(PythonExecutable(root), args, root, token, "build");
+    }
+
+    /// <summary>
+    /// Runs a command the repository declared in `.devx/config.json`. The command is the
+    /// repository's own, so it is trusted to run -- but not trusted to install: DevX changes
+    /// nothing about the environment it is measuring, and an install it performed silently
+    /// would make its own test result meaningless.
+    /// </summary>
+    private static Task<ExecutionRecord> RunConfiguredAsync(
+        string root,
+        DevXCommandConfig config,
+        string? target,
+        TimeSpan timeout,
+        CancellationToken token,
+        string runtime)
+    {
+        var line = config.Render(target);
+        if (PackageInstallGuard.IsInstall(line))
+        {
+            var log = SaveFullLog(root, string.Empty);
+            return Task.FromResult(new ExecutionRecord(line, false, log,
+                [new DiagnosticRecord("error", "PACKAGE_INSTALL",
+                    $"Refused to run a package install from {DevXCommandConfig.RelativePath}: {line}. DevX never installs packages -- install the dependency yourself and run again.",
+                    null, null, null, log)],
+                $"FAIL {runtime} — refused a package install: {line}"));
+        }
+
+        var (fileName, arguments) = config.BuildCommandLine(target);
+        return RunWithTimeoutAsync(fileName, arguments, root, timeout, token, runtime, config.WorkingDirectoryFor(root), config.Environment);
     }
 
     private static Task<ExecutionRecord> RunPythonTestsAsync(string root, string? selector, CancellationToken token)
     {
+        // Django's suite is not a pytest suite: pytest at the root of a Django checkout
+        // collects nothing and reports it as a pass, which is how an agent ends up with
+        // "0 failed of 0" and no idea whether the code it changed works.
+        if (DjangoTestScript(root) is { } runtests && !string.IsNullOrWhiteSpace(selector) && !File.Exists(NormalizeSelector(root, selector)))
+        {
+            return RunAsync(PythonExecutable(root), $"\"{runtests}\" \"{selector}\"", root, token, "test");
+        }
+
         var target = string.IsNullOrWhiteSpace(selector) ? "" : $" \"{NormalizeSelector(root, selector)}\"";
+        if (DjangoTestScript(root) is { } suite && string.IsNullOrWhiteSpace(selector))
+        {
+            // The whole suite is long and has no natural end, so it gets the same 300 s budget
+            // the protocol layer gives any other test run rather than running unbounded.
+            return RunWithTimeoutAsync(PythonExecutable(root), $"\"{suite}\"", root, TimeSpan.FromSeconds(300), token, "test");
+        }
         return RunAsync(PythonExecutable(root), $"-m pytest{target}", root, token, "test");
     }
 
@@ -286,11 +403,41 @@ public sealed class DotnetBuildTestService
     private static async Task<ExecutionRecord> RunAsync(string fileName, string arguments, string root, CancellationToken token, string? runtime = null)
         => await RunWithTimeoutAsync(fileName, arguments, root, Timeout.InfiniteTimeSpan, token, runtime);
 
-    private static async Task<ExecutionRecord> RunWithTimeoutAsync(string fileName, string arguments, string root, TimeSpan timeout, CancellationToken token, string? runtime = null)
+    private static async Task<ExecutionRecord> RunWithTimeoutAsync(
+        string fileName,
+        string arguments,
+        string root,
+        TimeSpan timeout,
+        CancellationToken token,
+        string? runtime = null,
+        string? workingDirectory = null,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var timer = Stopwatch.StartNew();
-        var info = CreateProcessStartInfo(fileName, arguments, root);
-        using var process = Process.Start(info) ?? throw new InvalidOperationException("Failed to start process.");
+        // A configured command that names a path which is not there has to fail as a result,
+        // not as an exception from inside DevX: the caller's config is what is wrong.
+        if (IsMissingExecutable(fileName, workingDirectory ?? root))
+        {
+            var startLog = SaveFullLog(root, string.Empty);
+            return new ExecutionRecord($"{fileName} {arguments}", false, startLog,
+                [new DiagnosticRecord("error", "START_FAILED", $"Command not found: {fileName} (checked relative to {workingDirectory ?? root}).", null, null, null, startLog)],
+                $"FAIL {runtime ?? "run"} — command not found: {fileName}");
+        }
+
+        var info = CreateProcessStartInfo(fileName, arguments, root, workingDirectory, environment);
+        Process process;
+        try
+        {
+            process = Process.Start(info) ?? throw new InvalidOperationException("Failed to start process.");
+        }
+        catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            var startLog = SaveFullLog(root, string.Empty);
+            return new ExecutionRecord($"{fileName} {arguments}", false, startLog,
+                [new DiagnosticRecord("error", "START_FAILED", $"{fileName}: {exception.Message}", null, null, null, startLog)],
+                $"FAIL {runtime ?? "run"} — could not start '{fileName}': {exception.Message}");
+        }
+        using var owned = process;
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(token);
