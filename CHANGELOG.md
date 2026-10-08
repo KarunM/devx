@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.7
+
+The lean output is now the default, not a flag the caller has to know about.
+
+- When stdout is not a terminal -- a pipe, a redirect, a benchmark harness -- the CLI now defaults to the agent format. Passing the flag was the whole gap: `devx search Async` returned 110,795 bytes in the old default against 926 in agent format, and the benchmark arm calls the CLI without `--format`, so it never saw the lean output
+- A known agent marker in the environment (`CODEX_*`, `CLAUDE*`, `CURSOR_*`, `AIDER_*`, `AGENT`, `AI_AGENT`) also selects the agent format, for harnesses that allocate a pty and would otherwise look interactive
+- An explicit `--format json`, `--format text` or `--format agent` always wins, byte-identical to 1.6.6
+- `devx --help --agent` documents the rule
+
 ## 1.6.6
 
 Fewer calls per task: search answers with less padding, a one-hit search also returns the source, and the errors that used to dead-end an agent now name the fix.

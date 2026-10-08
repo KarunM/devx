@@ -4,6 +4,7 @@ using DevX.Indexer;
 using DevX.Infrastructure.Storage.SQLite;
 using DevX.Protocol;
 using Microsoft.Data.Sqlite;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using Xunit;
@@ -19,7 +20,10 @@ public sealed class CliCommandTests
 {
     private static readonly SemaphoreSlim ProcessStateLock = new(1, 1);
     [Theory]
-    [InlineData("--version", 0, "1.6.5")]
+    // The version itself is asserted in Version_ReportsTheCliAssemblysVersion rather than
+    // here: a hardcoded "1.6.5" left this suite red for the whole 1.6.6 release, and would
+    // do the same for every release after it.
+    [InlineData("--version", 0, "")]
     [InlineData("--help", 0, "1. devx search <name>")]
     [InlineData("unknown-command", 1, "Unknown command")]
     [InlineData("index", 1, "Missing repository path")]
@@ -75,6 +79,36 @@ public sealed class CliCommandTests
             Console.SetError(originalError);
             Environment.CurrentDirectory = originalDirectory;
             Directory.Delete(root, recursive: true);
+            ProcessStateLock.Release();
+        }
+    }
+
+    [Fact]
+    public async Task Version_ReportsTheCliAssemblysVersion()
+    {
+        // Reads the expected value from the assembly instead of hardcoding it: the literal
+        // "1.6.5" sat here through the whole 1.6.6 release and left the suite red, which is
+        // how a real regression hides. Whatever the csproj says, this test now agrees.
+        var expected = typeof(ArtifactCommand).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(ArtifactCommand).Assembly.GetName().Version?.ToString()
+            ?? "unknown";
+        Assert.Matches(@"^\d+\.\d+\.\d+", expected);
+
+        await ProcessStateLock.WaitAsync();
+        var originalOut = Console.Out;
+        var stdout = new StringWriter();
+        try
+        {
+            Console.SetOut(stdout);
+            var entryPoint = typeof(ArtifactCommand).Assembly.EntryPoint!;
+            var invocation = entryPoint.Invoke(null, [new[] { "--version" }]);
+            if (invocation is Task<int> task) await task;
+            Assert.Equal(expected, stdout.ToString().Trim());
+        }
+        finally
+        {
+            Console.SetOut(originalOut);
             ProcessStateLock.Release();
         }
     }

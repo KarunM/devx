@@ -47,7 +47,7 @@ static async Task<int> RunAsync(string[] args)
         await EnsureAutomaticIndexAsync();
     }
 
-    var format = GetOption(args, "--format") ?? "text";
+    var format = ResolveFormat(args);
     var command = args[0];
     var databasePath = ResolveDatabasePath();
     var connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
@@ -211,7 +211,8 @@ static int Levenshtein(string a, string b)
 // Deliberately <= 10 lines: this is the whole point of it existing next to PrintHelp.
 static void PrintAgentHelp()
 {
-    Console.WriteLine("devx --agent cheat sheet (add --session <id> and --format agent)");
+    Console.WriteLine("devx --agent cheat sheet (add --session <id>; piped output is already agent format)");
+    Console.WriteLine("  --format json still gives the full JSON shape; --format text gives the human text");
     Console.WriteLine("  devx index .                      index the repo (or: index update <files>)");
     Console.WriteLine("  devx search symbol <name>         find it; one hit returns its source too");
     Console.WriteLine("  devx search text <literal>        literal text search");
@@ -2120,6 +2121,9 @@ static string? GetPatchPath(string[] args)
 
     return null;
 }
+
+static string ResolveFormat(string[] args)
+    => OutputFormat.Resolve(GetOption(args, "--format"), OutputFormat.LooksLikeAnAgent());
 
 static void WriteResponse(ProtocolResponse response, string format)
 {

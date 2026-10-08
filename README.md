@@ -32,6 +32,12 @@ devx search text "TODO" --session <session-id>
 
 Create a session with `devx session create --format json`, then pass its ID to session-scoped commands.
 
+### Output format
+
+When stdout is not a terminal -- a pipe, a redirect, an agent harness -- commands default to the lean **agent format**: one line per hit, capped at 10 with a `... N more` line, and a one-hit symbol search also returns that hit's source. The same default applies when a known agent marker is in the environment (`CODEX_*`, `CLAUDE*`, `CURSOR_*`, `AIDER_*`, `AGENT`, `AI_AGENT`), which covers harnesses that allocate a pty.
+
+An explicit `--format` always wins: `--format json` for the full structured response, `--format text` for the human text, `--format agent` to force the lean form on a terminal.
+
 ## Editing
 
 Use `devx replace` for simple text edits (`--verify` enables build/test verification; `--no-verify` disables it). Use `devx patch` for structured or multi-file edits. MCP `edit.replace` verifies edits by default and accepts `verify:false` to skip verification. A build failure keeps the edit in place; the agent decides whether to fix forward or revert it.
