@@ -42,6 +42,32 @@ public static class RunSummaryFormatter
         return string.Join(Environment.NewLine, lines);
     }
 
+    public static string FormatScript(string output, int exitCode, TimeSpan duration, string logPath, string root)
+    {
+        var log = RelativeLog(logPath, root);
+        var lastLine = output.Split('\n').Select(line => line.Trim()).LastOrDefault(line => line.Length > 0) ?? string.Empty;
+        var checks = Regex.Match(lastLine, @"^(?<passed>\d+)\s*/\s*(?<total>\d+)\s+checks?\s+passed$", RegexOptions.IgnoreCase);
+        if (exitCode == 0)
+        {
+            return checks.Success
+                ? $"PASS {checks.Groups["passed"].Value}/{checks.Groups["total"].Value} checks in {duration.TotalSeconds:0.0}s log: {log}"
+                : $"PASS script in {duration.TotalSeconds:0.0}s log: {log}";
+        }
+
+        if (checks.Success)
+        {
+            var passed = int.Parse(checks.Groups["passed"].Value);
+            var total = int.Parse(checks.Groups["total"].Value);
+            var lines = new List<string> { $"FAIL checks — {Math.Max(0, total - passed)} failed of {total} in {duration.TotalSeconds:0.0}s" };
+            lines.AddRange(output.Split('\n').Select(line => line.Trim()).Where(line => line.Contains("FAIL", StringComparison.Ordinal)).Take(10).Select(Trim));
+            lines.Add($"log: {log}");
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        var crashLines = output.Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0).TakeLast(5).Select(Trim);
+        return string.Join(Environment.NewLine, new[] { $"FAIL script — exit code {exitCode}" }.Concat(crashLines).Append($"log: {log}"));
+    }
+
     public static int CountWarnings(string output)
     {
         var dotnetWarnings = Regex.Matches(output, @"(?m)^.*\bwarning\s+[A-Z]+\d+\b.*$").Select(match => match.Value.Trim()).Distinct(StringComparer.Ordinal).Count();

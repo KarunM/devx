@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Collections;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using DevX.Domain;
 using File = System.IO.File;
@@ -43,7 +45,12 @@ public sealed class DotnetBuildTestService
             var path = NormalizeSelector(root, selector);
             if (path.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
             {
-                if (selectors.Count == 1 && LooksLikePytestTestFile(path))
+                if (IsStandaloneCheckScript(root, path))
+                {
+                    var command = BuildPythonScriptTestCommand(root, path);
+                    executions.Add(await RunWithTimeoutAsync(command.FileName, command.Arguments, root, remaining, token, "check"));
+                }
+                else if (selectors.Count == 1 && LooksLikePytestTestFile(path))
                 {
                     var command = BuildPythonFileTestCommand(root, path);
                     executions.Add(await RunWithTimeoutAsync(command.FileName, command.Arguments, root, remaining, token, "test"));
@@ -136,6 +143,51 @@ public sealed class DotnetBuildTestService
         return (PythonExecutable(root), $"-m pytest \"{file}\"");
     }
 
+    public static (string FileName, string Arguments) BuildPythonScriptTestCommand(string root, string path)
+    {
+        var file = Path.GetFullPath(NormalizeSelector(root, path));
+        return (PythonExecutable(root), $"\"{file}\"");
+    }
+
+    public static bool IsStandaloneCheckScript(string root, string path)
+    {
+        var normalizedPath = Path.GetFullPath(NormalizeSelector(root, path));
+        var configPath = Path.Combine(root, ".devx", "config.json");
+        if (File.Exists(configPath))
+        {
+            try
+            {
+                using var config = JsonDocument.Parse(File.ReadAllText(configPath));
+                if (config.RootElement.ValueKind == JsonValueKind.Object
+                    && config.RootElement.TryGetProperty("testScriptPattern", out var patternElement)
+                    && patternElement.ValueKind == JsonValueKind.String
+                    && !string.IsNullOrWhiteSpace(patternElement.GetString()))
+                {
+                    var pattern = patternElement.GetString()!;
+                    var relativePath = Path.GetRelativePath(root, normalizedPath);
+                    if (Regex.IsMatch(relativePath, pattern) || Regex.IsMatch(normalizedPath, pattern)) return true;
+                }
+            }
+            catch (JsonException) { }
+            catch (ArgumentException) { }
+        }
+        return !LooksLikePytest(normalizedPath);
+    }
+
+    public static ProcessStartInfo CreateProcessStartInfo(string fileName, string arguments, string root)
+    {
+        var info = new ProcessStartInfo(fileName, arguments)
+        {
+            WorkingDirectory = root,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
+            if (entry.Key is string key && entry.Value is string value) info.Environment[key] = value;
+        return info;
+    }
+
     private static bool LooksLikePytestTestFile(string path)
         => Path.GetFileName(path).StartsWith("test_", StringComparison.OrdinalIgnoreCase)
             || Path.GetFileName(path).EndsWith("_test.py", StringComparison.OrdinalIgnoreCase)
@@ -189,7 +241,13 @@ public sealed class DotnetBuildTestService
     }
 
     private static string NormalizeSelector(string root, string selector) => Path.IsPathRooted(selector) ? selector : Path.Combine(root, selector);
-    private static string PythonExecutable(string root) => File.Exists(Path.Combine(root, ".venv", "bin", "python")) ? Path.Combine(root, ".venv", "bin", "python") : "python3";
+    private static string PythonExecutable(string root)
+    {
+        var dotVenvPython = Path.Combine(root, ".venv", "bin", "python");
+        if (File.Exists(dotVenvPython)) return dotVenvPython;
+        var venvPython = Path.Combine(root, "venv", "bin", "python");
+        return File.Exists(venvPython) ? venvPython : "python3";
+    }
 
     private static Task<ExecutionRecord> RunPythonBuildAsync(string root, string? selector, CancellationToken token)
     {
@@ -210,7 +268,7 @@ public sealed class DotnetBuildTestService
         var source = File.ReadAllText(path);
         return Regex.IsMatch(source, @"(?m)^\s*(?:async\s+)?def\s+test_[A-Za-z0-9_]*\s*\(")
             || Regex.IsMatch(source, @"(?m)^\s*class\s+Test[A-Za-z0-9_]*\b")
-            || source.Contains("import pytest", StringComparison.Ordinal);
+            || Regex.IsMatch(source, @"(?m)^\s*(?:import\s+pytest\b|from\s+pytest\b)");
     }
 
     private static IReadOnlyList<string> PythonFiles(string root, string? selector)
@@ -229,7 +287,7 @@ public sealed class DotnetBuildTestService
     private static async Task<ExecutionRecord> RunWithTimeoutAsync(string fileName, string arguments, string root, TimeSpan timeout, CancellationToken token, string? runtime = null)
     {
         var timer = Stopwatch.StartNew();
-        var info = new ProcessStartInfo(fileName, arguments) { WorkingDirectory = root, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+        var info = CreateProcessStartInfo(fileName, arguments, root);
         using var process = Process.Start(info) ?? throw new InvalidOperationException("Failed to start process.");
         var outputTask = process.StandardOutput.ReadToEndAsync();
         var errorTask = process.StandardError.ReadToEndAsync();
@@ -269,18 +327,18 @@ public sealed class DotnetBuildTestService
             var summary = runtime == "test"
                 ? RunSummaryFormatter.FormatTests(combined, true, timer.Elapsed, successLogPath, root)
                 : runtime == "check"
-                    ? FormatRunnerSummary(combined, runtime, timer.Elapsed) + $" log: {Path.GetRelativePath(root, successLogPath)}"
+                    ? RunSummaryFormatter.FormatScript(combined, process.ExitCode, timer.Elapsed, successLogPath, root)
                     : RunSummaryFormatter.FormatBuild(combined, true, timer.Elapsed, successLogPath, root);
             return new ExecutionRecord(arguments, true, successLogPath, [], summary);
         }
         var logPath = SaveFullLog(root, combined);
-        var all = ParseDiagnostics(combined, logPath, runtime == "test" && fileName == "dotnet" ? "dotnet-test" : runtime);
+        IReadOnlyList<DiagnosticRecord> all = runtime == "check" ? Array.Empty<DiagnosticRecord>() : ParseDiagnostics(combined, logPath, runtime == "test" && fileName == "dotnet" ? "dotnet-test" : runtime);
         var diagnostics = all.Take(10).ToList();
         if (all.Count > diagnostics.Count) diagnostics.Add(new DiagnosticRecord("error", "MORE", $"(+{all.Count - diagnostics.Count} more)", null, null, null, logPath));
         var failureSummary = runtime == "test"
             ? RunSummaryFormatter.FormatTests(combined, false, timer.Elapsed, logPath, root)
             : runtime == "check"
-                ? string.Empty
+                ? RunSummaryFormatter.FormatScript(combined, process.ExitCode, timer.Elapsed, logPath, root)
                 : RunSummaryFormatter.FormatBuild(combined, false, timer.Elapsed, logPath, root);
         return new ExecutionRecord(arguments, false, logPath, diagnostics, failureSummary);
     }

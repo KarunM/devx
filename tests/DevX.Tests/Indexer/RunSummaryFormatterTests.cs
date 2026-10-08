@@ -80,4 +80,37 @@ public sealed class RunSummaryFormatterTests
         Assert.Contains("PASS tests — no test summary was produced", summary);
         Assert.Contains("log: run.log", summary);
     }
+
+    [Fact]
+    public void FormatScript_PassUsesChecksCountAndRelativeLog()
+    {
+        var summary = RunSummaryFormatter.FormatScript("noise\n5/5 checks passed\n", 0, TimeSpan.FromMilliseconds(100), "/repo/.devx/execution/run.log", "/repo");
+        Assert.Contains("PASS 5/5 checks in", summary);
+        Assert.Contains("log: .devx/execution/run.log", summary);
+    }
+
+    [Fact]
+    public void FormatScript_FailureCountsChecksAndCapsTrimmedFailLines()
+    {
+        var output = string.Join('\n', Enumerable.Range(1, 12).Select(index => $"FAIL check_{index}: {new string('x', 250)}")) + "\n4/5 checks passed";
+        var summary = RunSummaryFormatter.FormatScript(output, 1, TimeSpan.FromSeconds(.2), "/repo/.devx/execution/run.log", "/repo");
+        var failures = summary.Split('\n').Where(line => line.Contains("FAIL check_", StringComparison.Ordinal)).ToArray();
+        Assert.Contains("FAIL checks — 1 failed of 5 in", summary);
+        Assert.DoesNotContain("PYTEST", summary);
+        Assert.Equal(10, failures.Length);
+        Assert.All(failures, line => Assert.True(line.Length <= 200));
+        Assert.Contains("log: .devx/execution/run.log", summary);
+    }
+
+    [Fact]
+    public void FormatScript_CrashIncludesLastFiveLinesAndLog()
+    {
+        const string output = "old output\nstarting\nTraceback\nRuntimeError: failure\nlast line\n";
+        var expectedTail = string.Join(Environment.NewLine, output.Split('\n', StringSplitOptions.RemoveEmptyEntries).TakeLast(5));
+        var summary = RunSummaryFormatter.FormatScript(output, 1, TimeSpan.FromSeconds(.2), "/repo/run.log", "/repo");
+        Assert.Contains("FAIL script — exit code 1", summary);
+        Assert.DoesNotContain("PYTEST", summary);
+        Assert.Contains(expectedTail, summary);
+        Assert.Contains("log: run.log", summary);
+    }
 }
