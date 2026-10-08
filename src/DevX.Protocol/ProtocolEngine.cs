@@ -550,7 +550,9 @@ public sealed class ProtocolEngine : IProtocolEngine
                 // Legacy source IDs use a different identity from indexed symbols; retain ID support.
                 if (resolution.Candidates.Count == 0 && !Guid.TryParse(query, out _))
                 {
-                    if (query.Contains('.')) return Fail("NotFound", $"Symbol '{query}' is not in this workspace: {root}.", query, []);
+                    // A dotted miss still has to hand back names the caller can paste. LG1 was
+                    // told only "not in this workspace" and left the tool for grep; the index
+                    // can always answer for the last segment, which is one prefix shorter.
                     return await NotFoundWithSuggestionsAsync("Symbol", query, cancellationToken);
                 }
             }
@@ -834,15 +836,28 @@ public sealed class ProtocolEngine : IProtocolEngine
 
     private async Task<ProtocolResponse> NotFoundWithSuggestionsAsync(string kind, string query, CancellationToken cancellationToken)
     {
-        var suggestions = _repositoryStore is ISymbolStore symbols
-            ? (await symbols.FindClosestSymbolsAsync(query, cancellationToken: cancellationToken)).Select(symbol => symbol.QualifiedName).Where(name => !string.Equals(name, query, StringComparison.OrdinalIgnoreCase)).ToList()
-            : [];
+        var suggestions = await ClosestNamesAsync(query, cancellationToken);
+        // A dotted miss is usually one prefix too long -- a Python module path pasted back
+        // from `search`. Search again on the last segment so the answer is still a list of
+        // names that `read` accepts, rather than an empty suggestion list.
+        if (suggestions.Count == 0 && query.Contains('.'))
+        {
+            suggestions = await ClosestNamesAsync(query.Split('.').Last(), cancellationToken);
+        }
         // Distinct/Take here too: Fail() clamps the structured list, but the sentence below is
         // built from the raw names and was printing the same suggestion twice.
         suggestions = suggestions.Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToList();
         var suffix = suggestions.Count == 0 ? string.Empty : $" Did you mean: {string.Join(", ", suggestions)}?";
         return Fail("NotFound", $"{kind} '{query}' was not found.{suffix}", query, suggestions);
     }
+
+    private async Task<List<string>> ClosestNamesAsync(string query, CancellationToken cancellationToken)
+        => _repositoryStore is ISymbolStore symbols
+            ? (await symbols.FindClosestSymbolsAsync(query, cancellationToken: cancellationToken))
+                .Select(symbol => symbol.QualifiedName)
+                .Where(name => !string.Equals(name, query, StringComparison.OrdinalIgnoreCase))
+                .ToList()
+            : [];
 
     private static IReadOnlyList<T> PreferExact<T>(IReadOnlyList<T> candidates, string query, params Func<T, string>[] selectors)
     {

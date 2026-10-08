@@ -421,12 +421,40 @@ public sealed class McpReferenceServer
 
     private static string ReadKind(JsonElement arguments)
     {
-        if (TryGetString(arguments, "kind", out var kind) && !kind.Equals("auto", StringComparison.OrdinalIgnoreCase)) return kind.ToLowerInvariant();
         var target = TryGetString(arguments, "target", out var name) ? name : string.Empty;
+        var hasRange = TryGetString(arguments, "range", out _);
+        var hasFull = TryGetBoolean(arguments, "full", out var full) && full;
+        if (TryGetString(arguments, "kind", out var kind) && !kind.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            var explicitKind = kind.ToLowerInvariant();
+            // A range or a full read only means anything for a file, whatever the caller
+            // called it. LG1 asked for lines 595-615 with kind=section and was told to use
+            // 'file#heading' instead; the label was the wrong thing to argue about.
+            if (explicitKind == "section" && !target.Contains('#') && (hasRange || hasFull)) return "file";
+            return explicitKind;
+        }
         if (target.Contains('#')) return "section";
-        if ((target.Contains(Path.DirectorySeparatorChar) || Path.HasExtension(target)) && (System.IO.File.Exists(target) || Path.HasExtension(target))) return "file";
-        return "method";
+        if (hasRange || hasFull) return "file";
+        return LooksLikeFilePath(target) ? "file" : "method";
     }
+
+    // Path.HasExtension("db.models.query.QuerySet.count") is true -- ".count" reads as an
+    // extension -- so every Python qualified name `search` returned was classified as a file
+    // and `read` answered "file missing: db.models.query.QuerySet.count". Only the bare
+    // QuerySet.count worked later, once the agent gave up and went to grep. A name is a file
+    // only when it looks like one.
+    private static bool LooksLikeFilePath(string target)
+    {
+        if (target.Length == 0) return false;
+        if (target.Contains(Path.DirectorySeparatorChar) || target.Contains('/')) return true;
+        if (System.IO.File.Exists(target)) return true;
+        return Path.GetExtension(target).ToLowerInvariant() is
+            ".cs" or ".csproj" or ".sln" or ".py" or ".pyi" or ".md" or ".markdown" or ".json" or
+            ".toml" or ".cfg" or ".ini" or ".txt" or ".yml" or ".yaml" or ".ts" or ".tsx" or ".js" or
+            ".jsx" or ".mjs" or ".cjs" or ".java" or ".kt" or ".go" or ".rs" or ".rb" or ".php" or
+            ".sh" or ".bash" or ".zsh" or ".sql" or ".html" or ".htm" or ".css" or ".scss" or ".xml";
+    }
+
 
     private async Task<McpToolCallResult> ExecuteSearchAsync(JsonElement arguments, CancellationToken cancellationToken)
     {
@@ -492,6 +520,9 @@ public sealed class McpReferenceServer
             ? array.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String).Select(value => value.GetString()!).ToArray()
             : new[] { RequiredAliasString(arguments, "target", "query") };
         var outputs = new List<string>();
+        // A read that failed is an error: this path used to answer isError=false with an
+        // error body, so a client counting failures saw a success.
+        var failed = false;
         foreach (var target in targets)
         {
             var node = JsonNode.Parse(arguments.GetRawText())!.AsObject();
@@ -500,10 +531,11 @@ public sealed class McpReferenceServer
             var item = JsonSerializer.SerializeToElement(node, JsonOptions);
             var operation = GetReadOperation(item);
             var response = await _protocolEngine.ExecuteAsync(new ProtocolRequest("1.0", operation, RequiredSessionId(item), BuildReadPayload(item)), cancellationToken);
+            if (!response.Success) failed = true;
             if (targets.Length > 1) outputs.Add($"=== {target} ===");
             outputs.Add(AgentFormat(arguments) == "json" ? JsonSerializer.Serialize(response, JsonOptions) : AgentText(response));
         }
-        return new McpToolCallResult(false, JsonSerializer.SerializeToElement(new { text = string.Join("\n", outputs) }, JsonOptions));
+        return new McpToolCallResult(failed, JsonSerializer.SerializeToElement(new { text = string.Join("\n", outputs) }, JsonOptions));
     }
 
     private static string RequiredSessionId(JsonElement arguments)
