@@ -129,7 +129,9 @@ def smoke(binary):
                 index_payload = index_text
             files_indexed = index_payload.get("filesIndexed") if isinstance(index_payload, dict) else None
             if files_indexed is None:
-                match = re.search(r'"filesIndexed"\s*:\s*(\d+)', index_text)
+                # 1.6.8 answers the agent with compact text (JSON only for format: json), so the
+                # count arrives as `filesIndexed: 3` rather than `"filesIndexed": 3`.
+                match = re.search(r'"?filesIndexed"?\s*[:=]\s*(\d+)', index_text)
                 files_indexed = int(match.group(1)) if match else None
             require("error" not in indexed_call and isinstance(files_indexed, int) and files_indexed >= 3, "MCP index did not report filesIndexed >= 3")
             print("PASS MCP index", flush=True)
