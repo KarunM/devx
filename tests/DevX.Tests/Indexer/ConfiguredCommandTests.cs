@@ -84,17 +84,54 @@ public sealed class ConfiguredCommandTests
         Assert.DoesNotContain("dotnet test", result.Command);
     }
 
+    /// <summary>
+    /// The default. A repository's own build often restores its dependencies before it can
+    /// build anything, and an agent refused here does the install by hand anyway -- outside any
+    /// log DevX can see -- which is what the LG1 transcript did. `install --help` prints usage
+    /// and installs nothing, so the guard is exercised without changing the machine.
+    /// </summary>
     [Fact]
-    public async Task ConfiguredInstallCommand_IsRefused()
+    public async Task ConfiguredInstallCommand_RunsByDefault()
     {
-        var root = NewRoot("devx-no-install");
-        await WriteConfigAsync(root, "test", """{ "command": "python3", "args": ["-m", "pip", "install", "pytest"] }""");
+        var root = NewRoot("devx-install-allowed");
+        await WriteConfigAsync(root, "test", """{ "command": "python3", "args": ["-m", "pip", "install", "--help"] }""");
+
+        var result = await new DotnetBuildTestService().RunTestsAsync(root, null);
+
+        Assert.True(result.Success, result.Summary);
+        Assert.DoesNotContain("PACKAGE_INSTALL", result.Diagnostics.Select(diagnostic => diagnostic.Code));
+    }
+
+    [Fact]
+    public async Task ConfiguredInstallCommand_IsRefused_WhenTheRepositoryAsksForThat()
+    {
+        var root = NewRoot("devx-block-install");
+        await WriteConfigAsync(root, "test", """{ "command": "python3", "args": ["-m", "pip", "install", "--help"], "blockInstall": true }""");
 
         var result = await new DotnetBuildTestService().RunTestsAsync(root, null);
 
         Assert.False(result.Success);
         Assert.Contains("refused a package install", result.Summary);
         Assert.Contains("PACKAGE_INSTALL", result.Diagnostics.Select(diagnostic => diagnostic.Code));
+    }
+
+    [Fact]
+    public void BlockInstall_IsOffUnlessTheConfigSaysSo()
+    {
+        var root = NewRoot("devx-block-install-flag");
+        Directory.CreateDirectory(Path.Combine(root, ".devx"));
+        File.WriteAllText(Path.Combine(root, ".devx", "config.json"),
+            """{ "test": { "command": "python3", "args": ["-c", "pass"] } }""");
+        var defaulted = DevXCommandConfig.TryRead(root, "test");
+
+        File.WriteAllText(Path.Combine(root, ".devx", "config.json"),
+            """{ "test": { "command": "python3", "args": ["-c", "pass"], "blockInstall": true } }""");
+        var opted = DevXCommandConfig.TryRead(root, "test");
+
+        Assert.NotNull(defaulted);
+        Assert.False(defaulted.BlockInstall);
+        Assert.NotNull(opted);
+        Assert.True(opted.BlockInstall);
     }
 
     [Theory]

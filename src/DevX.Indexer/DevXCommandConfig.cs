@@ -60,20 +60,27 @@ public sealed record DevXCommandConfig
                 }
             }
 
-            return new DevXCommandConfig(command!, args, workingDirectory, environment, !hasArgs && LooksLikeShellCommandLine(command!));
+            // Opt-in only. An agent legitimately needs to install a dependency, and a tool that
+            // refuses is a tool the agent works around by hand -- which is what the LG1
+            // transcript did. The benchmark's no-install rule lives in its prompt, not here.
+            var blockInstall = block.TryGetProperty("blockInstall", out var blockInstallElement)
+                && blockInstallElement.ValueKind == JsonValueKind.True;
+
+            return new DevXCommandConfig(command!, args, workingDirectory, environment, !hasArgs && LooksLikeShellCommandLine(command!), blockInstall);
         }
         catch (JsonException) { return null; }
         catch (IOException) { return null; }
         catch (UnauthorizedAccessException) { return null; }
     }
 
-    private DevXCommandConfig(string command, IReadOnlyList<string> args, string? workingDirectory, IReadOnlyDictionary<string, string>? environment, bool isShell)
+    private DevXCommandConfig(string command, IReadOnlyList<string> args, string? workingDirectory, IReadOnlyDictionary<string, string>? environment, bool isShell, bool blockInstall)
     {
         Command = command;
         Args = args;
         WorkingDirectory = workingDirectory;
         Environment = environment;
         IsShell = isShell;
+        BlockInstall = blockInstall;
         ShellLine = isShell ? command : null;
     }
 
@@ -89,6 +96,13 @@ public sealed record DevXCommandConfig
     /// syntax, in which case it is run through `/bin/sh -c`.
     /// </summary>
     public bool IsShell { get; }
+
+    /// <summary>
+    /// `"blockInstall": true` in the same block. Off by default: a configured command that
+    /// installs runs, because a repository's own build often has to restore its dependencies
+    /// before it can build anything. DevX still never adds an install step of its own.
+    /// </summary>
+    public bool BlockInstall { get; }
 
     /// <summary>The unsplit command line, when there is one. Null for the `command` + `args` form.</summary>
     private string? ShellLine { get; }

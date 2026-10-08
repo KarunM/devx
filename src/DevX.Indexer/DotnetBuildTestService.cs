@@ -334,9 +334,11 @@ public sealed class DotnetBuildTestService
 
     /// <summary>
     /// Runs a command the repository declared in `.devx/config.json`. The command is the
-    /// repository's own, so it is trusted to run -- but not trusted to install: DevX changes
-    /// nothing about the environment it is measuring, and an install it performed silently
-    /// would make its own test result meaningless.
+    /// repository's own, so it runs as written -- including an install step, because a real
+    /// build often has to restore its dependencies before it can build anything, and an agent
+    /// that is refused does the install by hand anyway, outside any log DevX can see. DevX
+    /// still never adds an install step of its own. A repository that wants the refusal back
+    /// sets `"blockInstall": true`.
     /// </summary>
     private static Task<ExecutionRecord> RunConfiguredAsync(
         string root,
@@ -347,12 +349,12 @@ public sealed class DotnetBuildTestService
         string runtime)
     {
         var line = config.Render(target);
-        if (PackageInstallGuard.IsInstall(line))
+        if (config.BlockInstall && PackageInstallGuard.IsInstall(line))
         {
             var log = SaveFullLog(root, string.Empty);
             return Task.FromResult(new ExecutionRecord(line, false, log,
                 [new DiagnosticRecord("error", "PACKAGE_INSTALL",
-                    $"Refused to run a package install from {DevXCommandConfig.RelativePath}: {line}. DevX never installs packages -- install the dependency yourself and run again.",
+                    $"Refused to run a package install from {DevXCommandConfig.RelativePath}: {line}. This repository set \"blockInstall\": true -- run the install yourself and run again.",
                     null, null, null, log)],
                 $"FAIL {runtime} — refused a package install: {line}"));
         }
