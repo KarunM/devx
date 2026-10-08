@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.5
+
+- `devx replace` one-shot edit (CLI) and `edit.replace` (MCP) with `--verify`: re-index, build and run relevant tests in one response
+- No-session CLI: automatic per-repository session shared with the MCP server, automatic first-use indexing
+- `devx read <name>` by bare symbol name, several targets per call; `devx search <query>` defaults to symbols with text fallback
+- Compact agent output (`--format agent`, default for MCP; `format: json` opts out); compact build/test summaries with the full log in a file
+- `devx test` runs standalone check scripts that print "N/M checks passed"
+- Agent quick start in `devx --help` and in MCP tool descriptions
+
 ## 1.6.4
 
 - `devx patch` supports text replacement (`ReplaceText`, alias `TextReplace`) with `--occurrence` and `--all`

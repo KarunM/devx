@@ -19,7 +19,7 @@ public sealed class CliCommandTests
 {
     private static readonly SemaphoreSlim ProcessStateLock = new(1, 1);
     [Theory]
-    [InlineData("--version", 0, "1.6.4")]
+    [InlineData("--version", 0, "1.6.5")]
     [InlineData("--help", 0, "1. devx search <name>")]
     [InlineData("unknown-command", 1, "Unknown command")]
     [InlineData("index", 1, "Missing repository path")]
