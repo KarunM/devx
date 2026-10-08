@@ -18,10 +18,16 @@ return exitCode;
 static async Task<int> RunAsync(string[] args)
 {
     OperationContext.TaskLabel.Value = GetOption(args, "--task");
-    if (args.Length == 0 || args[0] is "--help" or "-h")
+    var helpCommand = "";
+    if (args.Length == 0 || WantsHelp(args, out helpCommand))
     {
         // An agent asking for help wants the ten commands, not the manual: 17 of the 64
         // unexplained calls in the v2 arm-B transcripts were `devx --help`.
+        //
+        // 1.6.10 regression: this only looked at args[0], so the RULES_B-style invocation
+        // with the global flags first (`devx --session x --agent codex --task v1 --help`)
+        // fell through to the dispatcher and answered "Unknown command '--session'".
+        // Help is now recognised wherever it sits among the leading options.
         if (args.Contains("--agent", StringComparer.Ordinal)) PrintAgentHelp();
         else PrintHelp();
         return 0;
@@ -173,6 +179,73 @@ static async Task<int> RunAsync(string[] args)
     }
 }
 
+// Options whose next token is their VALUE, not a command. `devx --session <id> --help`
+// must not read the session id as a command name.
+static bool HelpScanValueOption(string token) => token switch
+{
+    "--session" or "--agent" or "--task" or "--format" or "--op" or "--path"
+        or "--content" or "--content-file" or "--replacement" or "--replacement-file"
+        or "--method" or "--method-text" or "--method-text-file" or "--position"
+        or "--namespace" or "--containing-type" or "--type-id" or "--occurrence"
+        or "--old" or "--old-text" or "--new" or "--output" or "--input" or "--period"
+        or "--blocked-terms" or "--runtime" or "--target" or "--timeout" or "--org"
+        or "--team" or "--repo" or "--name" or "--capability" or "--failed-command"
+        or "--reason" or "--action" or "--command" or "--file" or "--coverage-start"
+        or "--coverage-end" or "--range" => true,
+    _ => false
+};
+
+// The two-word command forms, so `devx patch create --help` reaches the patch help while
+// `devx search Foo --help` is left alone (Foo is a query, not a subcommand).
+static bool TwoWordCommand(string two) => two switch
+{
+    "patch create" or "patch preview" or "patch validate" or "patch apply" or "patch rollback"
+        or "index status" or "index update" or "index changed" or "artifact create"
+        or "artifact delete" or "artifact path" or "search symbol" or "search text"
+        or "read method" or "read type" or "read section" or "report html" or "report export"
+        or "fallback record" or "fallback observe" or "session create" or "session list" => true,
+    _ => false
+};
+
+// --help has to work wherever it sits among the leading options -- RULES_B tells agents to
+// pass --session/--agent/--task on every call, and on 1.6.10 that turned `devx --help` into
+// "Unknown command '--session'". It must still NOT hijack a prompt that merely mentions it
+// (`devx ask "explain --help"`), so the scan stops as soon as real argument text begins.
+static bool WantsHelp(string[] args, out string command)
+{
+    command = "";
+    var words = 0;
+    for (var i = 0; i < args.Length; i++)
+    {
+        var token = args[i];
+        if (token is "--help" or "-h")
+        {
+            return true;
+        }
+        if (token.StartsWith('-'))
+        {
+            if (HelpScanValueOption(token))
+            {
+                i++;
+            }
+            continue;
+        }
+        words++;
+        if (words == 1)
+        {
+            command = token;
+            continue;
+        }
+        if (words == 2 && TwoWordCommand($"{command} {token}"))
+        {
+            command = $"{command} {token}";
+            continue;
+        }
+        return false;
+    }
+    return false;
+}
+
 // The commands an agent actually reaches for. Used only to turn a typo into a fix.
 static string? ClosestCommand(string command)
 {
@@ -208,10 +281,12 @@ static int Levenshtein(string a, string b)
     return previous[b.Length];
 }
 
-// Deliberately <= 10 lines: this is the whole point of it existing next to PrintHelp.
+// Deliberately short: this is the whole point of it existing next to PrintHelp. The edit
+// line is the one that matters -- on 1.6.10 it named only `patch`, so agents guessed at op
+// names instead of using `devx replace`, which is what they wanted.
 static void PrintAgentHelp()
 {
-    Console.WriteLine("devx --agent cheat sheet (add --session <id>; piped output is already agent format)");
+    Console.WriteLine("devx cheat sheet (add --session <id>; piped output is already agent format)");
     Console.WriteLine("  --format json still gives the full JSON shape; --format text gives the human text");
     Console.WriteLine("  devx index .                      index the repo (or: index update <files>)");
     Console.WriteLine("  devx search symbol <name>         find it; one hit returns its source too");
@@ -219,7 +294,9 @@ static void PrintAgentHelp()
     Console.WriteLine("  devx read method \"<Qualified>\"    read ONE function; \"<file#Heading>\" for a doc section");
     Console.WriteLine("  devx read <Name> <Name>          several symbols in ONE call, not one call each");
     Console.WriteLine("  devx snapshot <file>              map a file: classes + functions, no bodies");
-    Console.WriteLine("  devx patch create|validate|apply  whole-function edits by name");
+    Console.WriteLine("  EDIT -- pick one:");
+    Console.WriteLine("  devx replace <file> --old <text> --new <text>   one text edit (--all | --occurrence n)");
+    Console.WriteLine("  devx patch create|validate|apply  whole-function edits by name (--op; see --help)");
     Console.WriteLine("  devx test [<files>]               run tests; exit 0 = pass");
     Console.WriteLine("  devx capabilities                 what this build can do");
 }
