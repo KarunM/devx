@@ -449,7 +449,7 @@ public sealed class ProtocolEngine : IProtocolEngine
         var endLine = 0;
         if (!full && !TryGetRange(request.Payload, out startLine, out endLine))
         {
-            return Fail("ValidationError", "Read file requests must include either a 'range' field formatted as 'start:end' or --full.");
+            return Fail("ValidationError", "Read file requests must include either a 'range' field formatted as 'start:end' or 'start-end', or --full.");
         }
 
         var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
@@ -468,13 +468,17 @@ public sealed class ProtocolEngine : IProtocolEngine
         var source = await IOFile.ReadAllTextAsync(absolutePath, cancellationToken);
         var lines = source.Split('\n');
         var safeStart = full ? 1 : Math.Max(1, startLine);
-        var safeEnd = full ? lines.Length : Math.Min(endLine, lines.Length);
+        var requestedEnd = full ? lines.Length : Math.Min(endLine, lines.Length);
+        // A range is capped and paged, never silently widened: an agent that asks for 1-99999
+        // gets a slice plus the range that continues it, rather than a whole file in its context.
+        var safeEnd = full ? requestedEnd : Math.Min(requestedEnd, safeStart + MaxRangeLines - 1);
         if (safeStart > safeEnd)
         {
             return Fail("ValidationError", "Invalid line range.");
         }
 
         var slice = string.Join('\n', lines[(safeStart - 1)..safeEnd]);
+        var nextRange = safeEnd < requestedEnd ? $"{safeEnd + 1}:{requestedEnd}" : null;
         var response = new SourceReadResponse(
             Kind: "file",
             SymbolId: path,
@@ -484,12 +488,14 @@ public sealed class ProtocolEngine : IProtocolEngine
             EndLine: safeEnd,
             TotalLines: lines.Length,
             ReturnedLines: safeEnd - safeStart + 1,
-            Truncated: !full && safeEnd < lines.Length,
+            Truncated: safeEnd < lines.Length,
             SourceReturned: true,
             Source: slice,
-            Metadata: new { Language = Path.GetExtension(path).TrimStart('.').ToUpperInvariant() });
+            Metadata: new { Language = Path.GetExtension(path).TrimStart('.').ToUpperInvariant(), NextRange = nextRange });
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
     }
+
+    private const int MaxRangeLines = 400;
 
     private async Task<ProtocolResponse> HandleReadMethodAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
     {
@@ -970,10 +976,19 @@ public sealed class ProtocolEngine : IProtocolEngine
             return false;
         }
 
-        var parts = range.Split(':', 2);
+        // '595-615' and '595:615' both name a line range. Only ':' was accepted, so LG1's
+        // "595-615" -- the spelling an editor shows -- was rejected outright and there was no
+        // line-range read over MCP at all. Accept both; trim so ' 595 - 615 ' works too.
+        var separator = range.Contains(':') ? ':' : range.Contains('-') ? '-' : '\0';
+        if (separator == '\0')
+        {
+            return false;
+        }
+
+        var parts = range.Split(separator, 2);
         return parts.Length == 2
-            && int.TryParse(parts[0], out startLine)
-            && int.TryParse(parts[1], out endLine)
+            && int.TryParse(parts[0].Trim(), out startLine)
+            && int.TryParse(parts[1].Trim(), out endLine)
             && startLine > 0
             && endLine >= startLine;
     }

@@ -64,6 +64,28 @@ public sealed class McpToolContractTests
         Assert.Contains("Did you mean:", TextOf(read));
     }
 
+    [Fact]
+    public async Task LineRangeRead_AcceptsBothSpellings_EvenWhenTheKindSaysSection()
+    {
+        var (server, session, root) = await CreateServerAsync("devx-mcp-range");
+        var id = session.Id.Value.ToString();
+        var file = Path.Combine(root, "src", "Sample", "Program.cs");
+        var before = await IOFile.ReadAllTextAsync(file);
+
+        // LG1 asked for lines 595-615 with kind=section and got "Read section requests must
+        // use 'file#heading'". A range names a file read whatever the label says, and both
+        // spellings are the same request.
+        foreach (var spelling in new[] { "1-3", "1:3" })
+        {
+            var read = await server.CallToolAsync("read", JsonSerializer.SerializeToElement(new { sessionId = id, target = "src/Sample/Program.cs", kind = "section", range = spelling }));
+            Assert.False(read.IsError, $"{spelling}: {TextOf(read)}");
+            Assert.Contains("namespace Sample;", TextOf(read));
+        }
+
+        Assert.Equal(before, await IOFile.ReadAllTextAsync(file));
+    }
+
+
     private static string TextOf(McpToolCallResult result)
         => result.Content.ValueKind == JsonValueKind.Object && result.Content.TryGetProperty("text", out var text)
             ? text.GetString() ?? string.Empty
