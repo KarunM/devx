@@ -18,6 +18,7 @@ public sealed class McpReferenceServer
     private readonly Func<CancellationToken, Task>? _initializeStorageAsync;
     private readonly string _version;
     private readonly Func<string, VerifyAfterEdit>? _verifyAfterEditFactory;
+    private readonly Func<string, CancellationToken, Task<IReadOnlyList<string>>>? _changedFilesAsync;
     private readonly TextReplaceService _textReplaceService = new();
 
     public McpReferenceServer(
@@ -29,8 +30,10 @@ public sealed class McpReferenceServer
         string version = "1.0",
         Func<CancellationToken, Task<RepositoryIndexResult>>? indexRepositoryAsync = null,
         Func<CancellationToken, Task>? initializeStorageAsync = null,
-        Func<string, VerifyAfterEdit>? verifyAfterEditFactory = null)
+        Func<string, VerifyAfterEdit>? verifyAfterEditFactory = null,
+        Func<string, CancellationToken, Task<IReadOnlyList<string>>>? changedFilesAsync = null)
     {
+        _changedFilesAsync = changedFilesAsync;
         _protocolEngine = protocolEngine;
         _sessionStore = sessionStore;
         _repositoryStore = repositoryStore;
@@ -42,13 +45,41 @@ public sealed class McpReferenceServer
         _version = version;
     }
 
-    public Task<McpInitializeResponse> InitializeAsync(CancellationToken cancellationToken = default)
+    public async Task<McpInitializeResponse> InitializeAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(new McpInitializeResponse(
+        await RefreshStaleIndexAsync(cancellationToken);
+        return new McpInitializeResponse(
             "2025-06-18",
             new McpServerInfo("devx", _version),
-            BuildTools()));
+            BuildTools());
+    }
+
+    /// <summary>
+    /// An agent's first move in the LG1 transcript was a full `index` of 3,292 files against
+    /// an index that was already built. The server knew the answer and made the agent ask for
+    /// it, so the check happens here instead: on start, anything the working tree has changed
+    /// since the last index is refreshed incrementally. A failure (no git, a locked store) must
+    /// never stop the server from starting -- it only means the index is left as it was.
+    /// </summary>
+    private async Task RefreshStaleIndexAsync(CancellationToken cancellationToken)
+    {
+        if (_reindexFilesAsync is null || _defaultSessionId is null || !Guid.TryParse(_defaultSessionId, out var sessionId)) return;
+        try
+        {
+            if (_initializeStorageAsync is not null) await _initializeStorageAsync(cancellationToken);
+            var session = await _sessionStore.GetSessionAsync(new GetSessionRequest(new SessionId(sessionId)), cancellationToken);
+            if (session is null) return;
+            var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+            if (string.IsNullOrWhiteSpace(root)) return;
+            var changed = _changedFilesAsync is null ? [] : await _changedFilesAsync(root, cancellationToken);
+            if (changed.Count > 0) await _reindexFilesAsync(changed.ToArray(), cancellationToken);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            // Nothing to report to: initialize has no channel for a warning, and a stale index
+            // is a smaller problem than a server that will not start.
+        }
     }
 
     public Task<IReadOnlyList<McpToolDescriptor>> ListToolsAsync(CancellationToken cancellationToken = default)
@@ -384,6 +415,17 @@ public sealed class McpReferenceServer
         {
             if (_indexRepositoryAsync is null)
                 return new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = "Whole-repository indexing is unavailable." }, JsonOptions));
+
+            // Asking for a whole-repository index when nothing has changed is a no-op the
+            // server can answer itself. The agent that paid for this asked for 3,292 files it
+            // already had, and the honest answer is that there is nothing to do.
+            if (await CurrentIndexSummaryAsync(arguments, cancellationToken) is { } current)
+            {
+                return new McpToolCallResult(false, JsonSerializer.SerializeToElement(
+                    new { success = true, filesIndexed = 0, alreadyCurrent = true, text = current },
+                    JsonOptions));
+            }
+
             var indexingResult = await _indexRepositoryAsync(cancellationToken);
             return new McpToolCallResult(false, JsonSerializer.SerializeToElement(new { success = true, filesIndexed = indexingResult.FilesIndexed, reason = indexingResult.Reason }, JsonOptions));
         }
@@ -395,6 +437,48 @@ public sealed class McpReferenceServer
         var result = await _reindexFilesAsync(files.EnumerateArray().Select(file => file.GetString()!).ToArray(), cancellationToken);
         var failed = result.SkippedFilePaths?.Any(file => file.Reason.StartsWith("ERROR:", StringComparison.Ordinal)) == true;
         return new McpToolCallResult(failed, JsonSerializer.SerializeToElement(new { success = !failed, result }, JsonOptions));
+    }
+
+    /// <summary>
+    /// "already current (N files)" when the working tree has nothing git reports as changed and
+    /// the index holds files, null when a re-index is genuinely needed. Git being unavailable
+    /// (a plain directory, no repository) means DevX cannot tell, and the answer to "cannot
+    /// tell" is to do the work, not to claim it is already done.
+    /// </summary>
+    private async Task<string?> CurrentIndexSummaryAsync(JsonElement arguments, CancellationToken cancellationToken)
+    {
+        if (_changedFilesAsync is null) return null;
+        var root = await TryGetRepositoryRootAsync(arguments, cancellationToken);
+        if (string.IsNullOrWhiteSpace(root)) return null;
+        try
+        {
+            var changed = await _changedFilesAsync(root, cancellationToken);
+            if (changed.Count > 0) return null;
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        {
+            return null;
+        }
+
+        var indexed = await CountIndexedFilesAsync(arguments, cancellationToken);
+        return indexed > 0 ? $"already current ({indexed} files)" : null;
+    }
+
+    private async Task<string?> TryGetRepositoryRootAsync(JsonElement arguments, CancellationToken cancellationToken)
+    {
+        if (!TryGetString(arguments, "sessionId", out var sessionId) || !Guid.TryParse(sessionId, out var parsed)) return null;
+        var session = await _sessionStore.GetSessionAsync(new GetSessionRequest(new SessionId(parsed)), cancellationToken);
+        if (session is null) return null;
+        var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+        return string.IsNullOrWhiteSpace(root) ? null : root;
+    }
+
+    private async Task<int> CountIndexedFilesAsync(JsonElement arguments, CancellationToken cancellationToken)
+    {
+        if (!TryGetString(arguments, "sessionId", out var sessionId) || !Guid.TryParse(sessionId, out var parsed)) return 0;
+        var session = await _sessionStore.GetSessionAsync(new GetSessionRequest(new SessionId(parsed)), cancellationToken);
+        if (session is null) return 0;
+        return await _repositoryStore.CountIndexedFilesAsync(session.RepositoryId, cancellationToken);
     }
 
     private async Task<McpToolCallResult> ReplaceTextAsync(JsonElement arguments, CancellationToken cancellationToken)
@@ -706,7 +790,7 @@ public sealed class McpReferenceServer
             }),
             CreateTool("patch.preview", "Patch Preview", "For structured or multi-file edits only. Simple text edits should use edit.replace.", "patch.validate", new { type = "object", properties = new { sessionId = new { type = "string" }, patch = new { type = "object" } }, required = new[] { "patch" } }),
             CreateQueryTool("snapshot", "Snapshot", "Get a source file snapshot.", "sessionId", "target"),
-            CreateTool("index", "Index files", "Index given paths or the whole repository when files is omitted.", "index", new { type = "object", properties = new { files = new { type = "array", items = new { type = "string" } }, sessionId = new { type = "string" } }, required = Array.Empty<string>() }),
+            CreateTool("index", "Index files", "Rarely needed: the server refreshes stale files on start and after every edit, and a whole-repository index that is already current answers 'already current'. Pass `files` only to force a re-index of paths you know changed.", "index", new { type = "object", properties = new { files = new { type = "array", items = new { type = "string" } }, sessionId = new { type = "string" } }, required = Array.Empty<string>() }),
             CreateQueryTool("callers", "Callers", "Find callers of a symbol.", "sessionId", "target"),
             CreateQueryTool("callees", "Callees", "Find callees of a symbol.", "sessionId", "target"),
             CreateQueryTool("references", "References", "Find references to a symbol.", "sessionId", "target"),

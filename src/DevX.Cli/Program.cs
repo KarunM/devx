@@ -242,7 +242,10 @@ static async Task<int> McpServeAsync(string connectionString)
         (files, cancellationToken) => indexer.ReindexFilesAsync(root, files, cancellationToken),
         GetProductVersion(),
         cancellationToken => indexer.IndexAsync(root, cancellationToken),
-        cancellationToken => store.InitializeAsync(cancellationToken));
+        cancellationToken => store.InitializeAsync(cancellationToken),
+        // Left null so the server's start-of-session refresh and its "already current" answer
+        // degrade to indexing rather than failing when git cannot report changed files.
+        changedFilesAsync: indexer.GetChangedFilesAsync);
     await new McpStdioServer(reference).RunAsync(Console.In, Console.Out);
     return 0;
 }
