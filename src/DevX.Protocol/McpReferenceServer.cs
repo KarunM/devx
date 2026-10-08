@@ -66,19 +66,8 @@ public sealed class McpReferenceServer
             return new McpToolCallResult(true, JsonSerializer.SerializeToElement(new { error = "repository not indexed: call the `index` tool first (omit `files` to index the whole repository)" }, JsonOptions));
         return toolName switch
         {
-            "search" => await ExecuteProtocolAsync(
-                GetSearchOperation(arguments),
-                RequiredSessionId(arguments),
-                JsonSerializer.SerializeToElement(new
-                {
-                    query = RequiredString(arguments, "query")
-                }),
-                cancellationToken),
-            "read" => await ExecuteProtocolAsync(
-                GetReadOperation(arguments),
-                RequiredSessionId(arguments),
-                BuildReadPayload(arguments),
-                cancellationToken),
+            "search" => await ExecuteSearchAsync(arguments, cancellationToken),
+            "read" => await ExecuteReadAsync(arguments, cancellationToken),
             "snapshot" => await ExecuteQueryToolAsync(ProtocolOperations.GetFileSnapshot, arguments, cancellationToken),
             "index" => await IndexFilesAsync(arguments, cancellationToken),
             "edit.replace" => await ReplaceTextAsync(arguments, cancellationToken),
@@ -214,7 +203,13 @@ public sealed class McpReferenceServer
     {
         var target = RequiredAliasString(arguments, "target", "query");
         var readKind = ReadKind(arguments);
-        var queryName = readKind == "file" ? "query" : "query";
+        if (readKind == "section")
+        {
+            var separator = target.LastIndexOf('#');
+            if (separator > 0 && separator < target.Length - 1)
+                return JsonSerializer.SerializeToElement(new { file = target[..separator], heading = target[(separator + 1)..] }, JsonOptions);
+        }
+        const string queryName = "query";
         var payload = new Dictionary<string, object?>
         {
             [queryName] = target
@@ -244,7 +239,7 @@ public sealed class McpReferenceServer
     }
 
     private static string GetSearchOperation(JsonElement arguments)
-        => RequiredString(arguments, "kind").Equals("symbol", StringComparison.OrdinalIgnoreCase)
+        => !TryGetString(arguments, "kind", out var kind) || kind.Equals("symbol", StringComparison.OrdinalIgnoreCase)
             ? ProtocolOperations.SearchSymbol
             : ProtocolOperations.SearchText;
 
@@ -323,7 +318,56 @@ public sealed class McpReferenceServer
     }
 
     private static string ReadKind(JsonElement arguments)
-        => RequiredString(arguments, "kind").ToLowerInvariant();
+    {
+        if (TryGetString(arguments, "kind", out var kind) && !kind.Equals("auto", StringComparison.OrdinalIgnoreCase)) return kind.ToLowerInvariant();
+        var target = TryGetString(arguments, "target", out var name) ? name : string.Empty;
+        if (target.Contains('#')) return "section";
+        if ((target.Contains(Path.DirectorySeparatorChar) || Path.HasExtension(target)) && (System.IO.File.Exists(target) || Path.HasExtension(target))) return "file";
+        return "method";
+    }
+
+    private async Task<McpToolCallResult> ExecuteSearchAsync(JsonElement arguments, CancellationToken cancellationToken)
+    {
+        var query = RequiredString(arguments, "query");
+        var operation = GetSearchOperation(arguments);
+        var implicitKind = !TryGetString(arguments, "kind", out _);
+        var sessionId = RequiredSessionId(arguments);
+        var response = await _protocolEngine.ExecuteAsync(new ProtocolRequest("1.0", operation, sessionId, JsonSerializer.SerializeToElement(new { query })), cancellationToken);
+        if (implicitKind && operation == ProtocolOperations.SearchSymbol && response.Success && response.Data is { ValueKind: JsonValueKind.Object } data && TryGetPropertyIgnoreCase(data, "symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array && symbols.GetArrayLength() == 0)
+            response = await _protocolEngine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.SearchText, sessionId, JsonSerializer.SerializeToElement(new { query })), cancellationToken);
+        return new McpToolCallResult(!response.Success, JsonSerializer.SerializeToElement(response, JsonOptions));
+    }
+
+    private async Task<McpToolCallResult> ExecuteReadAsync(JsonElement arguments, CancellationToken cancellationToken)
+    {
+        if ((!arguments.TryGetProperty("targets", out var explicitTargets) || explicitTargets.ValueKind != JsonValueKind.Array)
+            && TryGetString(arguments, "kind", out var explicitKind)
+            && !explicitKind.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            return await ExecuteProtocolAsync(
+                GetReadOperation(arguments),
+                RequiredSessionId(arguments),
+                BuildReadPayload(arguments),
+                cancellationToken);
+        }
+
+        string[] targets = arguments.TryGetProperty("targets", out var array) && array.ValueKind == JsonValueKind.Array
+            ? array.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String).Select(value => value.GetString()!).ToArray()
+            : new[] { RequiredAliasString(arguments, "target", "query") };
+        var outputs = new List<string>();
+        foreach (var target in targets)
+        {
+            var node = JsonNode.Parse(arguments.GetRawText())!.AsObject();
+            node["target"] = target;
+            node.Remove("targets");
+            var item = JsonSerializer.SerializeToElement(node, JsonOptions);
+            var operation = GetReadOperation(item);
+            var response = await _protocolEngine.ExecuteAsync(new ProtocolRequest("1.0", operation, RequiredSessionId(item), BuildReadPayload(item)), cancellationToken);
+            if (targets.Length > 1) outputs.Add($"=== {target} ===");
+            outputs.Add(JsonSerializer.Serialize(response, JsonOptions));
+        }
+        return new McpToolCallResult(false, JsonSerializer.SerializeToElement(new { text = string.Join("\n", outputs) }, JsonOptions));
+    }
 
     private static string RequiredSessionId(JsonElement arguments)
         => RequiredString(arguments, "sessionId");
@@ -359,6 +403,23 @@ public sealed class McpReferenceServer
             && arguments.TryGetProperty(propertyName, out var property)
             && property.ValueKind == JsonValueKind.String
             && (value = property.GetString() ?? string.Empty).Length > 0;
+    }
+
+    private static bool TryGetPropertyIgnoreCase(JsonElement element, string propertyName, out JsonElement value)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (property.Name.Equals(propertyName, StringComparison.OrdinalIgnoreCase))
+                {
+                    value = property.Value;
+                    return true;
+                }
+            }
+        }
+        value = default;
+        return false;
     }
 
     private static bool TryGetBoolean(JsonElement arguments, string propertyName, out bool value)
@@ -398,7 +459,7 @@ public sealed class McpReferenceServer
                     kind = new { type = "string", @enum = new[] { "symbol", "text" } },
                     query = new { type = "string" }
                 },
-                required = new[] { "kind", "query" }
+                required = new[] { "query" }
             }),
             CreateTool("read", "Read", "Read file, method, or type content through the runtime capability layer.", "read", new
             {
@@ -406,12 +467,13 @@ public sealed class McpReferenceServer
                 properties = new
                 {
                     sessionId = new { type = "string" },
-                    kind = new { type = "string", @enum = new[] { "file", "method", "type", "section" } },
+                    kind = new { type = "string", @enum = new[] { "auto", "file", "method", "type", "section" } },
                     target = new { type = "string" },
+                    targets = new { type = "array", items = new { type = "string" } },
                     range = new { type = "string" },
                     full = new { type = "boolean" }
                 },
-                required = new[] { "kind", "target" }
+                required = Array.Empty<string>()
             }),
             CreateTool("patch.validate", "Patch Validate", "Validate a structured patch through the runtime capability layer.", "patch.validate", new
             {

@@ -80,6 +80,34 @@ public sealed class McpReferenceServerIntegrationTests
     }
 
     [Fact]
+    public async Task McpTools_DefaultSearchKindAndReadKindAndAcceptMultipleTargetsWithoutSessionId()
+    {
+        var (server, _, _) = await CreateServerAsync("devx-mcp-short-forms");
+        var tools = await server.ListToolsAsync();
+        foreach (var tool in tools)
+        {
+            using var schema = JsonDocument.Parse(tool.InputSchema.GetRawText());
+            if (schema.RootElement.TryGetProperty("required", out var required))
+                Assert.DoesNotContain("sessionId", required.EnumerateArray().Select(item => item.GetString()));
+        }
+        using var searchSchema = JsonDocument.Parse(tools.Single(tool => tool.Name == "search").InputSchema.GetRawText());
+        Assert.Equal("query", searchSchema.RootElement.GetProperty("required")[0].GetString());
+        Assert.DoesNotContain("sessionId", searchSchema.RootElement.GetProperty("required").EnumerateArray().Select(item => item.GetString()));
+        using var readSchema = JsonDocument.Parse(tools.Single(tool => tool.Name == "read").InputSchema.GetRawText());
+        Assert.DoesNotContain("sessionId", readSchema.RootElement.GetProperty("required").EnumerateArray().Select(item => item.GetString()));
+
+        var search = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new { query = "Run" }));
+        Assert.False(search.IsError);
+        var bareRead = await server.CallToolAsync("read", JsonSerializer.SerializeToElement(new { target = "Run" }));
+        Assert.False(bareRead.IsError);
+        Assert.Contains("Run", bareRead.Content.GetRawText());
+        var read = await server.CallToolAsync("read", JsonSerializer.SerializeToElement(new { targets = new[] { "src/Sample/Program.cs", "Run" } }));
+        Assert.False(read.IsError);
+        Assert.Contains("=== src/Sample/Program.cs ===", read.Content.GetProperty("text").GetString());
+        Assert.Contains("=== Run ===", read.Content.GetProperty("text").GetString());
+    }
+
+    [Fact]
     public async Task StdioServer_SearchBeforeIndex_ReturnsIndexHint()
     {
         var (server, session, _) = await CreateServerAsync("devx-mcp-unindexed", indexRepository: false);

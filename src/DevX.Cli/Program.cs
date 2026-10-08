@@ -35,6 +35,15 @@ static async Task<int> RunAsync(string[] args)
         return await InitAsync(args, GetOption(args, "--format") ?? "text");
     }
 
+    if (!args.Contains("--session", StringComparer.Ordinal) && args[0] is ("index" or "search" or "read" or "method" or "type" or "callers" or "callees" or "references" or "snapshot" or "test" or "build" or "run" or "replace" or "patch"))
+    {
+        args = await AddAutomaticSessionAsync(args);
+    }
+    if (args[0] is "search" or "read" or "snapshot" or "callers" or "callees" or "references" or "method" or "type")
+    {
+        await EnsureAutomaticIndexAsync();
+    }
+
     var format = GetOption(args, "--format") ?? "text";
     var command = args[0];
     var databasePath = ResolveDatabasePath();
@@ -391,14 +400,15 @@ static async Task<int> IndexStatusAsync(string connectionString, string[] args, 
 
 static async Task<int> SearchAsync(string connectionString, string[] args, string format)
 {
-    if (args.Length < 4)
+    var implicitSymbol = args.Length >= 2 && args[1] is not ("symbol" or "text") && !args[1].StartsWith("--", StringComparison.Ordinal);
+    if (args.Length < (implicitSymbol ? 2 : 4))
     {
-        Console.Error.WriteLine("Usage: devx search <symbol|text> <query> --session <id>");
+        Console.Error.WriteLine("Usage: devx search <query> [--session <id>] | devx search <symbol|text> <query> [--session <id>]");
         return 1;
     }
 
-    var searchKind = args[1];
-    var query = args[2];
+    var searchKind = implicitSymbol ? "symbol" : args[1];
+    var query = implicitSymbol ? args[1] : args[2];
     var sessionId = GetOption(args, "--session");
     if (sessionId is null)
     {
@@ -417,7 +427,13 @@ static async Task<int> SearchAsync(string connectionString, string[] args, strin
 
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric($"search {searchKind}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
+    if (implicitSymbol && response.Success && response.Data is { ValueKind: JsonValueKind.Object } data && TryGetPropertyIgnoreCase(data, "Symbols", out var matches) && matches.ValueKind == JsonValueKind.Array && matches.GetArrayLength() == 0)
+    {
+        Console.Error.WriteLine("(no symbol match; showing text matches)");
+        response = await engine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.SearchText, sessionId, JsonSerializer.SerializeToElement(new { query })));
+        searchKind = "text";
+    }
+    await store.AddOperationMetricAsync(new OperationMetric($"search {searchKind}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, query), GetAgentLabel(args)));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -449,6 +465,56 @@ static Guid StableId(string value)
     Span<byte> guidBytes = stackalloc byte[16];
     hash.AsSpan(0, 16).CopyTo(guidBytes);
     return new Guid(guidBytes);
+}
+
+static async Task<string[]> AddAutomaticSessionAsync(string[] args)
+{
+    var connectionString = new SqliteConnectionStringBuilder { DataSource = ResolveDatabasePath() }.ToString();
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var root = Path.GetFullPath(Environment.CurrentDirectory);
+    for (var directory = new DirectoryInfo(root); directory is not null; directory = directory.Parent)
+    {
+        if (Directory.Exists(Path.Combine(directory.FullName, ".devx")) || Directory.Exists(Path.Combine(directory.FullName, ".git")) || IOFile.Exists(Path.Combine(directory.FullName, ".git")))
+        {
+            root = directory.FullName;
+            break;
+        }
+    }
+    var repository = new Repository(new RepositoryId(StableId(root)), Path.GetFileName(root), root);
+    await store.UpsertRepositoryAsync(repository);
+    var sessionFile = Path.Combine(root, ".devx", "auto-session");
+    SessionState? session = null;
+    if (IOFile.Exists(sessionFile) && Guid.TryParse((await IOFile.ReadAllTextAsync(sessionFile)).Trim(), out var sessionGuid))
+        session = await store.GetSessionAsync(new GetSessionRequest(new SessionId(sessionGuid)));
+    if (session is null)
+    {
+        session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+        Directory.CreateDirectory(Path.GetDirectoryName(sessionFile)!);
+        await IOFile.WriteAllTextAsync(sessionFile, session.Id.Value.ToString());
+    }
+    return [.. args, "--session", session.Id.Value.ToString()];
+}
+
+static async Task EnsureAutomaticIndexAsync()
+{
+    var connectionString = new SqliteConnectionStringBuilder { DataSource = ResolveDatabasePath() }.ToString();
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var root = Path.GetFullPath(Environment.CurrentDirectory);
+    for (var directory = new DirectoryInfo(root); directory is not null; directory = directory.Parent)
+    {
+        if (Directory.Exists(Path.Combine(directory.FullName, ".devx")) || Directory.Exists(Path.Combine(directory.FullName, ".git")) || IOFile.Exists(Path.Combine(directory.FullName, ".git")))
+        {
+            root = directory.FullName;
+            break;
+        }
+    }
+    var repository = await store.GetRepositoryByRootPathAsync(root);
+    if (repository is not null && await store.CountIndexedFilesAsync(repository.Id) > 0)
+        return;
+    var result = await new RepositoryIndexingService(store).IndexAsync(root);
+    Console.Error.WriteLine($"(indexed {result.FilesIndexed} files)");
 }
 
 static async Task<int> PatchAsync(string connectionString, string[] args, string format)
@@ -933,9 +999,32 @@ static async Task<int> ReferencesAsync(string connectionString, string[] args, s
 
 static async Task<int> ReadAsync(string connectionString, string[] args, string format)
 {
+    var positional = args.Skip(1).TakeWhile(argument => !argument.StartsWith("--", StringComparison.Ordinal)).ToArray();
+    var inferredKind = positional.Length == 1;
+    if (positional.Length > 1 && positional[0] is not ("file" or "method" or "type" or "section"))
+    {
+        var failed = false;
+        foreach (var target in positional)
+        {
+            Console.WriteLine($"=== {target} ===");
+            var one = await ReadAsync(connectionString, ["read", target, .. args.Skip(1 + positional.Length)], format);
+            if (one != 0) failed = true;
+        }
+        return failed ? 2 : 0;
+    }
+    if (positional.Length == 1)
+    {
+        var target = positional[0];
+        var kind = target.Contains('#') ? "section" :
+            ((target.Contains(Path.DirectorySeparatorChar) || Path.HasExtension(target)) && IOFile.Exists(target) ? "file" : "method");
+        var remainder = args.Skip(2).ToArray();
+        args = ["read", kind, target, .. remainder];
+        if (kind == "file" && !HasFlag(args, "--full") && GetOption(args, "--range") is null) args = [.. args, "--full"];
+        positional = [kind, target];
+    }
     if (args.Length < 3)
     {
-        Console.Error.WriteLine("Usage: devx read <file|method|type> <target> --session <id> [--range start:end|--full]");
+        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]");
         return 1;
     }
 
@@ -952,6 +1041,34 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
     ProtocolRequest request;
     var started = DateTimeOffset.UtcNow;
+    var readTarget = args[2];
+    if (action is "method" or "type" && GetOption(args, "--id") is null && GetOption(args, "--query") is null && !readTarget.Contains('.'))
+    {
+        var lookup = await engine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.SearchSymbol, sessionId, JsonSerializer.SerializeToElement(new { query = readTarget })));
+        if (lookup.Data is { ValueKind: JsonValueKind.Object } result && TryGetPropertyIgnoreCase(result, "Symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array)
+        {
+            var exact = symbols.EnumerateArray().Where(symbol => TryGetPropertyIgnoreCase(symbol, "Name", out var name) && name.GetString() == readTarget).ToArray();
+            if (exact.Length > 1)
+            {
+                Console.WriteLine($"ambiguous: {readTarget} matches {exact.Length} symbols");
+                foreach (var candidate in exact)
+                {
+                    var qname = JsonPropertyText(candidate, "QualifiedName");
+                    var path = JsonPropertyText(candidate, "FilePath");
+                    var startLine = JsonPropertyText(candidate, "StartLine");
+                    var endLine = JsonPropertyText(candidate, "EndLine");
+                    var kind = JsonPropertyText(candidate, "Kind");
+                    Console.WriteLine($"{qname}  {path}:{startLine}-{endLine}  {kind}");
+                }
+                return 2;
+            }
+            if (exact.Length == 1)
+            {
+                var symbolKind = JsonPropertyText(exact[0], "Kind");
+                if (inferredKind && symbolKind is "Class" or "Type" or "Record" or "Interface" or "Struct" or "Enum") action = "type";
+            }
+        }
+    }
 
     if (action == "file")
     {
@@ -963,7 +1080,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
             return 1;
         }
 
-        request = new ProtocolRequest("1.0", "READ_FILE", sessionId, JsonSerializer.SerializeToElement(new { query = args[2], range, full }), GetAgentLabel(args));
+        request = new ProtocolRequest("1.0", "READ_FILE", sessionId, JsonSerializer.SerializeToElement(new { query = readTarget, range, full }), GetAgentLabel(args));
     }
     else if (action == "method")
     {
@@ -971,7 +1088,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
         var query = GetOption(args, "--query");
         if (id is null && query is null)
         {
-            query = args[2];
+            query = readTarget;
         }
 
         request = id is not null
@@ -984,7 +1101,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
         var query = GetOption(args, "--query");
         if (id is null && query is null)
         {
-            query = args[2];
+            query = readTarget;
         }
 
         request = id is not null
@@ -1008,7 +1125,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     }
     else
     {
-        Console.Error.WriteLine("Usage: devx read <file|method|type> <target> --session <id> [--range start:end|--full]");
+        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]");
         return 1;
     }
 
@@ -1037,6 +1154,20 @@ static bool HasFlag(string[] args, string name)
 
     return false;
 }
+
+static bool TryGetPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)
+{
+    if (element.ValueKind == JsonValueKind.Object)
+    {
+        foreach (var property in element.EnumerateObject())
+            if (property.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) { value = property.Value; return true; }
+    }
+    value = default;
+    return false;
+}
+
+static string JsonPropertyText(JsonElement element, string name)
+    => TryGetPropertyIgnoreCase(element, name, out var value) ? value.ToString() : string.Empty;
 
 static async Task<int> CallersAsync(string connectionString, string[] args, string format)
 {
@@ -1960,9 +2091,11 @@ Usage:
   devx index status [--session <id>]
   devx index update <file> [<file> ...] --session <id>
   devx index changed --session <id>
-  devx search <symbol|text> <query> --session <id> [--agent <label>]
+  devx search <query> [--session <id>] [--agent <label>]
+  devx search <symbol|text> <query> [--session <id>] [--agent <label>]
   devx snapshot <file> --session <id> [--agent <label>]
-  devx read <file|method|type|section> <target> --session <id> [--range start:end|--full]
+  devx read <name|file#Heading|file> [<name> ...] [--session <id>]
+  devx read <file|method|type|section> <target> [--range start:end|--full] [--session <id>]
   devx artifact create <name> --content <text>|--content-file <path>|--content-json <json-string>|--content-stdin
   devx artifact delete <name>
   devx artifact path <name>

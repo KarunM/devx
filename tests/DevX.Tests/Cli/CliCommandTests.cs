@@ -106,6 +106,90 @@ public sealed class CliCommandTests
         }
     }
 
+    [Fact]
+    public async Task AutoSession_ReusesPerRepositorySessionAndReplacesStaleFile()
+    {
+        await ProcessStateLock.WaitAsync();
+        var originalDirectory = Environment.CurrentDirectory;
+        var root = Directory.CreateTempSubdirectory("devx-auto-session").FullName;
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, ".git"));
+            await File.WriteAllTextAsync(Path.Combine(root, "Sample.cs"), "public sealed class Sample { public void NormalizeName() { } }");
+            Environment.CurrentDirectory = root;
+            var (firstCode, firstOutput) = await InvokeCliAsync("search", "NormalizeName");
+            Assert.Equal(0, firstCode);
+            Assert.Contains("(indexed", firstOutput);
+            var sessionPath = Path.Combine(root, ".devx", "auto-session");
+            var firstSession = await File.ReadAllTextAsync(sessionPath);
+            var (secondCode, _) = await InvokeCliAsync("search", "NormalizeName");
+            Assert.Equal(0, secondCode);
+            Assert.Equal(firstSession, await File.ReadAllTextAsync(sessionPath));
+            await File.WriteAllTextAsync(sessionPath, "stale");
+            var (staleCode, _) = await InvokeCliAsync("search", "NormalizeName");
+            Assert.Equal(0, staleCode);
+            Assert.NotEqual("stale", await File.ReadAllTextAsync(sessionPath));
+        }
+        finally
+        {
+            Environment.CurrentDirectory = originalDirectory;
+            Directory.Delete(root, recursive: true);
+            ProcessStateLock.Release();
+        }
+    }
+
+    [Fact]
+    public async Task Read_ShortFileSymbolAndMultiTargetFormsWorkWithoutExplicitSession()
+    {
+        await ProcessStateLock.WaitAsync();
+        var originalDirectory = Environment.CurrentDirectory;
+        var root = Directory.CreateTempSubdirectory("devx-short-read").FullName;
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, ".git"));
+            await File.WriteAllTextAsync(Path.Combine(root, "a.py"), "def normalize_name():\n    return 'normalized'\n\ndef other():\n    return 'other'\n");
+            await File.WriteAllTextAsync(Path.Combine(root, "b.py"), "def run():\n    return 'first'\n");
+            await File.WriteAllTextAsync(Path.Combine(root, "c.py"), "def run():\n    return 'second'\n");
+            await File.WriteAllTextAsync(Path.Combine(root, "README.md"), "# Guide\n\n## Usage\n\nDistinctive fallback phrase.\n");
+            await File.WriteAllTextAsync(Path.Combine(root, "replace.txt"), "before");
+            Environment.CurrentDirectory = root;
+            var (symbolCode, symbolOutput) = await InvokeCliAsync("read", "normalize_name");
+            Assert.Equal(0, symbolCode);
+            Assert.Contains("normalized", symbolOutput);
+            var (fileCode, fileOutput) = await InvokeCliAsync("read", "a.py");
+            Assert.Equal(0, fileCode);
+            Assert.Contains("def normalize_name", fileOutput);
+            var (sectionCode, sectionOutput) = await InvokeCliAsync("read", "README.md#Usage");
+            Assert.Equal(0, sectionCode);
+            Assert.Contains("Distinctive fallback phrase", sectionOutput);
+            var (multiSuccessCode, multiSuccessOutput) = await InvokeCliAsync("read", "normalize_name", "other");
+            Assert.Equal(0, multiSuccessCode);
+            Assert.Contains("=== normalize_name ===", multiSuccessOutput);
+            Assert.Contains("=== other ===", multiSuccessOutput);
+            var (multiCode, multiOutput) = await InvokeCliAsync("read", "normalize_name", "MissingName");
+            Assert.Equal(2, multiCode);
+            Assert.Contains("=== normalize_name ===", multiOutput);
+            Assert.Contains("=== MissingName ===", multiOutput);
+            Assert.True(multiOutput.IndexOf("=== normalize_name ===", StringComparison.Ordinal) < multiOutput.IndexOf("=== MissingName ===", StringComparison.Ordinal));
+            var (ambiguousCode, ambiguousOutput) = await InvokeCliAsync("read", "run");
+            Assert.Equal(2, ambiguousCode);
+            Assert.Contains("ambiguous: run matches 2 symbols", ambiguousOutput);
+            Assert.Contains("b.<module>.run", ambiguousOutput);
+            var (fallbackCode, fallbackOutput) = await InvokeCliAsync("search", "Distinctive fallback phrase");
+            Assert.Equal(0, fallbackCode);
+            Assert.Contains("no symbol match; showing text matches", fallbackOutput);
+            var (replaceCode, _) = await InvokeCliAsync("replace", "replace.txt", "--old", "before", "--new", "after");
+            Assert.Equal(0, replaceCode);
+            Assert.Equal("after", await File.ReadAllTextAsync(Path.Combine(root, "replace.txt")));
+        }
+        finally
+        {
+            Environment.CurrentDirectory = originalDirectory;
+            Directory.Delete(root, recursive: true);
+            ProcessStateLock.Release();
+        }
+    }
+
     private static async Task<(int ExitCode, string Output)> InvokeCliAsync(params string[] args)
     {
         var originalOut = Console.Out;
