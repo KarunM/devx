@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.6.12
+
+A release about not needing the second call. In the 1.6.11 arm-B transcripts the agent made 349 calls where arm A
+made 153, and the difference was almost entirely `devx search text` (114 calls, 25 of them empty), `devx index
+update` (43, pure overhead) and `devx read section` (30, 23 of them answered with an error). Each of those is a call
+that should have been answered the first time, or should not have been needed at all.
+
+- **`devx search text` is a regex search, and it answers in one call.** It takes full regex -- `Load(Level|Moniker)`
+  matched nothing before and now matches both -- and it matches several queries in one call (`devx search text "a"
+  "b"`), so an agent unsure of a name is not forced into a second round trip. ripgrep is the engine when `rg` is on
+  `PATH` (fast, regex, respects `.gitignore`), with the in-process index scan as the fallback; the fallback takes a
+  regex too, so the answer does not depend on whether ripgrep is installed. A pattern that will not compile --
+  `GetValueOrDefault(`, which agents really typed -- is retried as a literal rather than reported as no matches,
+  which was indistinguishable from "not in this repository".
+- **`devx search text` results look like `rg -n` results, plus the symbol.** Each hit is
+  `path:line: <the matching line>` followed by the enclosing symbol in brackets, so the next call is a `devx read`
+  of a name the agent already has instead of another hunt. The cap still applies, and its message now says how to
+  narrow rather than only that it truncated. `--format json` is unchanged: the symbol is added in the agent
+  rendering only, and `ContentSearchResult` keeps its five fields.
+- **Every write re-indexes the files it touched.** `devx replace`, `devx patch apply`, `devx patch rollback`, the
+  patch create/delete operations and the edits made over MCP all leave the index describing the new text, so the
+  `devx index update` after every edit that the harness used to demand -- 43 calls in one series of 39 runs -- is no
+  longer needed. A file the write deleted is removed from the index rather than left behind as a document that is not
+  there. `--no-index` opts out. The `devx init` rules no longer mention `index update` as a step after editing.
+- **The generated rules teach the one-call forms.** `devx read <name> <name>` reads several symbols in one call, and
+  a `devx search` that matches exactly one symbol already returns its source, so the rules now say not to spend a
+  second call on what the first one answered.
+
+Known: `devx read section` is unchanged in this release. Its 30 calls in the transcripts were 23 failures, and they
+are mostly the caller's argument rather than the reader's fault -- 8 passed a bare `file#` with no heading at all
+(the call they wanted was `devx read <file>`), 8 named something that is not a heading (`Option`,
+`LevelOutputFormat`, a pytest function), 1 was an ambiguous prefix, and 3 were a heading the index holds but cannot
+map back to a source span. Changing it is a design question, not a release-week patch.
+
 ## 1.6.11
 
 A release about being findable. In the arm-B benchmark transcripts the agent lost up to 8 of 11 failures to the same
