@@ -19,7 +19,7 @@ public sealed class ReplaceCommandTests
     [Fact] public async Task Replace_Occurrence_ReplacesSelectedOccurrence() => await RunCase("one one", ["--old", "one", "--new", "two", "--occurrence", "2"], 0, "one two");
 
     [Fact]
-    public async Task Replace_VerifyIsOptInAndAddsBuildAndTestLines()
+    public async Task Replace_VerifiesOnlyWhenAskedAndAnswersInOneLine()
     {
         await StateLock.WaitAsync(); var oldOut = Console.Out;
         var root = Directory.CreateTempSubdirectory("devx-cli-replace-verify").FullName;
@@ -29,24 +29,37 @@ public sealed class ReplaceCommandTests
             var output = new StringWriter(); Console.SetOut(output);
             var defaultExit = await ReplaceCommand.RunAsync(["replace", "sample.md", "--old", "old", "--new", "new"], root);
             Assert.Equal(0, defaultExit);
+            Assert.DoesNotContain("PASS edit", output.ToString());
+
+            System.IO.File.WriteAllText(Path.Combine(root, "sample.md"), "old");
+            output.GetStringBuilder().Clear();
+            var verifiedExit = await ReplaceCommand.RunAsync(["replace", "sample.md", "--old", "old", "--new", "new", "--verify"], root, FakeVerifier);
+            Assert.Equal(0, verifiedExit);
+            // 1.6.14: ONE line for a passing verification, not a build: line and a tests: line.
+            Assert.Contains("PASS edit — PASS tests", output.ToString());
             Assert.DoesNotContain("build:", output.ToString());
 
             System.IO.File.WriteAllText(Path.Combine(root, "sample.md"), "old");
             output.GetStringBuilder().Clear();
-            var verifiedExit = await ReplaceCommand.RunAsync(["replace", "sample.md", "--old", "old", "--new", "new", "--verify"], root,
-                _ => new VerifyAfterEdit(_ => Task.FromResult(new ExecutionRecord("skip", true, "", [], "skipped (no build step for .md)")), _ => Task.FromResult(new ExecutionRecord("test", true, "", [], "PASS tests")), _ => []));
-            Assert.Equal(0, verifiedExit);
-            Assert.Contains("build: skipped (no build step for .md)", output.ToString());
-            Assert.Contains("tests: PASS tests", output.ToString());
+            var buildOnlyExit = await ReplaceCommand.RunAsync(["replace", "sample.md", "--old", "old", "--new", "new", "--verify=build"], root, FakeVerifier);
+            Assert.Equal(0, buildOnlyExit);
+            Assert.Contains("PASS edit", output.ToString());
+            Assert.DoesNotContain("PASS tests", output.ToString());
 
             System.IO.File.WriteAllText(Path.Combine(root, "sample.md"), "old");
             output.GetStringBuilder().Clear();
             var noVerifyExit = await ReplaceCommand.RunAsync(["replace", "sample.md", "--old", "old", "--new", "new", "--verify", "--no-verify"], root);
             Assert.Equal(0, noVerifyExit);
-            Assert.DoesNotContain("build:", output.ToString());
+            Assert.DoesNotContain("PASS edit", output.ToString());
         }
         finally { Console.SetOut(oldOut); Directory.Delete(root, true); StateLock.Release(); }
     }
+
+    // A .md file has no build step and one passing "test", so the mode is visible in the output.
+    private static VerifyAfterEdit FakeVerifier(string root) => new(
+        _ => Task.FromResult(new ExecutionRecord("skip", true, "", [], "skipped (no build step for .md)")),
+        _ => Task.FromResult(new ExecutionRecord("test", true, "", [], "PASS tests")),
+        _ => []);
 
     private static async Task RunCase(string original, string[] options, int expected, string expectedContent, bool ambiguous = false, bool missing = false)
     {

@@ -218,7 +218,7 @@ public sealed class CliCommandTests
     public async Task HelpStartsWithAgentQuickStart()
     {
         var (_, output) = await InvokeCliAsync("--help");
-        Assert.StartsWith("1. devx search <name>   (symbols; falls back to text)\n2. devx read <name> [more names]   (source of a symbol, file, or file#Heading)\n3. devx replace <file> --old <text> --new <text>   (edit; add --all or --occurrence n)\n4. devx test [file|dir]   (build+test summary)\nAdd --format agent for compact output; no session needed.", output);
+        Assert.StartsWith("1. devx search <name>   (symbols; falls back to text)\n2. devx read <name> [more names]   (source of a symbol, file, or file#Heading)\n3. devx replace <file> --old <text> --new <text> --verify   (edit, then build + tests in the same call)\n4. devx verify [build|test|both]   (check without editing; build + tests, one summary)\nAdd --format agent for compact output; no session needed.", output);
     }
 
     [Fact]

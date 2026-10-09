@@ -103,6 +103,68 @@ public sealed class ConfiguredCommandTargetTests
         Assert.Equal("configured", payload.Target.RuntimeKind);
     }
 
+    [Fact]
+    public async Task Verify_Both_RunsTheBuildThenTheTestsInOneResponse()
+    {
+        var (engine, session, _) = await CreateEngineAsync("devx-verify-both",
+            TestBlock, """{ "command": "python3", "args": ["-c", "print('CONFIG-BUILD')"] }""");
+
+        var response = await ExecuteAsync(engine, session, ProtocolOperations.RunVerify, new { });
+
+        Assert.True(response.Success, response.Errors.FirstOrDefault()?.Message);
+        var payload = response.Data!.Value.Deserialize<VerifyExecutionResponse>()!;
+        Assert.Equal("both", payload.Mode);
+        Assert.True(payload.Build.Execution.Success);
+        Assert.NotNull(payload.Tests);
+        Assert.True(payload.Tests!.Execution.Success);
+        Assert.False(payload.TestsSkipped);
+    }
+
+    [Fact]
+    public async Task Verify_BuildMode_LeavesTheTestsUnrun()
+    {
+        var (engine, session, _) = await CreateEngineAsync("devx-verify-build",
+            TestBlock, """{ "command": "python3", "args": ["-c", "print('CONFIG-BUILD')"] }""");
+
+        var response = await ExecuteAsync(engine, session, ProtocolOperations.RunVerify, new { mode = "build" });
+
+        Assert.True(response.Success, response.Errors.FirstOrDefault()?.Message);
+        var payload = response.Data!.Value.Deserialize<VerifyExecutionResponse>()!;
+        Assert.Equal("build", payload.Mode);
+        Assert.Null(payload.Tests);
+        Assert.False(payload.TestsSkipped);
+    }
+
+    [Fact]
+    public async Task Verify_TestMode_ReportsTheBuildAsSkippedRatherThanClaimingIt()
+    {
+        var (engine, session, _) = await CreateEngineAsync("devx-verify-test", TestBlock, null);
+
+        var response = await ExecuteAsync(engine, session, ProtocolOperations.RunVerify, new { mode = "test" });
+
+        Assert.True(response.Success, response.Errors.FirstOrDefault()?.Message);
+        var payload = response.Data!.Value.Deserialize<VerifyExecutionResponse>()!;
+        Assert.Equal("test", payload.Mode);
+        Assert.Contains("skipped (--verify=test)", payload.Build.Execution.Summary);
+        Assert.NotNull(payload.Tests);
+    }
+
+    [Fact]
+    public async Task Verify_FailingBuild_SkipsTheTestsAndKeepsTheError()
+    {
+        var (engine, session, _) = await CreateEngineAsync("devx-verify-fail",
+            TestBlock, """{ "command": "python3", "args": ["-c", "import sys; print('CONFIG-BUILD boom'); sys.exit(3)"] }""");
+
+        var response = await ExecuteAsync(engine, session, ProtocolOperations.RunVerify, new { });
+
+        Assert.False(response.Success);
+        var payload = response.Data!.Value.Deserialize<VerifyExecutionResponse>()!;
+        Assert.False(payload.Build.Execution.Success);
+        Assert.Null(payload.Tests);
+        Assert.True(payload.TestsSkipped);
+        Assert.Contains("Build failed", response.Errors.First().Message);
+    }
+
     private static Task<ProtocolResponse> ExecuteAsync(
         ProtocolEngine engine, SessionState session, string operation, object payload)
         => engine.ExecuteAsync(new ProtocolRequest("1.0", operation, session.Id.Value.ToString(),

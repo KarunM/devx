@@ -86,6 +86,7 @@ public sealed class ProtocolEngine : IProtocolEngine
                 ProtocolOperations.PatchRollback => await HandlePatchRollbackAsync(request, session, cancellationToken),
                 ProtocolOperations.RunBuild => await HandleRunBuildAsync(request, session, cancellationToken),
                 ProtocolOperations.RunTests => await HandleRunTestsAsync(request, session, cancellationToken),
+                ProtocolOperations.RunVerify => await HandleRunVerifyAsync(request, session, cancellationToken),
                 ProtocolOperations.GetDiagnostics => await HandleGetDiagnosticsAsync(session, cancellationToken),
                 ProtocolOperations.GetMethod or ProtocolOperations.GetCallers or ProtocolOperations.GetCallees or ProtocolOperations.GetTests
                     => Fail("HandlerNotImplemented", $"Operation '{request.Operation}' is not implemented yet."),
@@ -468,6 +469,87 @@ public sealed class ProtocolEngine : IProtocolEngine
         var (testContext, testTarget) = ResolvedOrConfigured(root, resolution, "test");
         var response = new ValidationExecutionResponse("test", testContext, testTarget, execution);
         return new ProtocolResponse(execution.Success, JsonSerializer.SerializeToElement(response), [], execution.Success ? [] : [new ProtocolError("ValidationError", CompactFailure("Tests", execution, root))]);
+    }
+
+    /// <summary>`devx verify [build|test|both] [target...]` in one call: the build, then the
+    /// relevant tests unless the build failed or the mode was build-only. Both runs come back in
+    /// one response, so an agent that edits and checks spends one call instead of three.
+    /// A build failure skips the tests and is reported, never hidden (brief OSS14 item 1).</summary>
+    private async Task<ProtocolResponse> HandleRunVerifyAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
+    {
+        var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return Fail("RepositoryNotIndexed", "Repository root was not found.");
+        }
+
+        var mode = VerifyAfterEdit.ParseMode(ReadString(request.Payload, "mode"));
+        var configuredBuild = DevXCommandConfig.TryRead(root, "build") is not null;
+        var configuredTests = DevXCommandConfig.TryRead(root, "test") is not null;
+
+        var buildResolution = ResolveValidationContext(root, request.Payload, ValidationMode.Build);
+        if ((!buildResolution.Success || buildResolution.Context is null || buildResolution.SelectedTarget is null) && !configuredBuild)
+        {
+            return Fail("ValidationError", buildResolution.Errors.FirstOrDefault() ?? "Runtime target resolution failed.");
+        }
+
+        var (buildContext, buildTarget) = ResolvedOrConfigured(root, buildResolution, "build");
+        // `--verify=test` is the Python case: there is nothing to compile, so a build record that
+        // says "skipped" is more honest than a py_compile pass dressed up as a build.
+        var buildExecution = mode == VerifyMode.Test
+            ? VerifyAfterEdit.TestOnlyBuild(ReadString(request.Payload, "target") ?? string.Empty)
+            : await _buildTestService.RunBuildAsync(root, buildResolution.TargetSelector, cancellationToken);
+        await _sessionStore.AddExecutionAsync(new AddExecutionRequest(session.Id, buildExecution), cancellationToken);
+        foreach (var diagnostic in buildExecution.Diagnostics)
+        {
+            await _sessionStore.AddDiagnosticAsync(new AddDiagnosticRequest(session.Id, diagnostic), cancellationToken);
+        }
+        var buildResponse = new ValidationExecutionResponse("build", buildContext, buildTarget, buildExecution);
+
+        if (!buildExecution.Success || mode == VerifyMode.Build)
+        {
+            var testsSkipped = !buildExecution.Success;
+            var only = new VerifyExecutionResponse(VerifyAfterEdit.ModeName(mode), buildResponse, null, testsSkipped);
+            return new ProtocolResponse(buildExecution.Success, JsonSerializer.SerializeToElement(only), [],
+                buildExecution.Success ? [] : [new ProtocolError("ValidationError", CompactFailure("Build", buildExecution, root))]);
+        }
+
+        var testResolution = ResolveValidationContext(root, request.Payload, ValidationMode.Test);
+        if ((!testResolution.Success || testResolution.Context is null || testResolution.SelectedTarget is null) && !configuredTests)
+        {
+            var unresolved = new VerifyExecutionResponse(VerifyAfterEdit.ModeName(mode), buildResponse, null, true);
+            return new ProtocolResponse(false, JsonSerializer.SerializeToElement(unresolved), [],
+                [new ProtocolError("ValidationError", testResolution.Errors.FirstOrDefault() ?? "Runtime target resolution failed.")]);
+        }
+
+        var targets = ReadStringArray(request.Payload, "targets");
+        if (targets.Count == 0 && !configuredTests && !string.IsNullOrWhiteSpace(testResolution.TargetSelector))
+        {
+            targets = [testResolution.TargetSelector];
+        }
+        else if (targets.Count == 1 && VerifyAfterEdit.HasBuildStep(targets[0]) && !VerifyAfterEdit.IsTestFile(root, Path.Combine(root, targets[0])))
+        {
+            // A named source file means "the tests for this file", not "run this file as a test" --
+            // the same rule `devx replace --verify` uses, so the two never disagree.
+            var relevant = VerifyAfterEdit.FindRelevantTestFiles(root, targets[0]);
+            if (relevant.Count > 0) targets = relevant;
+        }
+
+        var timeoutSeconds = ReadPositiveInt(request.Payload, "timeoutSeconds") ?? 300;
+        var testFilter = ReadString(request.Payload, "filter");
+        var testExecution = await _buildTestService.RunTestsAsync(root, targets, TimeSpan.FromSeconds(timeoutSeconds), cancellationToken, testFilter);
+        await _sessionStore.AddExecutionAsync(new AddExecutionRequest(session.Id, testExecution), cancellationToken);
+        foreach (var diagnostic in testExecution.Diagnostics)
+        {
+            await _sessionStore.AddDiagnosticAsync(new AddDiagnosticRequest(session.Id, diagnostic), cancellationToken);
+        }
+
+        var (testContext, testTarget) = ResolvedOrConfigured(root, testResolution, "test");
+        var testResponse = new ValidationExecutionResponse("test", testContext, testTarget, testExecution);
+        var success = testExecution.Success;
+        var result = new VerifyExecutionResponse(VerifyAfterEdit.ModeName(mode), buildResponse, testResponse, false);
+        return new ProtocolResponse(success, JsonSerializer.SerializeToElement(result), [],
+            success ? [] : [new ProtocolError("ValidationError", CompactFailure("Tests", testExecution, root))]);
     }
 
     private async Task<ProtocolResponse> HandleGetDiagnosticsAsync(SessionState session, CancellationToken cancellationToken)
@@ -1190,6 +1272,13 @@ public sealed class ProtocolEngine : IProtocolEngine
            && element.TryGetInt32(out var value)
            && value > 0
             ? value
+            : null;
+
+    private static string? ReadString(JsonElement payload, string propertyName)
+        => payload.ValueKind == JsonValueKind.Object
+           && payload.TryGetProperty(propertyName, out var element)
+           && element.ValueKind == JsonValueKind.String
+            ? element.GetString()
             : null;
 
     private static bool TryGetRange(JsonElement payload, out int startLine, out int endLine)

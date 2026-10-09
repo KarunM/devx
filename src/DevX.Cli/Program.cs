@@ -48,7 +48,7 @@ static async Task<int> RunAsync(string[] args)
         return await InitAsync(args, GetOption(args, "--format") ?? "text");
     }
 
-    if (!args.Contains("--session", StringComparer.Ordinal) && args[0] is ("index" or "search" or "read" or "method" or "type" or "callers" or "callees" or "references" or "snapshot" or "test" or "build" or "run" or "replace" or "patch"))
+    if (!args.Contains("--session", StringComparer.Ordinal) && args[0] is ("index" or "search" or "read" or "method" or "type" or "callers" or "callees" or "references" or "snapshot" or "test" or "build" or "verify" or "run" or "replace" or "patch"))
     {
         args = await AddAutomaticSessionAsync(args);
     }
@@ -132,6 +132,9 @@ static async Task<int> RunAsync(string[] args)
 
         case "test":
             return await RunTestsAsync(connectionString, args, format);
+
+        case "verify":
+            return await RunVerifyAsync(connectionString, args, format);
 
         case "diagnostics":
             return await DiagnosticsAsync(connectionString, args, format);
@@ -260,7 +263,7 @@ static string? ClosestCommand(string command)
     string[] KnownCommands =
     {
         "init", "index", "search", "read", "snapshot", "session", "capabilities",
-        "test", "build", "patch", "replace", "mcp", "ask", "report", "version"
+        "test", "build", "verify", "patch", "replace", "mcp", "ask", "report", "version"
     };
     string? best = null;
     var bestDistance = int.MaxValue;
@@ -305,7 +308,8 @@ static void PrintAgentHelp()
     Console.WriteLine("  EDIT -- pick one:");
     Console.WriteLine("  devx replace <file> --old <text> --new <text>   one text edit (--all | --occurrence n)");
     Console.WriteLine("  devx patch create|validate|apply  whole-function edits by name (--op; see --help)");
-    Console.WriteLine("  devx test [<files>]               run tests; exit 0 = pass");
+    Console.WriteLine("  then check it in ONE call: add --verify to the LAST edit, or run `devx verify`");
+    Console.WriteLine("  devx verify [build|test|both]     build + tests, one summary (`verify build` = build only)");
     Console.WriteLine("  devx capabilities                 what this build can do");
     if (IsAskConfigured(Environment.CurrentDirectory))
     {
@@ -835,12 +839,80 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
     await store.InitializeAsync();
     var engine = WriteEngine(store, args);
     using var document = JsonDocument.Parse(patchJson);
+    // Brief OSS14 item 2: `--verify[=build|test|both]` on the edit commands. Opt-in, so a patch
+    // applied without the flag behaves exactly as it did in 1.6.13.
+    var verifyMode = VerifyAfterEdit.ParseVerifyFlag(args);
+    var patchedPaths = verifyMode is null ? [] : PatchPaths(document.RootElement);
     var request = new ProtocolRequest("1.0", ProtocolOperations.Patch, sessionId, document.RootElement.Clone());
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
     await store.AddOperationMetricAsync(new OperationMetric("patch", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, patchPath), GetAgentLabel(args)));
     WriteResponse(response, format);
-    return response.Success ? 0 : 1;
+    if (!response.Success) return 1;
+    return verifyMode is { } mode && patchedPaths.Count > 0
+        ? await VerifyPatchedFilesAsync(format, mode, patchedPaths)
+        : 0;
+}
+
+// Every `path` the patch names, at any depth: one file for a ReplaceMethod, several for a
+// multi-file patch. Blank and duplicate values are dropped.
+static IReadOnlyList<string> PatchPaths(JsonElement patch)
+{
+    var paths = new List<string>();
+    void Walk(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (property.NameEquals("path") && property.Value.ValueKind == JsonValueKind.String)
+                {
+                    var value = property.Value.GetString();
+                    if (!string.IsNullOrWhiteSpace(value) && !paths.Contains(value, StringComparer.Ordinal)) paths.Add(value);
+                }
+                else Walk(property.Value);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray()) Walk(item);
+        }
+    }
+    Walk(patch);
+    return paths;
+}
+
+// The verify half of `devx patch apply --verify`: the build for the first patched file (which
+// locates its project) and the relevant tests of every patched file, in one response.
+static async Task<int> VerifyPatchedFilesAsync(string format, VerifyMode mode, IReadOnlyList<string> paths)
+{
+    var root = FindRepositoryRoot(Environment.CurrentDirectory);
+    var runner = new DotnetBuildTestService();
+    var build = mode == VerifyMode.Test
+        ? VerifyAfterEdit.TestOnlyBuild(paths[0])
+        : await VerifyAfterEdit.RunBuildAsync(runner, root, paths[0]);
+    ExecutionRecord? tests = null;
+    if (build.Success && mode != VerifyMode.Build)
+    {
+        var relevant = paths.SelectMany(path => VerifyAfterEdit.FindRelevantTestFiles(root, path))
+            .Distinct(StringComparer.Ordinal).ToArray();
+        tests = await runner.RunTestsAsync(root, relevant, TimeSpan.FromSeconds(300));
+    }
+    var verification = new VerifyAfterEditResult(build, tests, build.Summary.StartsWith("skip", StringComparison.OrdinalIgnoreCase));
+    var success = build.Success && (tests?.Success ?? true);
+    if (format == "json")
+    {
+        Console.WriteLine(JsonSerializer.Serialize(new { Verify = new { Mode = VerifyAfterEdit.ModeName(mode), Build = build.Summary, Tests = tests?.Summary } }));
+    }
+    else if (success)
+    {
+        Console.WriteLine(VerifyAfterEdit.FormatOneLine("patch", verification));
+    }
+    else
+    {
+        foreach (var line in VerifyAfterEdit.FormatVerifyLines(verification)) Console.WriteLine(line);
+    }
+    return success ? 0 : 1;
 }
 
 static async Task<int> ArtifactAsync(string[] args, string format)
@@ -1022,6 +1094,50 @@ static async Task<int> RunTestsAsync(string connectionString, string[] args, str
     {
         Console.WriteLine(ValidationOutputFormatter.Format(response, "test"));
     }
+    return response.Success ? 0 : 1;
+}
+
+// Brief OSS14 item 1: `devx verify [build|test|both] [target...]` -- the build and the relevant
+// tests in ONE call with ONE compact summary. build and test stay exactly as they were, for a
+// caller that wants only one of the two; verify is the "edit then check" call agents were making
+// as three round-trips.
+static async Task<int> RunVerifyAsync(string connectionString, string[] args, string format)
+{
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session. Verify requires a session (add --session <id>, or run from the repository).");
+        return 1;
+    }
+
+    var positionals = GetPositionals(args, 1);
+    var mode = positionals.Count > 0 && VerifyAfterEdit.IsModeName(positionals[0])
+        ? VerifyAfterEdit.ParseMode(positionals[0])
+        : VerifyMode.Both;
+    var targets = positionals.Count > 0 && VerifyAfterEdit.IsModeName(positionals[0])
+        ? positionals.Skip(1).ToArray()
+        : positionals.ToArray();
+    var timeoutSeconds = int.TryParse(GetOption(args, "--timeout"), out var parsedTimeout) && parsedTimeout > 0
+        ? parsedTimeout
+        : 300;
+
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var request = new ProtocolRequest("1.0", ProtocolOperations.RunVerify, sessionId, JsonSerializer.SerializeToElement(new
+    {
+        runtime = GetOption(args, "--runtime"),
+        target = GetOption(args, "--target"),
+        mode = VerifyAfterEdit.ModeName(mode),
+        targets,
+        timeoutSeconds,
+        filter = GetOption(args, "--filter")
+    }));
+    var started = DateTimeOffset.UtcNow;
+    var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("verify", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, GetOption(args, "--target")), GetAgentLabel(args)));
+    if (format == "json") WriteResponse(response, format);
+    else Console.WriteLine(ValidationOutputFormatter.FormatVerify(response));
     return response.Success ? 0 : 1;
 }
 
@@ -2524,8 +2640,8 @@ static void PrintHelp()
     Console.WriteLine("""
 1. devx search <name>   (symbols; falls back to text)
 2. devx read <name> [more names]   (source of a symbol, file, or file#Heading)
-3. devx replace <file> --old <text> --new <text>   (edit; add --all or --occurrence n)
-4. devx test [file|dir]   (build+test summary)
+3. devx replace <file> --old <text> --new <text> --verify   (edit, then build + tests in the same call)
+4. devx verify [build|test|both]   (check without editing; build + tests, one summary)
 Add --format agent for compact output; no session needed.
 
 Usage:
@@ -2545,16 +2661,17 @@ Usage:
   devx artifact delete <name>
   devx artifact path <name>
   devx patch create <output-file> --session <id> --op <Operation> --path <relative-path> [options] [--append]
-  devx replace <file> --old <text> --new <text> [--all | --occurrence <n>]
+  devx replace <file> --old <text> --new <text> [--all | --occurrence <n>] [--verify[=build|test|both]]
   Editing: simple edit -> devx replace; structured/multi-file edits -> devx patch
   devx patch preview <patch-file> --session <id>
   devx patch validate <patch-file> --session <id>
-  devx patch apply <patch-file> --session <id>
+  devx patch apply <patch-file> --session <id> [--verify[=build|test|both]]
   devx patch rollback <patch-file> --session <id>
   devx health [--session <id>]
   devx doctor [--session <id>]
   devx build --session <id> [--runtime <kind>] [--target <path|name>]
   devx test [<file> ...] --session <id> [--runtime <kind>] [--target <path|name>] [--timeout <seconds>]
+  devx verify [build|test|both] [<file|dir> ...] [--runtime <kind>] [--target <path|name>] [--timeout <seconds>]
   devx report html [--period 30d] [--session <id>] [--output <file>] [--format html|json] [--anonymize] [--blocked-terms <file>]
   devx report --session <id> --format json [--anonymize] [--blocked-terms <file>]
   devx report html --input <events.json> [--org <name>] [--team <name>] [--repo <name>]
@@ -2597,7 +2714,8 @@ Global options:
   --task <label>   Attribute recorded calls to a brief/task (caller supplied)
 
 Notes:
-  build, test, and report require explicit --session selection.
+  build, test, and verify find the repository's session themselves -- --session is optional.
+  report requires explicit --session selection.
 """);
     // `ask` only exists for a repo that configured an endpoint, so it is advertised only
     // there -- an unconfigured repo gets no pointer to a command that will refuse to run.

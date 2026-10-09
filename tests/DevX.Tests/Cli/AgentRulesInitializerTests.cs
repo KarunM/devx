@@ -39,7 +39,9 @@ public sealed class AgentRulesInitializerTests
         Assert.Contains("--new", content);
         Assert.Contains("devx patch create", content);
         Assert.Contains("The four steps are", content);
-        Assert.Contains("`test`", content);
+        // 1.6.14 item 4: the check is part of the change step (--verify), so edit+check is one call.
+        Assert.Contains("--verify", content);
+        Assert.Contains("devx verify", content);
     }
 
     [Fact]

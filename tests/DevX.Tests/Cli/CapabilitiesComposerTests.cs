@@ -43,7 +43,7 @@ public sealed class CapabilitiesComposerTests
 
         var expected = new[]
         {
-            "version", "init", "ask", "index", "search", "session", "artifact", "patch", "build", "test",
+            "version", "init", "ask", "index", "search", "session", "artifact", "patch", "build", "test", "verify",
             "diagnostics", "health", "doctor", "snapshot", "method", "type", "callers",
             "callees", "references", "read", "report", "capabilities"
         };
@@ -245,7 +245,7 @@ public sealed class CapabilitiesComposerTests
         Assert.Equal("Search indexed symbols or full text", searchCommand.Description);
         Assert.Equal("Read file, method, or type source", readCommand.Description);
         Assert.Equal("Generate a session report", reportCommand.Description);
-        Assert.Contains("Build, test, and report require explicit session selection.", caps.CompatibilityNotes);
+        Assert.Contains("Build, test, and verify resolve the repository's session themselves; report requires explicit --session selection.", caps.CompatibilityNotes);
     }
 
     [Fact]

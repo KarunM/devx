@@ -83,12 +83,12 @@ public static class AgentRulesInitializer
         builder.AppendLine($"devx search text \"<text>\" --session \"$SESSION_ID\" --agent {agent}");
         builder.AppendLine($"devx read method \"<symbol>\" \"<another symbol>\" --session \"$SESSION_ID\" --agent {agent}   # several names in one call");
         builder.AppendLine($"devx read section 'path/to/file.md#Heading' --session \"$SESSION_ID\" --agent {agent}");
-        builder.AppendLine($"devx replace <file> --old \"<text>\" --new \"<text>\" --session \"$SESSION_ID\" --agent {agent}");
+        builder.AppendLine($"devx replace <file> --old \"<text>\" --new \"<text>\" --verify --session \"$SESSION_ID\" --agent {agent}   # edit + build + tests, ONE call");
         builder.AppendLine($"devx patch create <out.json> --op ReplaceMethod --path <file> --session \"$SESSION_ID\" --agent {agent}");
-        builder.AppendLine($"devx test [<test-file> ...] --session \"$SESSION_ID\" --timeout 300 --agent {agent}");
+        builder.AppendLine($"devx verify [build|test|both] --session \"$SESSION_ID\" --agent {agent}   # check without editing; `verify build` is build-only");
         builder.AppendLine("```");
         builder.AppendLine();
-        builder.AppendLine("The four steps are: find it (`search`), read just it (`read`), change it (`replace` for a text edit, `patch` for a whole function -- `patch create --help` lists the ops), then `test`.");
+        builder.AppendLine("The four steps are: find it (`search`), read just it (`read`), change it (`replace` or `patch`), then check it. Make your edits, add `--verify` to the LAST one (or run `devx verify` once) -- one check for the batch, not one per edit.");
         builder.AppendLine();
         builder.AppendLine("Do not spend a second call on what the first one already answered. A `devx search` that matches exactly one symbol returns its source with it, so go straight to the edit; a `devx search text` result already carries the matching line, so read the file only when you need the lines around it.");
         builder.AppendLine();

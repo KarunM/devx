@@ -15,6 +15,11 @@ public sealed record ProtocolError(
     IReadOnlyList<SymbolSearchResult>? Candidates = null);
 public sealed record ValidationTargetRequest(string? Runtime, string? Target);
 public sealed record ValidationExecutionResponse(string CapabilityId, RuntimeContext Context, RuntimeTargetDescriptor Target, ExecutionRecord Execution);
+
+/// <summary>`devx verify` in one call: the build, and -- unless the build failed -- the run of the
+/// relevant tests. `Tests` is null when the mode was build-only or the build failed, and
+/// `TestsSkipped` says which of the two, so the caller never has to infer it.</summary>
+public sealed record VerifyExecutionResponse(string Mode, ValidationExecutionResponse Build, ValidationExecutionResponse? Tests, bool TestsSkipped);
 public sealed record McpServerInfo(string Name, string Version);
 public sealed record McpToolDescriptor(string Name, string Title, string Description, string CapabilityId, JsonElement InputSchema);
 public sealed record McpInitializeResponse(string ProtocolVersion, McpServerInfo ServerInfo, IReadOnlyList<McpToolDescriptor> Tools);
@@ -37,6 +42,7 @@ public static class ProtocolOperations
     public const string PatchRollback = "PATCH_ROLLBACK";
     public const string RunBuild = "RUN_BUILD";
     public const string RunTests = "RUN_TESTS";
+    public const string RunVerify = "RUN_VERIFY";
 }
 
 public interface IProtocolEngine

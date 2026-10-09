@@ -160,6 +160,15 @@ public static class CapabilitiesComposer
                     true
                 ),
                 new CapabilityCommand(
+                    "verify",
+                    "Build and the relevant tests in one call",
+                    "devx verify [build|test|both] [<file|dir> ...] [--runtime <kind>] [--target <path|name>] [--timeout <seconds>]",
+                    Array.Empty<CapabilitySubcommand>(),
+                    new[] { "<file>" },
+                    new[] { "--session", "--runtime", "--target", "--timeout", "--filter" },
+                    true
+                ),
+                new CapabilityCommand(
                     "diagnostics",
                     "Get diagnostics for the indexed solution",
                     "devx diagnostics --session <id>",
@@ -266,7 +275,7 @@ public static class CapabilitiesComposer
             capabilityDescriptors,
             new[]
             {
-                "Build, test, and report require explicit session selection.",
+                "Build, test, and verify resolve the repository's session themselves; report requires explicit --session selection.",
                 "Human-readable CLI output remains the default operator experience.",
                 "Machine-readable JSON is the stable compatibility surface for hosts and automation.",
                 "Capability availability may be degraded or unavailable when repository prerequisites are missing."
@@ -317,6 +326,7 @@ public static class CapabilitiesComposer
             new RuntimeCapabilityDescriptor("patch.rollback", "patch", "1.0", "Rollback a previously applied structured engineering patch document.", availability, defaultPrerequisites, ["cli", "protocol"], ["devx patch rollback <file> --session <id>"]),
             new RuntimeCapabilityDescriptor("build", "validation", "1.0", "Build the selected runtime target.", availability, defaultPrerequisites, ["cli", "protocol"], ["devx build --session <id> --target src/App/App.csproj"]),
             new RuntimeCapabilityDescriptor("test", "validation", "1.0", "Run tests for the selected runtime target.", availability, defaultPrerequisites, ["cli", "protocol"], ["devx test --session <id> --target tests/App.Tests/App.Tests.csproj"]),
+            new RuntimeCapabilityDescriptor("verify", "validation", "1.0", "Run the build and the relevant tests in one call.", availability, defaultPrerequisites, ["cli", "protocol"], ["devx verify", "devx verify build", "devx replace <file> --old <text> --new <text> --verify"]),
             new RuntimeCapabilityDescriptor("index.incremental", "indexing", "1.0", "Refresh repository index state incrementally.", availability, defaultPrerequisites, ["cli"], ["devx index update <file> [<file> ...] --session <id>", "devx index changed --session <id>"]),
             new RuntimeCapabilityDescriptor("diagnostics", "health", "1.0", "Inspect runtime readiness and captured diagnostics.", availability, defaultPrerequisites, ["cli", "protocol"], ["devx health --session <id>", "devx doctor --session <id>"]),
             new RuntimeCapabilityDescriptor("report", "reporting", "1.0", "Summarize session activity, validation, and fallback history by agent.", availability, defaultPrerequisites, ["cli", "mcp"], ["devx report --session <id>"])
