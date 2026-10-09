@@ -607,7 +607,17 @@ static async Task<int> SearchAsync(string connectionString, string[] args, strin
     }
 
     var searchKind = implicitSymbol ? "symbol" : args[1];
-    var query = implicitSymbol ? args[1] : args[2];
+    // Several queries in one call: `devx search text "a" "b"` is the alternation `a|b`, so a
+    // guess that missed costs nothing instead of another round trip. In the 1.6.11 transcripts
+    // 34 of the 40 chained `search text` calls were a different word tried one at a time.
+    var queryParts = PositionalQueryParts(args, implicitSymbol ? 1 : 2);
+    if (queryParts.Count == 0)
+    {
+        Console.Error.WriteLine("Usage: devx search <query> [--session <id>] | devx search <symbol|text> <query> [<query> ...] [--session <id>]");
+        return 1;
+    }
+
+    var query = searchKind == "text" ? string.Join('|', queryParts) : queryParts[0];
     var sessionId = GetOption(args, "--session");
     if (sessionId is null)
     {
@@ -650,10 +660,50 @@ static async Task<int> SearchAsync(string connectionString, string[] args, strin
         }
     }
 
+    // Every content hit is named for the symbol it sits in -- the one thing a plain `rg -n`
+    // cannot say, and what makes the next call a `read <symbol>` instead of a guess.
+    IReadOnlyDictionary<(string FileId, int Line), string>? enclosingSymbols = null;
+    if (format == "agent" && searchKind == "text" && response.Success && response.Data is { ValueKind: JsonValueKind.Object } hitData && TryGetPropertyIgnoreCase(hitData, "ContentMatches", out var contentHits) && contentHits.ValueKind == JsonValueKind.Array)
+    {
+        var points = contentHits.EnumerateArray()
+            .Take(10)
+            .Select(item => (FileId: JsonPropertyText(item, "FileId"), Line: int.TryParse(JsonPropertyText(item, "Line"), out var at) ? at : 0))
+            .Where(point => point.FileId.Length > 0 && point.Line > 0)
+            .ToList();
+        if (points.Count > 0)
+        {
+            enclosingSymbols = await store.FindEnclosingSymbolsAsync(points);
+        }
+    }
+
     await store.AddOperationMetricAsync(new OperationMetric($"search {searchKind}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, query), GetAgentLabel(args)));
-    WriteResponse(response, format);
+    WriteResponse(response, format, enclosingSymbols);
     if (autoRead is not null) Console.WriteLine(autoRead);
     return response.Success ? 0 : 1;
+}
+
+static List<string> PositionalQueryParts(string[] args, int start)
+{
+    // The options `search` accepts that take a value, so their value is never mistaken for a
+    // query. Everything else that starts with `-` is a flag.
+    string[] valueOptions = ["--session", "--agent", "--task", "--format"];
+    var parts = new List<string>();
+    for (var i = start; i < args.Length; i++)
+    {
+        if (args[i].StartsWith('-'))
+        {
+            if (valueOptions.Contains(args[i], StringComparer.Ordinal))
+            {
+                i++;                       // skip the option's value
+            }
+
+            continue;
+        }
+
+        parts.Add(args[i]);
+    }
+
+    return parts;
 }
 
 static async Task<int> SessionAsync(string connectionString, string[] args, string format)
@@ -2276,7 +2326,8 @@ static string? GetPatchPath(string[] args)
 static string ResolveFormat(string[] args)
     => OutputFormat.Resolve(GetOption(args, "--format"), OutputFormat.LooksLikeAnAgent());
 
-static void WriteResponse(ProtocolResponse response, string format)
+static void WriteResponse(ProtocolResponse response, string format,
+    IReadOnlyDictionary<(string FileId, int Line), string>? enclosingSymbols = null)
 {
     if (format == "json")
     {
@@ -2286,7 +2337,7 @@ static void WriteResponse(ProtocolResponse response, string format)
 
     if (format == "agent")
     {
-        Console.WriteLine(FormatAgentResponse(response));
+        Console.WriteLine(FormatAgentResponse(response, enclosingSymbols));
         return;
     }
 
@@ -2302,7 +2353,8 @@ static void WriteResponse(ProtocolResponse response, string format)
     }
 }
 
-static string FormatAgentResponse(ProtocolResponse response)
+static string FormatAgentResponse(ProtocolResponse response,
+    IReadOnlyDictionary<(string FileId, int Line), string>? enclosingSymbols = null)
 {
     if (!response.Success) return string.Join("\n", response.Errors.Select(error => $"error: {error.Message}"));
     if (response.Data is not { } data) return string.Empty;
@@ -2314,8 +2366,24 @@ static string FormatAgentResponse(ProtocolResponse response)
     }
     if (TryGetPropertyIgnoreCase(data, "contentMatches", out var matches) && matches.ValueKind == JsonValueKind.Array)
     {
-        var hits = matches.EnumerateArray().Take(10).Select(item => { var preview = JsonPropertyText(item, "Preview").Trim(); return $"{RelativeAgentPath(JsonPropertyText(item, "Path"))}:{JsonPropertyText(item, "Line")}: {preview[..Math.Min(120, preview.Length)]}"; }).ToList();
-        if (matches.GetArrayLength() > hits.Count) hits.Add($"... {matches.GetArrayLength() - hits.Count} more");
+        var hits = matches.EnumerateArray().Take(10).Select(item =>
+        {
+            var preview = JsonPropertyText(item, "Preview").Trim();
+            var line = JsonPropertyText(item, "Line");
+            var symbol = enclosingSymbols is not null
+                && enclosingSymbols.TryGetValue((JsonPropertyText(item, "FileId"), int.TryParse(line, out var at) ? at : 0), out var name)
+                    ? $" [{name}]"
+                    : string.Empty;
+            return $"{RelativeAgentPath(JsonPropertyText(item, "Path"))}:{line}: {preview[..Math.Min(120, preview.Length)]}{symbol}";
+        }).ToList();
+        if (matches.GetArrayLength() > hits.Count)
+        {
+            // The cap stays; the message now says what to do about it. "N more" alone told the
+            // agent nothing, which is why the next call was usually the same search reworded.
+            hits.Add($"... {matches.GetArrayLength() - hits.Count} more: narrow with a second word, "
+                     + "alternation (a|b), or several queries in one call, e.g. devx search text \"a\" \"b\"");
+        }
+
         return string.Join("\n", hits);
     }
     foreach (var collection in new[] { "Callers", "Callees", "References" })

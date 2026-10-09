@@ -577,6 +577,70 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
             }
         }
 
+        // ripgrep when it is on PATH: it is the regex engine, and it reads the tree instead of
+        // every indexed file, which is what makes `a|b` and a regex possible at all. The
+        // in-process scan below stays as the fallback and its result set is the same shape, so
+        // nothing downstream -- and no `--format json` payload -- depends on which one answered.
+        var byPathRipgrep = new Dictionary<string, (string Id, string Root)>(StringComparer.Ordinal);
+        foreach (var file in indexedFiles)
+        {
+            byPathRipgrep[file.Path] = (file.Id, file.Root);
+        }
+
+        var ripgrepHits = new List<RipgrepContentSearcher.Hit>();
+        var ripgrepAnswered = indexedFiles.Count > 0;
+        foreach (var root in indexedFiles.Select(file => file.Root).Distinct(StringComparer.Ordinal))
+        {
+            if (!RipgrepContentSearcher.TrySearch(root, query, out var found, cancellationToken))
+            {
+                ripgrepAnswered = false;
+                break;
+            }
+
+            ripgrepHits.AddRange(found);
+        }
+
+        if (ripgrepAnswered)
+        {
+            // Only files the index knows: a ContentSearchResult carries a FileId, and the
+            // in-process scan could only ever match indexed files either.
+            return ripgrepHits
+                .Where(hit => byPathRipgrep.ContainsKey(hit.Path))
+                .OrderBy(hit => hit.Path, StringComparer.Ordinal)
+                .ThenBy(hit => hit.Line)
+                .Take(limit)
+                .Select(hit => new ContentSearchResult(
+                    byPathRipgrep[hit.Path].Id,
+                    hit.Path,
+                    hit.Line,
+                    MatchColumn(hit.Text, query),
+                    hit.Text))
+                .ToList();
+        }
+
+        // The fallback must not be a worse tool than the engine it stands in for, or the answer
+        // would depend on whether ripgrep happens to be installed. So the pattern is a regex
+        // here too; only one that will not compile -- `GetValueOrDefault(`, which agents really
+        // typed -- is matched as literal alternatives instead.
+        System.Text.RegularExpressions.Regex? pattern = null;
+        var alternatives = new[] { query };
+        try
+        {
+            pattern = new System.Text.RegularExpressions.Regex(
+                query,
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        }
+        catch (ArgumentException)
+        {
+            // Not a regex: `a|b` is still the alternation an agent expects, so split on it.
+            var parts = query.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (parts.Length > 0)
+            {
+                alternatives = parts;
+            }
+        }
+
         var matches = new List<ContentSearchResult>();
         foreach (var file in indexedFiles)
         {
@@ -599,7 +663,27 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
 
             for (var index = 0; index < lines.Length; index++)
             {
-                var column = lines[index].IndexOf(query, StringComparison.OrdinalIgnoreCase);
+                var column = -1;
+                if (pattern is not null)
+                {
+                    var match = pattern.Match(lines[index]);
+                    if (match.Success)
+                    {
+                        column = match.Index;
+                    }
+                }
+                else
+                {
+                    foreach (var alternative in alternatives)
+                    {
+                        var at = lines[index].IndexOf(alternative, StringComparison.OrdinalIgnoreCase);
+                        if (at >= 0 && (column < 0 || at < column))
+                        {
+                            column = at;
+                        }
+                    }
+                }
+
                 if (column < 0)
                 {
                     continue;
@@ -614,6 +698,108 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
         }
 
         return matches;
+    }
+
+    /// <summary>The 1-based column of a match, for the <c>Column</c> field of a content result.
+    /// The query is a regex whenever ripgrep answered, so the literal is tried first -- a plain
+    /// identifier query is the common case and this keeps its column identical to the
+    /// in-process scan's -- then the regex, then 1.</summary>
+    private static int MatchColumn(string text, string query)
+    {
+        var literal = text.IndexOf(query, StringComparison.OrdinalIgnoreCase);
+        if (literal >= 0)
+        {
+            return literal + 1;
+        }
+
+        try
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(
+                text, query, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (match.Success)
+            {
+                return match.Index + 1;
+            }
+        }
+        catch (System.Text.RegularExpressions.RegexParseException)
+        {
+            // Not a regex: the pattern was a fixed string ripgrep matched, so 1 is as good as
+            // any and nothing here may throw over a column number.
+        }
+
+        return 1;
+    }
+
+    /// <summary>The innermost indexed symbol whose span contains each point, keyed by
+    /// (file id, line). `devx search text` prints this beside every hit: which function or type
+    /// the matching line sits in is the one thing ripgrep cannot say, and without it the next
+    /// call is always a read.</summary>
+    public async Task<IReadOnlyDictionary<(string FileId, int Line), string>> FindEnclosingSymbolsAsync(
+        IReadOnlyList<(string FileId, int Line)> points,
+        CancellationToken cancellationToken = default)
+    {
+        var enclosing = new Dictionary<(string FileId, int Line), string>();
+        if (points.Count == 0)
+        {
+            return enclosing;
+        }
+
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        var spans = new Dictionary<string, List<(string Name, int Start, int End)>>(StringComparer.Ordinal);
+        foreach (var fileId in points.Select(point => point.FileId).Distinct(StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT qualified_name, start_line, end_line
+                FROM symbols
+                WHERE file_id = $fileId AND start_line IS NOT NULL AND end_line IS NOT NULL;
+                """;
+            command.Parameters.AddWithValue("$fileId", fileId);
+            var list = new List<(string, int, int)>();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                list.Add((reader.GetString(0), reader.GetInt32(1), reader.GetInt32(2)));
+            }
+
+            spans[fileId] = list;
+        }
+
+        foreach (var (fileId, line) in points)
+        {
+            if (!spans.TryGetValue(fileId, out var candidates))
+            {
+                continue;
+            }
+
+            string? best = null;
+            var bestSpan = int.MaxValue;
+            var bestStart = 0;
+            foreach (var (name, start, end) in candidates)
+            {
+                if (line < start || line > end)
+                {
+                    continue;
+                }
+
+                var span = end - start;
+                if (span < bestSpan || (span == bestSpan && start > bestStart))
+                {
+                    best = name;
+                    bestSpan = span;
+                    bestStart = start;
+                }
+            }
+
+            if (best is not null)
+            {
+                enclosing[(fileId, line)] = best;
+            }
+        }
+
+        return enclosing;
     }
 
     public async Task<FileSnapshot?> GetFileSnapshotAsync(string fileIdOrPath, CancellationToken cancellationToken = default)
