@@ -25,6 +25,7 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.Contains(response.Tools, tool => tool.Name == "patch.validate" && tool.CapabilityId == "patch.validate");
         Assert.Contains(response.Tools, tool => tool.Name == "patch.apply" && tool.CapabilityId == "patch.apply");
         Assert.Contains(response.Tools, tool => tool.Name == "edit.replace");
+        Assert.Contains(response.Tools, tool => tool.Name == "verify" && tool.CapabilityId == "verify");
         Assert.Contains(response.Tools, tool => tool.Name == "patch.preview");
         Assert.Contains(response.Tools, tool => tool.Name == "index" && tool.CapabilityId == "index");
         Assert.Contains(response.Tools, tool => tool.Name == "report" && tool.CapabilityId == "report");
@@ -53,7 +54,7 @@ public sealed class McpReferenceServerIntegrationTests
     }
 
     [Fact]
-    public async Task EditReplace_DefaultVerifiesAndVerifyFalseSkips()
+    public async Task EditReplace_VerifiesOnlyWhenAskedAndHonoursTheMode()
     {
         var (server, session, root) = await CreateServerAsync("devx-mcp-verify", plainFolder: true,
             verifyAfterEditFactory: _ => new VerifyAfterEdit(
@@ -61,28 +62,47 @@ public sealed class McpReferenceServerIntegrationTests
                 _ => Task.FromResult(new ExecutionRecord("test", true, "", [], "PASS 1 tests")),
                 _ => []));
         await IOFile.WriteAllTextAsync(Path.Combine(root, "edit.md"), "old");
-        var verified = await server.CallToolAsync("edit.replace", JsonSerializer.SerializeToElement(new
+        // 1.6.14 behaviour change: an edit with no `verify` argument is NOT verified, so an edit
+        // costs one call. Verifying is opt-in (brief OSS14 adjustment).
+        var plain = await server.CallToolAsync("edit.replace", JsonSerializer.SerializeToElement(new
         {
             sessionId = session.Id.Value.ToString(),
             file = "edit.md",
             old = "old",
             @new = "new"
         }));
-        Assert.False(verified.IsError);
-        Assert.Contains("build: PASS build", verified.Content.GetProperty("text").GetString());
-        Assert.Contains("tests: PASS 1 tests", verified.Content.GetProperty("text").GetString());
+        Assert.False(plain.IsError);
+        Assert.DoesNotContain("PASS build", plain.Content.GetProperty("text").GetString());
 
         await IOFile.WriteAllTextAsync(Path.Combine(root, "edit.md"), "old");
-        var skipped = await server.CallToolAsync("edit.replace", JsonSerializer.SerializeToElement(new
+        var verified = await server.CallToolAsync("edit.replace", JsonSerializer.SerializeToElement(new
         {
             sessionId = session.Id.Value.ToString(),
             file = "edit.md",
             old = "old",
             @new = "new",
-            verify = false
+            verify = true
         }));
-        Assert.False(skipped.IsError);
-        Assert.DoesNotContain("build:", skipped.Content.GetProperty("text").GetString());
+        Assert.False(verified.IsError);
+        var verifiedText = verified.Content.GetProperty("text").GetString();
+        Assert.Contains("PASS build", verifiedText);
+        Assert.Contains("PASS 1 tests", verifiedText);
+
+        // `verify: "build"` is the build alone, so a caller that only wants to know it compiles
+        // does not pay for the suite.
+        await IOFile.WriteAllTextAsync(Path.Combine(root, "edit.md"), "old");
+        var buildOnly = await server.CallToolAsync("edit.replace", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            file = "edit.md",
+            old = "old",
+            @new = "new",
+            verify = "build"
+        }));
+        Assert.False(buildOnly.IsError);
+        var buildOnlyText = buildOnly.Content.GetProperty("text").GetString();
+        Assert.Contains("PASS build", buildOnlyText);
+        Assert.DoesNotContain("PASS 1 tests", buildOnlyText);
     }
 
     [Fact]

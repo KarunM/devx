@@ -116,6 +116,7 @@ public sealed class McpReferenceServer
             "patch.preview" => await ExecuteProtocolAsync("PATCH_PREVIEW", RequiredSessionId(arguments), RequiredObject(arguments, "patch"), cancellationToken),
             "build" => await ExecuteProtocolAsync(ProtocolOperations.RunBuild, RequiredSessionId(arguments), BuildRuntimePayload(arguments), cancellationToken, AgentFormat(arguments)),
             "test" => await ExecuteProtocolAsync(ProtocolOperations.RunTests, RequiredSessionId(arguments), BuildTestPayload(arguments), cancellationToken, AgentFormat(arguments)),
+            "verify" => await ExecuteProtocolAsync(ProtocolOperations.RunVerify, RequiredSessionId(arguments), BuildVerifyPayload(arguments), cancellationToken, AgentFormat(arguments)),
             "patch.validate" => await ExecuteProtocolAsync(
                 "PATCH_VALIDATE",
                 RequiredSessionId(arguments),
@@ -490,8 +491,12 @@ public sealed class McpReferenceServer
         var result = _textReplaceService.Apply(root, RequiredString(arguments, "file"), RequiredString(arguments, "old"), RequiredString(arguments, "new"), TryGetBoolean(arguments, "all", out var all) && all, arguments.TryGetProperty("occurrence", out var occurrence) && occurrence.TryGetInt32(out var n) ? n : null);
         if (result.Success && _reindexFilesAsync is not null) await _reindexFilesAsync([RequiredString(arguments, "file")], cancellationToken);
         if (!result.Success) return new(true, JsonSerializer.SerializeToElement(new { text = result.Message }, JsonOptions));
-        if (!TryGetBoolean(arguments, "verify", out var verify)) verify = true;
-        if (!verify) return new(false, JsonSerializer.SerializeToElement(new { text = result.Message + (result.Diff.Length == 0 ? "" : "\n" + result.Diff) }, JsonOptions));
+        // Behaviour change in 1.6.14 (brief OSS14 adjustment, 2026-10-09): edit.replace no longer
+        // verifies by default. Verifying is opt-in on every edit, so an edit costs one call unless
+        // the caller asks for the check; verify:true is build+tests, verify:"build" is the build
+        // alone. Documented in the CHANGELOG.
+        var verifyMode = ReadVerifyMode(arguments);
+        if (verifyMode is null) return new(false, JsonSerializer.SerializeToElement(new { text = result.Message + (result.Diff.Length == 0 ? "" : "\n" + result.Diff) }, JsonOptions));
 
         var service = new DotnetBuildTestService();
         var symbolStore = _repositoryStore as ISymbolStore;
@@ -502,14 +507,42 @@ public sealed class McpReferenceServer
             file => symbolStore is not null && searchService is not null
                 ? VerifyAfterEdit.FindRelevantTestFiles(root, file, symbolStore, searchService)
                 : VerifyAfterEdit.FindRelevantTestFiles(root, file));
-        var verification = await verifier.RunAsync(RequiredString(arguments, "file"));
+        var verification = await verifier.RunAsync(RequiredString(arguments, "file"), verifyMode.Value);
         var verifyData = new { Build = new { verification.Build.Success, verification.Build.Summary, verification.Build.Diagnostics }, Tests = verification.Tests is null ? null : new { verification.Tests.Success, verification.Tests.Summary, verification.Tests.Diagnostics } };
         if (TryGetString(arguments, "format", out var format) && format == "json")
             return new(false, JsonSerializer.SerializeToElement(new { text = result.Message + (result.Diff.Length == 0 ? "" : "\n" + result.Diff), Verify = verifyData }, JsonOptions));
-        var text = result.Message + (result.Diff.Length == 0 ? "" : "\n" + result.Diff) + "\nbuild: " + verification.Build.Summary;
-        if (verification.Build.Success) text += "\ntests: " + (verification.Tests?.Summary ?? "PASS tests — skipped");
-        else text += "\nedit kept; fix forward or revert";
+        var verified = verification.Build.Success && (verification.Tests?.Success ?? true);
+        var edit = result.Message + (result.Diff.Length == 0 ? "" : "\n" + result.Diff) + "\n";
+        var text = verified
+            ? edit + VerifyAfterEdit.FormatOneLine("edit", verification)
+            : edit + string.Join("\n", VerifyAfterEdit.FormatVerifyLines(verification));
         return new(false, JsonSerializer.SerializeToElement(new { text }, JsonOptions));
+    }
+
+    /// <summary>The `verify` argument on edit.replace, which takes a boolean or a mode word.
+    /// Absent, false, null, or `"false"` all mean "do not verify" (the 1.6.14 default).</summary>
+    private static VerifyMode? ReadVerifyMode(JsonElement arguments)
+    {
+        if (!arguments.TryGetProperty("verify", out var element)) return null;
+        if (element.ValueKind == JsonValueKind.True) return VerifyMode.Both;
+        if (element.ValueKind != JsonValueKind.String) return null;
+        var value = element.GetString()?.Trim().ToLowerInvariant();
+        return string.IsNullOrEmpty(value) || value is "false" or "no" or "none" or "off" ? null : VerifyAfterEdit.ParseMode(value);
+    }
+
+    private static JsonElement BuildVerifyPayload(JsonElement arguments)
+    {
+        var payload = new Dictionary<string, object?>();
+        if (TryGetString(arguments, "runtime", out var runtime)) payload["runtime"] = runtime;
+        if (TryGetString(arguments, "target", out var target)) payload["target"] = target;
+        // `mode` is the documented name; `verify` is accepted too, so a caller that learned the
+        // name from edit.replace does not have to learn a second one.
+        var mode = TryGetString(arguments, "mode", out var named) ? named : TryGetString(arguments, "verify", out var alias) ? alias : null;
+        if (!string.IsNullOrWhiteSpace(mode)) payload["mode"] = mode;
+        if (arguments.TryGetProperty("targets", out var targets) && targets.ValueKind == JsonValueKind.Array)
+            payload["targets"] = targets.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String).Select(item => item.GetString()).ToArray();
+        if (arguments.TryGetProperty("timeoutSeconds", out var timeout) && timeout.TryGetInt32(out var seconds)) payload["timeoutSeconds"] = seconds;
+        return JsonSerializer.SerializeToElement(payload, JsonOptions);
     }
 
     private async Task<bool> IsRepositoryUnindexedAsync(JsonElement arguments, CancellationToken cancellationToken)
@@ -742,7 +775,7 @@ public sealed class McpReferenceServer
     {
         return
         [
-            CreateTool("edit.replace", "Replace text", "Step 3: Use edit.replace for a simple text edit after search and read. Add all or occurrence to select matches. Edits are verified by default; pass verify:false to skip.", "edit.replace", new { type = "object", properties = new { file = new { type = "string" }, old = new { type = "string" }, @new = new { type = "string" }, all = new { type = "boolean" }, occurrence = new { type = "integer" }, verify = new { type = "boolean" }, format = new { type = "string" }, sessionId = new { type = "string" } }, required = new[] { "file", "old", "new" } }),
+            CreateTool("edit.replace", "Replace text", "Step 3: Use edit.replace for a simple text edit after search and read. Add all or occurrence to select matches. The edit is NOT verified unless you ask: pass verify:true (build+tests) or verify:\"build\"/\"test\"/\"both\". Add it to your LAST edit, or call verify once when you are done.", "edit.replace", new { type = "object", properties = new { file = new { type = "string" }, old = new { type = "string" }, @new = new { type = "string" }, all = new { type = "boolean" }, occurrence = new { type = "integer" }, verify = new { type = new[] { "boolean", "string" } }, format = new { type = "string" }, sessionId = new { type = "string" } }, required = new[] { "file", "old", "new" } }),
             CreateTool("search", "Search", "Step 1: Use search to find symbols or text in the indexed repository; it falls back to text when no symbol matches.", "search", new
             {
                 type = "object",
@@ -796,6 +829,7 @@ public sealed class McpReferenceServer
             CreateQueryTool("references", "References", "Find references to a symbol.", "sessionId", "target"),
             CreateTool("build", "Build", "Run a configured build target.", "build", new { type = "object", properties = new { sessionId = new { type = "string" }, runtime = new { type = "string" }, target = new { type = "string" } }, required = Array.Empty<string>() }),
             CreateTool("test", "Test", "Step 4: Use test to run the configured build and test summary after editing.", "test", new { type = "object", properties = new { sessionId = new { type = "string" }, target = new { type = "string" }, testFiles = new { type = "array", items = new { type = "string" } }, timeoutSeconds = new { type = "integer" } }, required = Array.Empty<string>() }),
+            CreateTool("verify", "Verify", "Build, then the relevant tests, in ONE call and one compact summary. mode is build, test, or both (the default). Use it once after your last edit instead of build then test.", "verify", new { type = "object", properties = new { sessionId = new { type = "string" }, mode = new { type = "string" }, runtime = new { type = "string" }, target = new { type = "string" }, targets = new { type = "array", items = new { type = "string" } }, timeoutSeconds = new { type = "integer" } }, required = Array.Empty<string>() }),
             CreateTool("report", "Report", "Return the current session report through the runtime capability layer.", "report", new
             {
                 type = "object",
