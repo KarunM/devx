@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.6.13
+
+A release about the call that came back an error, and about the engine that was usually missing. In the codex-1611
+arm-B transcripts `devx read section` was the largest single source of failed calls -- 30 calls, 23 of them answered
+with an error -- and 27 of those 30 were aimed at a `.py` or `.cs` file rather than a document. The other gap was
+quiet: `devx search text` only used ripgrep when the machine happened to have `rg` on `PATH`, so on a stock machine
+the slower in-process scan answered every content search.
+
+- **`devx read section` accepts what the caller actually typed.** On a non-Markdown file, `devx read section
+  <file>#<name>` resolves `<name>` as a symbol in that file and answers with exactly what `devx read method` gives,
+  with the output naming the symbol it resolved to, so `read section alpha.py#load_level` is a hit rather than a
+  `NotFound`. `<file>#` with no name answers with the file, capped and paged as `devx read <file>` does -- the CLI no
+  longer rejects the trailing `#`. An ambiguous name lists the candidates as ready-to-run `devx read method "..."`
+  commands and an unknown name lists the symbols the file does hold, so either way the next call is one the agent
+  can paste. Markdown headings are unchanged, including the legacy name+path lookup, and `--format json` for
+  `read section README.md#Usage` returns the same bytes it did in 1.6.12.
+- **A heading that was indexed but could not be read back is read now.** The legacy heading lookup re-parses the file
+  and can only find a method it recognises again, so a class, a Python function whose indexed type is `<module>`, a
+  file whose row is gone or a file no longer on disk all ended in `ParseError`; the markdown path now falls back to
+  the resolver, which reads the span straight from the index.
+- **ripgrep ships with DevX.** The lookup order is `.devx/config.json` `"rg": {"path": ...}` (a repository that wants
+  its own build; relative paths resolve against the root), then the copy shipped beside the binary or inside the tool
+  package, then `rg` on `PATH`, then the in-process scan -- so `devx search text` is the fast engine that respects
+  `.gitignore` on a machine that has nothing installed, and no call fails without it. The binaries are never
+  committed: the pinned ripgrep 15.2.0 release is downloaded per runtime identifier by `tools/fetch_ripgrep.py` and
+  checked against a recorded sha256 before it is unpacked, by the release workflow before packing and before
+  archiving each single-file binary. `devx doctor` reports which engine is active, where it is and its version, in
+  text and under `SearchEngine` in JSON. THIRD-PARTY-NOTICES carries ripgrep's Unlicense and MIT text and travels in
+  the package and the archive. The tool package grows by ~9.5 MB for the five supported RIDs.
+
 ## 1.6.12
 
 A release about not needing the second call. In the 1.6.11 arm-B transcripts the agent made 349 calls where arm A
