@@ -1,5 +1,64 @@
 # Changelog
 
+## 1.6.14
+
+A release about closing the loop after an edit. In 1.6.13 an agent that changed a file had to make a
+second and third call to find out whether it had broken anything -- `devx replace`, then `devx build`,
+then `devx test` -- and each of those answered with its own log path and its own shape. There is now
+one command that does the whole check and answers in one compact summary, and the edit commands can
+run it on request. Verifying stays **opt-in**: an edit that does not ask is byte-for-byte the call it
+was in 1.6.13.
+
+- **`devx verify [build|test|both] [<file|dir> ...]`** runs the build and, if it passes and the mode
+  includes tests, the relevant tests, and returns one summary: build status and the first errors as
+  `path:line: message`, then the test counts, the failing names with trimmed assertions, and the path
+  of the full log. A bare `devx verify` is `both`; `devx verify build` is build-only, for the case
+  where a test run is known slow. It honours the build and test commands from `.devx/config.json`
+  (1.6.10) exactly as `devx build` and `devx test` do, and needs no `--session`. A successful run
+  answers in ONE line -- status, counts, seconds, log path -- because a check that costs five lines of
+  reply is a check an agent learns to skip.
+- **Every edit command takes `--verify[=build|test|both]`.** `devx replace ... --verify` and
+  `devx patch apply ... --verify` do the edit and the check in the same response: the message, the
+  diff, and one verification line. A bare `--verify` is `both`; `--verify=build` stops after the
+  build; `--no-verify` cancels it and the last flag on the line wins. **On a build failure the tests
+  are skipped, the edit is kept, and the errors are returned** -- with `tests: skipped (build failed)`
+  as the explicit reason, so nothing has to be inferred from an absent section.
+- **MCP: a `verify` tool with the same modes**, for a client that checks without editing. The
+  `edit.replace` tool's `verify` argument still accepts `true`, but it now also accepts a mode string
+  (`"build"`, `"test"`, `"both"`).
+- **Behaviour change: MCP `edit.replace` no longer verifies by default.** In 1.6.13 it ran the
+  verification unconditionally; a client that wants it must now pass `verify`. This is intentional
+  and matches the CLI, where verifying is opt-in -- an edit that silently spent a build and a test
+  run is exactly the overhead this release was told to avoid. CLI `devx replace` without `--verify`
+  is unchanged.
+- **Agent guidance says the loop is one call.** The block `devx init` writes and `devx --help --agent`
+  now read "make your edits, add `--verify` to the LAST one (or run `devx verify` once)", so a batch
+  of edits costs one check rather than one check each, and `devx verify build` is named for a
+  build-only check.
+- **A support module under a test directory is no longer a test file.** `tests/conftest.py` and
+  `tests/__init__.py` were classified as test files, and pytest collects nothing from them: it exits
+  5, and a verify over five passing test files plus one `conftest.py` was reported as `FAIL tests —
+  0 failed of 0`. The name-based rules now come first and those two names are excluded before the
+  directory rule, so a verify on a Python repository reports what actually ran.
+- **The capabilities note is corrected** (it claimed `report` needed no session) and gains the
+  `verify` command and descriptor. `devx capabilities --format json` is otherwise unchanged: the
+  diff against 1.6.13 is purely additive -- one added command, one added descriptor, no removed or
+  altered command, and no changed key outside `CapabilityDescriptors` and `CompatibilityNotes`.
+
+Cost, measured with `tools/verify_cost.py` on this repository (.NET) and on a click checkout
+(pytest), wall-clock and response bytes:
+
+| call | devx-oss | click |
+| --- | --- | --- |
+| `replace` | 0.36 s / 204 B | 1.89 s / 150 B |
+| `replace --verify` | 16.11 s / 321 B | 4.29 s / 268 B |
+| `replace --verify=build` | 1.31 s / 296 B | 0.69 s / 242 B |
+| `verify` | 18.52 s / 132 B | 1.41 s / 131 B |
+| `verify build` | 1.18 s / 94 B | 0.30 s / 94 B |
+
+An edit that does not verify pays nothing for this: the ~100-130 bytes are the one-line answer, and
+the seconds are the build and the tests themselves, which only run when asked for.
+
 ## 1.6.13
 
 A release about the call that came back an error, and about the engine that was usually missing. In the codex-1611
