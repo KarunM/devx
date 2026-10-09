@@ -16,6 +16,13 @@ public sealed class ProtocolEngine : IProtocolEngine
     private readonly PatchLifecycleService _patchLifecycleService;
     private readonly RuntimeContextResolver _runtimeContextResolver;
 
+    /// <summary>Whether a write re-indexes the files it touched (owner ruling, brief OSS12 item 2:
+    /// every write path re-indexes by default, `--no-index` opts out). An agent that edits and does
+    /// not re-index leaves the index describing the old text, so the next `devx read` of what it
+    /// just wrote can return the previous version -- which is why the harness used to tell agents
+    /// to run `devx index update` by hand, 43 calls per series.</summary>
+    private readonly bool _refreshIndexAfterEdit;
+
     public ProtocolEngine(ISearchService searchService, ISessionStore sessionStore, IRepositoryStore repositoryStore)
         : this(searchService, sessionStore, repositoryStore, new DotnetBuildTestService())
     {
@@ -27,12 +34,18 @@ public sealed class ProtocolEngine : IProtocolEngine
     }
 
     public ProtocolEngine(ISearchService searchService, ISessionStore sessionStore, IRepositoryStore repositoryStore, DotnetBuildTestService buildTestService, PatchLifecycleService patchLifecycleService)
+        : this(searchService, sessionStore, repositoryStore, buildTestService, patchLifecycleService, refreshIndexAfterEdit: true)
+    {
+    }
+
+    public ProtocolEngine(ISearchService searchService, ISessionStore sessionStore, IRepositoryStore repositoryStore, DotnetBuildTestService buildTestService, PatchLifecycleService patchLifecycleService, bool refreshIndexAfterEdit)
     {
         _searchService = searchService;
         _sessionStore = sessionStore;
         _repositoryStore = repositoryStore;
         _buildTestService = buildTestService;
         _patchLifecycleService = patchLifecycleService;
+        _refreshIndexAfterEdit = refreshIndexAfterEdit;
         _runtimeContextResolver = new RuntimeContextResolver();
     }
 
@@ -820,7 +833,8 @@ public sealed class ProtocolEngine : IProtocolEngine
             return Fail(error.Code, error.Message);
         }
 
-        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(result), result!.ValidationErrors, []);
+        await RefreshIndexAsync(root, result!.Summary.FilesAffected, cancellationToken);
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(result), result.ValidationErrors, []);
     }
 
     private async Task<ProtocolResponse> HandlePatchPreviewAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
@@ -879,7 +893,61 @@ public sealed class ProtocolEngine : IProtocolEngine
             return Fail(error.Code, error.Message);
         }
 
+        await RefreshIndexAsync(root, response!.Summary.FilesAffected, cancellationToken);
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
+    }
+
+    /// <summary>
+    /// Bring the index back in line with the files a write just touched, so the next read of the
+    /// new text sees the new text. A file the write created is indexed; a file it deleted is
+    /// dropped, because <c>ReindexFilesAsync</c> would only report it missing and leave the index
+    /// pointing at a document that is gone. Best effort by design: the write already happened, and
+    /// a stale index must not turn a successful edit into a failure.
+    /// </summary>
+    private async Task RefreshIndexAsync(string root, IReadOnlyList<string> filesAffected, CancellationToken cancellationToken)
+    {
+        if (!_refreshIndexAfterEdit || filesAffected is null || filesAffected.Count == 0)
+        {
+            return;
+        }
+
+        var present = new List<string>();
+        var removed = new List<string>();
+        foreach (var file in filesAffected.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var absolute = Path.GetFullPath(Path.Combine(root, file.Replace('\\', '/')));
+            if (!absolute.StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            (System.IO.File.Exists(absolute) ? present : removed).Add(file);
+        }
+
+        var indexer = new RepositoryIndexingService(_repositoryStore);
+
+        // One file at a time, each guarded: a file with no owning project (a script beside the
+        // solution, an unsupported extension) must not stop the others from being refreshed, and
+        // none of it may fail a write that already succeeded.
+        foreach (var file in present)
+        {
+            await RefreshOneAsync(() => indexer.ReindexFilesAsync(root, [file], cancellationToken));
+        }
+        foreach (var file in removed)
+        {
+            await RefreshOneAsync(() => indexer.RemoveFileAsync(root, file, cancellationToken));
+        }
+    }
+
+    private static async Task RefreshOneAsync(Func<Task> refresh)
+    {
+        try
+        {
+            await refresh();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or NotSupportedException or Microsoft.Data.Sqlite.SqliteException)
+        {
+            // The edit stands; `devx health` reports an index that could not be refreshed.
+        }
     }
 
     private static ProtocolResponse Fail(string code, string message, string? attemptedName = null, IEnumerable<string>? suggestions = null)

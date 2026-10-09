@@ -111,7 +111,11 @@ static async Task<int> RunAsync(string[] args)
                         file => VerifyAfterEdit.RunBuildAsync(runner, root, file),
                         files => runner.RunTestsAsync(root, files, TimeSpan.FromSeconds(300)),
                         file => VerifyAfterEdit.FindRelevantTestFiles(root, file, replaceStore, replaceSearch));
-                }, async file => { await replaceIndexer.ReindexFilesAsync(Environment.CurrentDirectory, [file]); });
+                },
+                // Re-indexes the edited file by default; `--no-index` opts out (brief OSS12 item 2).
+                args.Contains("--no-index", StringComparer.Ordinal)
+                    ? null
+                    : async file => { await replaceIndexer.ReindexFilesAsync(Environment.CurrentDirectory, [file]); });
             }
 
         case "health":
@@ -829,7 +833,7 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
     var patchJson = await IOFile.ReadAllTextAsync(patchPath);
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
-    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var engine = WriteEngine(store, args);
     using var document = JsonDocument.Parse(patchJson);
     var request = new ProtocolRequest("1.0", ProtocolOperations.Patch, sessionId, document.RootElement.Clone());
     var started = DateTimeOffset.UtcNow;
@@ -841,6 +845,14 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
 
 static async Task<int> ArtifactAsync(string[] args, string format)
     => await DevX.Cli.ArtifactCommand.RunAsync(args.Skip(1).ToArray(), format);
+
+// Brief OSS12 item 2: a write re-indexes the files it touched, by default, on every path --
+// replace, patch apply, patch rollback, patch create/delete, and the MCP edits that go through
+// the same ProtocolEngine. `--no-index` is the opt-out. Agents used to be told to run
+// `devx index update` after each edit; 43 such calls in one series of 39 runs.
+static ProtocolEngine WriteEngine(SqliteStorageInitializer store, string[] args)
+    => new(new SearchService(store, store), store, store, new DotnetBuildTestService(), new PatchLifecycleService(),
+        refreshIndexAfterEdit: !args.Contains("--no-index", StringComparer.Ordinal));
 
 static async Task<int> PatchCreateAsync(string connectionString, string[] args, string format)
     => await DevX.Cli.PatchCreateCommand.RunAsync(connectionString, args, format);
@@ -940,7 +952,7 @@ static async Task<int> PatchRollbackAsync(string connectionString, string[] args
     var patchJson = await IOFile.ReadAllTextAsync(patchPath);
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
-    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var engine = WriteEngine(store, args);
     using var document = JsonDocument.Parse(patchJson);
     var request = new ProtocolRequest("1.0", ProtocolOperations.PatchRollback, sessionId, document.RootElement.Clone());
     var started = DateTimeOffset.UtcNow;

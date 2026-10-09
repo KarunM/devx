@@ -556,6 +556,24 @@ public sealed class RepositoryIndexingService
     }
 
     /// <summary>
+    /// Drop a file that no longer exists from the index. <see cref="ReindexFilesAsync"/> cannot
+    /// do this: it reports a missing file as an error and leaves the index holding a file that is
+    /// gone, so a delete through a patch (`DeleteFile`) would leave `devx search` finding a
+    /// document that is not there. Symbols follow the file by ON DELETE CASCADE.
+    /// </summary>
+    public async Task RemoveFileAsync(string repositoryPath, string filePath, CancellationToken cancellationToken = default)
+    {
+        var rootPath = Path.GetFullPath(repositoryPath);
+        var absolutePath = Path.GetFullPath(Path.Combine(rootPath, filePath.Replace('\\', '/')));
+        if (!absolutePath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("File path must be inside the repository root.", nameof(filePath));
+        }
+
+        await _repositoryStore.DeleteFileAsync(new FileId(StableId(absolutePath)), cancellationToken);
+    }
+
+    /// <summary>
     /// How many files the index holds for the repository rooted at <paramref name="repositoryPath"/>,
     /// 0 when that path has never been indexed. The repository id is derived exactly as
     /// <see cref="IndexAsync(string, CancellationToken)"/> derives it, so the count is about the

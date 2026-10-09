@@ -14,7 +14,7 @@ public static class ReplaceCommand
     {
         string? Option(string key) { var i = Array.IndexOf(args, key); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
         if (args.Length < 2 || Option("--old") is null || Option("--new") is null)
-        { Console.Error.WriteLine("Usage: devx replace <file> --old <text> --new <text> [--all | --occurrence <n>] [--verify | --no-verify] [--format json]"); return 1; }
+        { Console.Error.WriteLine("Usage: devx replace <file> --old <text> --new <text> [--all | --occurrence <n>] [--verify | --no-verify] [--no-index] [--format json]"); return 1; }
         int? occurrence = int.TryParse(Option("--occurrence"), out var n) ? n : null;
         var verify = args.Contains("--verify", StringComparer.Ordinal) && !args.Contains("--no-verify", StringComparer.Ordinal);
         var result = new TextReplaceService().Apply(root, args[1], Option("--old")!, Option("--new")!, args.Contains("--all"), occurrence);
