@@ -1387,11 +1387,12 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     else if (action == "section")
     {
         var separator = args[2].LastIndexOf('#');
-        if (separator <= 0 || separator == args[2].Length - 1)
+        if (separator <= 0)
         {
             // 19 of 23 `read section` calls in the v2 arm-B transcripts failed on exactly
             // this -- a missing '#Heading'. Answer with the headings rather than an error,
-            // so the retry is a paste instead of another search.
+            // so the retry is a paste instead of another search. A trailing '#' is not this
+            // case: it names nothing, and the engine answers it with the file itself.
             var snapshot = await engine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.GetFileSnapshot, sessionId, JsonSerializer.SerializeToElement(new { query = args[2] }), GetAgentLabel(args)));
             Console.Error.WriteLine("devx read section needs a heading: devx read section <file>#<heading>");
             var headings = new List<string>();
@@ -2420,7 +2421,16 @@ static string FormatAgentResponse(ProtocolResponse response,
         int.TryParse(JsonPropertyText(data, "StartLine"), out var start); int.TryParse(JsonPropertyText(data, "EndLine"), out var end);
         var name = JsonPropertyText(data, "QualifiedName");
         var kind = JsonPropertyText(data, "Kind");
-        return $"{p}:{start}-{end}{(string.IsNullOrEmpty(name) ? "" : $" {name}")}{(string.IsNullOrEmpty(kind) ? "" : $" [{kind}]")}\n{source.GetString()}";
+        // A `read section <file>#<name>` asked for a heading and got a symbol; say which one,
+        // so the caller can tell a resolution from a literal match.
+        var resolved = string.Empty;
+        if (TryGetPropertyIgnoreCase(data, "Metadata", out var metadata) && metadata.ValueKind == JsonValueKind.Object
+            && JsonPropertyText(metadata, "ResolvedVia") == "section-symbol")
+        {
+            var note = JsonPropertyText(metadata, "Message");
+            if (note.Length > 0) resolved = note + "\n";
+        }
+        return $"{resolved}{p}:{start}-{end}{(string.IsNullOrEmpty(name) ? "" : $" {name}")}{(string.IsNullOrEmpty(kind) ? "" : $" [{kind}]")}\n{source.GetString()}";
     }
     return data.GetRawText();
 }
@@ -2466,6 +2476,14 @@ static void WriteSourceResponse(ProtocolResponse response)
         return;
     }
 
+    // A section request that named a symbol rather than a heading resolves to it; print what
+    // it resolved to, so the reader is not left guessing why the span is not the whole file.
+    if (source.Metadata is System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Object } metadata
+        && metadata.TryGetProperty("ResolvedVia", out var resolvedVia) && resolvedVia.GetString() == "section-symbol"
+        && metadata.TryGetProperty("Message", out var resolvedMessage) && resolvedMessage.ValueKind == System.Text.Json.JsonValueKind.String)
+    {
+        Console.WriteLine(resolvedMessage.GetString());
+    }
     var location = source.StartLine == source.EndLine
         ? $"{source.Path}:{source.StartLine}"
         : $"{source.Path}:{source.StartLine}-{source.EndLine}";

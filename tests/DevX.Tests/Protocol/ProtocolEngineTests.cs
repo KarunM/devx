@@ -632,4 +632,98 @@ public sealed class ProtocolEngineTests
         Assert.Contains("Deploy API", payload!.Source);
         Assert.DoesNotContain("Block 120", payload.Source);
     }
+
+    [Fact]
+    public async Task ExecuteAsync_ReadSection_OnSourceFileResolvesTheSymbol()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("devx-section-symbol").FullName;
+        await System.IO.File.WriteAllTextAsync(Path.Combine(repositoryRoot, "alpha.py"),
+            "def load_level(moniker):\n    return moniker.upper()\n\n\ndef other():\n    return 1\n");
+        var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"devx-section-symbol-{Guid.NewGuid():N}.db") }.ToString());
+        await new RepositoryIndexingService(store).IndexAsync(repositoryRoot);
+        // A section read resolves paths against the repository root, so the session has to
+        // name the repository the indexer wrote -- not a fresh id for the same folder.
+        var repository = (await store.GetRepositoryByRootPathAsync(repositoryRoot))!;
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+
+        var response = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0", "READ_SECTION", session.Id.Value.ToString(),
+            JsonSerializer.SerializeToElement(new { file = "alpha.py", heading = "load_level" })));
+
+        Assert.True(response.Success);
+        var payload = response.Data!.Value.Deserialize<SourceReadResponse>()!;
+        Assert.Contains("moniker.upper()", payload.Source);
+        Assert.Contains("load_level", payload.QualifiedName);
+        Assert.DoesNotContain("def other", payload.Source);
+        Assert.Equal("section-symbol", payload.Metadata is JsonElement metadata ? metadata.GetProperty("ResolvedVia").GetString() : null);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReadSection_WithNoNameReturnsTheFile()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("devx-section-file").FullName;
+        await System.IO.File.WriteAllTextAsync(Path.Combine(repositoryRoot, "alpha.py"),
+            "def load_level(moniker):\n    return moniker.upper()\n");
+        var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"devx-section-file-{Guid.NewGuid():N}.db") }.ToString());
+        await new RepositoryIndexingService(store).IndexAsync(repositoryRoot);
+        var repository = (await store.GetRepositoryByRootPathAsync(repositoryRoot))!;
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+
+        var response = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0", "READ_SECTION", session.Id.Value.ToString(),
+            JsonSerializer.SerializeToElement(new { file = "alpha.py", heading = "" })));
+
+        Assert.True(response.Success);
+        var payload = response.Data!.Value.Deserialize<SourceReadResponse>()!;
+        Assert.Equal("file", payload.Kind);
+        Assert.Contains("load_level", payload.Source);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReadSection_OnSourceFile_AmbiguousNameListsCommands()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("devx-section-ambiguous").FullName;
+        await System.IO.File.WriteAllTextAsync(Path.Combine(repositoryRoot, "gamma.cs"),
+            "namespace Sample;\npublic class Alpha { public int Run() { return 1; } }\npublic class Beta { public int Run() { return 2; } }\n");
+        var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"devx-section-ambiguous-{Guid.NewGuid():N}.db") }.ToString());
+        await new RepositoryIndexingService(store).IndexAsync(repositoryRoot);
+        var repository = (await store.GetRepositoryByRootPathAsync(repositoryRoot))!;
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+
+        var response = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0", "READ_SECTION", session.Id.Value.ToString(),
+            JsonSerializer.SerializeToElement(new { file = "gamma.cs", heading = "Run" })));
+
+        Assert.False(response.Success);
+        var error = Assert.Single(response.Errors);
+        Assert.Equal("AmbiguousMatch", error.Code);
+        Assert.NotNull(error.Suggestions);
+        Assert.All(error.Suggestions!, suggestion => Assert.StartsWith("devx read method \"", suggestion));
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReadSection_OnSourceFile_UnknownNameSuggestsTheFileSymbols()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("devx-section-unknown").FullName;
+        await System.IO.File.WriteAllTextAsync(Path.Combine(repositoryRoot, "alpha.py"),
+            "def load_level(moniker):\n    return moniker.upper()\n");
+        var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"devx-section-unknown-{Guid.NewGuid():N}.db") }.ToString());
+        await new RepositoryIndexingService(store).IndexAsync(repositoryRoot);
+        var repository = (await store.GetRepositoryByRootPathAsync(repositoryRoot))!;
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+
+        var response = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0", "READ_SECTION", session.Id.Value.ToString(),
+            JsonSerializer.SerializeToElement(new { file = "alpha.py", heading = "no_such_name" })));
+
+        Assert.False(response.Success);
+        var error = Assert.Single(response.Errors);
+        Assert.Equal("NotFound", error.Code);
+        Assert.NotNull(error.Suggestions);
+        Assert.Contains(error.Suggestions!, suggestion => suggestion.Contains("alpha.py#load_level"));
+    }
 }

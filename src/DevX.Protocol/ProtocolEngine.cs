@@ -695,9 +695,23 @@ public sealed class ProtocolEngine : IProtocolEngine
 
     private async Task<ProtocolResponse> HandleReadSectionAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
     {
-        if (!TryGetString(request.Payload, "file", out var file) || !TryGetString(request.Payload, "heading", out var heading))
+        if (!TryGetString(request.Payload, "file", out var file))
         {
             return Fail("ValidationError", "Read section requests must use 'file#heading'.");
+        }
+
+        // The name is optional. `read section <file>#` asks for the file, and on a source file
+        // `read section <file>#<name>` asks for a symbol -- both are how a caller actually
+        // typed it, and both used to be answered with an error.
+        var heading = TryGetString(request.Payload, "heading", out var providedHeading) ? providedHeading : string.Empty;
+        if (string.IsNullOrWhiteSpace(heading))
+        {
+            return await ReadSectionTargetAsync(request, session, file, string.Empty, cancellationToken);
+        }
+
+        if (!Path.GetExtension(file).Equals(".md", StringComparison.OrdinalIgnoreCase))
+        {
+            return await ReadSectionTargetAsync(request, session, file, heading, cancellationToken);
         }
 
         var sectionRoot = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
@@ -741,7 +755,11 @@ public sealed class ProtocolEngine : IProtocolEngine
             .ToList();
         if (methods.Count != 1)
         {
-            return Fail("ParseError", $"Heading '{selectedHeading}' was indexed but its source could not be read.", $"{file}#{heading}");
+            // The legacy name+path lookup re-parses the file and can only find a method it
+            // recognises again; a heading indexed as something else -- or one whose span the
+            // parse cannot re-locate -- ends up here as "could not be read". The resolver
+            // reads the span straight from the index, so try that before giving up.
+            return await ReadSectionTargetAsync(request, session, file, selectedHeading, cancellationToken);
         }
 
         var method = methods[0];
@@ -751,6 +769,102 @@ public sealed class ProtocolEngine : IProtocolEngine
         await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, method.Id), cancellationToken);
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
     }
+
+    // The forgiving half of `read section`. A source file is not a document of headings, so
+    // `<file>#<name>` resolves <name> as a symbol in that file and answers with the same
+    // response `read method` gives, saying which symbol it resolved. `<file>#` with no name
+    // answers with the file, capped and paged exactly as `read file` does.
+    private async Task<ProtocolResponse> ReadSectionTargetAsync(ProtocolRequest request, SessionState session, string file, string name, CancellationToken cancellationToken)
+    {
+        var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return Fail("RepositoryNotIndexed", "Repository root was not found.");
+        }
+
+        var absolute = Path.GetFullPath(Path.Combine(root, file));
+        if (!absolute.StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
+        {
+            return Fail("ValidationError", "File path must remain inside the repository root.");
+        }
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            if (!IOFile.Exists(absolute)) return Fail("FileMissing", $"file missing: {file}", $"{file}#");
+            var fileRequest = new ProtocolRequest(request.Version, "READ_FILE", session.Id.Value.ToString(),
+                JsonSerializer.SerializeToElement(new { query = file, full = false, range = $"1:{int.MaxValue}" }), request.AgentLabel);
+            return await HandleReadFileAsync(fileRequest, session, cancellationToken);
+        }
+
+        var resolution = await ReadableSymbolResolver.ResolveAsync(_repositoryStore, root, name, cancellationToken);
+        var inFile = resolution.Candidates
+            .Where(candidate => candidate.FilePath is not null
+                && string.Equals(Path.GetFullPath(Path.Combine(root, candidate.FilePath.Replace('\\', '/'))), absolute, StringComparison.OrdinalIgnoreCase))
+            .DistinctBy(candidate => candidate.Id)
+            .ToList();
+
+        if (inFile.Count == 0)
+        {
+            var suggestions = (await FileSymbolNamesAsync(file, cancellationToken))
+                .Select(symbol => $"devx read section \"{file}#{symbol}\"")
+                .Take(5)
+                .ToList();
+            if (suggestions.Count == 0)
+            {
+                suggestions = resolution.Candidates
+                    .Select(candidate => $"devx read method \"{candidate.QualifiedName}\"")
+                    .Take(5)
+                    .ToList();
+            }
+
+            return Fail("NotFound", $"'{name}' is not a symbol in '{file}'.", $"{file}#{name}", suggestions);
+        }
+
+        if (inFile.Count > 1)
+        {
+            return Fail(
+                "AmbiguousMatch",
+                $"'{name}' matched multiple symbols in '{file}'.",
+                $"{file}#{name}",
+                inFile.Select(candidate => $"devx read method \"{candidate.QualifiedName}\""));
+        }
+
+        var symbol = inFile[0];
+        var symbolRequest = new ProtocolRequest(request.Version, "READ_METHOD", session.Id.Value.ToString(),
+            JsonSerializer.SerializeToElement(new { query = symbol.QualifiedName }), request.AgentLabel);
+        var response = await HandleReadMethodAsync(symbolRequest, session, cancellationToken);
+        if (!response.Success || response.Data is not { ValueKind: JsonValueKind.Object } data)
+        {
+            return response;
+        }
+
+        // `read method` already returns the right bytes; the section caller only needs the
+        // response to say which symbol it resolved to, which the metadata carries.
+        var fields = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        foreach (var property in data.EnumerateObject()) fields[property.Name] = property.Value.Clone();
+        fields["Metadata"] = JsonSerializer.SerializeToElement(new
+        {
+            Heading = symbol.Name,
+            RequestedHeading = name,
+            ResolvedVia = "section-symbol",
+            ResolvedSymbol = symbol.QualifiedName,
+            SymbolKind = symbol.Kind,
+            Message = $"read section '{file}#{name}' resolved to {symbol.Kind.ToLowerInvariant()} {symbol.QualifiedName}",
+        });
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(fields), response.Diagnostics, []);
+    }
+
+    private async Task<IReadOnlyList<string>> FileSymbolNamesAsync(string file, CancellationToken cancellationToken)
+    {
+        var snapshot = await _repositoryStore.GetFileSnapshotAsync(file, cancellationToken);
+        if (snapshot is null) return [];
+        return snapshot.Types.Select(type => type.Name)
+            .Concat(snapshot.Methods.Select(method => method.Name))
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
 
     private static string? GetReadQuery(JsonElement payload)
     {
