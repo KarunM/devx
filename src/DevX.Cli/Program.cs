@@ -1134,14 +1134,24 @@ static async Task<int> DoctorAsync(string connectionString, string[] args, strin
         await store.AddOperationMetricAsync(new OperationMetric("doctor", DateTimeOffset.UtcNow, TimeSpan.Zero, doctor.Health.Status != "Unavailable", sessionId, AgentLabel: GetAgentLabel(args)));
     }
 
+    // Which engine answers `devx search text` is a real diagnostic: with no ripgrep the
+    // in-process scan answers, and a caller comparing two machines needs to know that.
+    var searchEngine = DevX.Infrastructure.Storage.SQLite.RipgrepLocator.Locate(repositoryRoot);
+
     if (format == "json")
     {
-        Console.WriteLine(JsonSerializer.Serialize(doctor));
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            doctor.Health,
+            doctor.Findings,
+            SearchEngine = new { searchEngine.Engine, searchEngine.Executable, searchEngine.Version, Description = searchEngine.Describe() },
+        }));
         return doctor.Health.Status == "Unavailable" ? 1 : 0;
     }
 
     Console.WriteLine("DevX Doctor");
     Console.WriteLine($"Status: {doctor.Health.Status}");
+    Console.WriteLine($"Search engine: {searchEngine.Describe()}");
     foreach (var finding in doctor.Findings)
     {
         Console.WriteLine($"- [{finding.Severity}] {finding.Summary}");

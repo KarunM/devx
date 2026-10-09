@@ -3,7 +3,8 @@ using System.Diagnostics;
 namespace DevX.Infrastructure.Storage.SQLite;
 
 /// <summary>
-/// `devx search text` through ripgrep when it is on PATH, with the in-process scan in
+/// `devx search text` through ripgrep -- configured, bundled with DevX, or on PATH, in that
+/// order (<see cref="RipgrepLocator"/>) -- with the in-process scan in
 /// <see cref="SqliteStorageInitializer"/> as the fallback. The output shape is identical
 /// either way -- path, line, and the matching line's text -- so nothing downstream, and no
 /// `--format json` payload, depends on which engine answered.
@@ -30,10 +31,18 @@ public static class RipgrepContentSearcher
     /// not installed, or the pattern is not a valid regex -- and the caller must fall back to
     /// the in-process scan rather than report no matches.
     /// </summary>
+    /// <summary>
+    /// The binary is resolved by <see cref="RipgrepLocator"/>: the repository's configured
+    /// `rg.path`, then the copy bundled with DevX, then PATH. Null means no ripgrep anywhere.
+    /// </summary>
     public static bool TrySearch(string rootPath, string query, out List<Hit> hits, CancellationToken cancellationToken = default)
+        => TrySearch(rootPath, query, RipgrepLocator.Locate(rootPath).Executable, out hits, cancellationToken);
+
+    public static bool TrySearch(string rootPath, string query, string? executable, out List<Hit> hits, CancellationToken cancellationToken = default)
     {
         hits = [];
-        if (string.IsNullOrWhiteSpace(query) || string.IsNullOrWhiteSpace(rootPath) || !Directory.Exists(rootPath))
+        if (string.IsNullOrWhiteSpace(executable)
+            || string.IsNullOrWhiteSpace(query) || string.IsNullOrWhiteSpace(rootPath) || !Directory.Exists(rootPath))
         {
             return false;
         }
@@ -41,7 +50,7 @@ public static class RipgrepContentSearcher
         // Case-insensitive, like the in-process scan it replaces: `devx search text IsEnabled`
         // has always found `isenabled`, and an agent that has read that behaviour must not have
         // it taken away. A caller who wants case-sensitivity writes it into the regex.
-        if (TryRun(rootPath, ["-i"], query, hits, cancellationToken))
+        if (TryRun(executable, rootPath, ["-i"], query, hits, cancellationToken))
         {
             return true;                              // possibly zero hits: that is still an answer
         }
@@ -49,12 +58,12 @@ public static class RipgrepContentSearcher
         // rg exits 2 on a pattern that will not compile -- `GetValueOrDefault(` is a query
         // agents really typed. Retry as fixed strings so a literal-looking query still works.
         hits.Clear();
-        return TryRun(rootPath, ["-i", "-F"], query, hits, cancellationToken);
+        return TryRun(executable, rootPath, ["-i", "-F"], query, hits, cancellationToken);
     }
 
-    private static bool TryRun(string rootPath, string[] flags, string query, List<Hit> hits, CancellationToken cancellationToken)
+    private static bool TryRun(string executable, string rootPath, string[] flags, string query, List<Hit> hits, CancellationToken cancellationToken)
     {
-        var start = new ProcessStartInfo("rg")
+        var start = new ProcessStartInfo(executable)
         {
             WorkingDirectory = rootPath,
             RedirectStandardOutput = true,

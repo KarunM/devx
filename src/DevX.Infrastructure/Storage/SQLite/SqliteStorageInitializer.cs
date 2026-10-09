@@ -577,7 +577,8 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
             }
         }
 
-        // ripgrep when it is on PATH: it is the regex engine, and it reads the tree instead of
+        // ripgrep -- the repository's configured copy, the one bundled with DevX, or the one on
+        // PATH, in that order: it is the regex engine, and it reads the tree instead of
         // every indexed file, which is what makes `a|b` and a regex possible at all. The
         // in-process scan below stays as the fallback and its result set is the same shape, so
         // nothing downstream -- and no `--format json` payload -- depends on which one answered.

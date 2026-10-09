@@ -36,7 +36,16 @@ jobs:
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: 10.0.x
+      # Every supported RID's ripgrep goes into the tool package, so one package works
+      # everywhere. The download is pinned and sha256-checked by the tool itself.
+      - name: Fetch bundled ripgrep
+        run: |
+          for rid in osx-arm64 osx-x64 linux-x64 linux-arm64 win-x64; do
+            python3 tools/fetch_ripgrep.py "$rid" "bundled-rg/$rid"
+          done
       - run: dotnet pack src/DevX.Cli -c Release -o artifacts/nupkg
+      - name: Report package size
+        run: ls -l artifacts/nupkg/*.nupkg
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: nupkg
@@ -56,6 +65,9 @@ jobs:
             archive: tar.gz
           - rid: linux-x64
             runner: ubuntu-latest
+            archive: tar.gz
+          - rid: linux-arm64
+            runner: ubuntu-24.04-arm
             archive: tar.gz
           - rid: win-x64
             runner: windows-latest
@@ -79,6 +91,16 @@ jobs:
             echo "value=0.0.0-dryrun" >> "$GITHUB_OUTPUT"
           fi
       - run: dotnet publish src/DevX.Cli -c Release -r ${{ matrix.rid }} --self-contained -p:PublishSingleFile=true -o publish/${{ matrix.rid }}
+      # ripgrep travels with the binary, next to it, so `devx search text` has a real engine
+      # on a machine that has none. Downloaded here, never committed.
+      - name: Bundle ripgrep beside the published binary
+        shell: bash
+        env:
+          PY: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
+          RID: ${{ matrix.rid }}
+        run: |
+          ${PY} tools/fetch_ripgrep.py "${RID}" "publish/${RID}"
+          cp THIRD-PARTY-NOTICES "publish/${RID}/"
       - name: Smoke test published binary
         shell: bash
         env:

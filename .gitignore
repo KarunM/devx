@@ -1,6 +1,8 @@
 **/bin/
 **/obj/
 artifacts/
+# Downloaded by tools/fetch_ripgrep.py and packed by the release workflow; never committed.
+bundled-rg/
 .devx/
 .env
 .env.*

@@ -28,6 +28,50 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def check_bundled_engine(binary, fixture, session_id):
+    """Brief OSS13 item 5: ripgrep ships with DevX, so `devx search text` has a real engine on
+    a machine that has none. PATH is stripped of every directory holding an rg there and the
+    doctor must still report the copy beside the binary, with the search answered by it."""
+    name = "rg.exe" if os.name == "nt" else "rg"
+    bundled = binary.parent / name
+    if not bundled.is_file():
+        # Only reachable when this tool is run against a plain `dotnet publish`: the release
+        # workflow fetches ripgrep beside the binary before calling it.
+        print("SKIP bundled ripgrep (no rg beside the binary)", flush=True)
+        return
+    environment = dict(os.environ)
+    environment["PATH"] = os.pathsep.join(
+        directory for directory in environment.get("PATH", "").split(os.pathsep)
+        if directory and not (Path(directory) / name).is_file()
+    )
+    require(not any(directory and (Path(directory) / name).is_file()
+                    for directory in environment["PATH"].split(os.pathsep)),
+            "PATH still holds an rg after stripping")
+    doctor = subprocess.run(
+        [str(binary), "doctor", "--format", "json"], cwd=fixture, env=environment, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=COMMAND_TIMEOUT, check=False,
+    )
+    require(doctor.returncode == 0, f"doctor exited {doctor.returncode}")
+    try:
+        engine = json.loads(doctor.stdout)["SearchEngine"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"doctor did not report a search engine: {exc}") from exc
+    require("(bundled)" in str(engine.get("Description", "")),
+            f"doctor did not report the bundled engine: {engine}")
+    require(engine.get("Executable") and Path(engine["Executable"]).resolve() == bundled.resolve(),
+            f"doctor named the wrong rg: {engine.get('Executable')}")
+    print(f"PASS bundled ripgrep reported ({engine.get('Description')})", flush=True)
+
+    found = subprocess.run(
+        [str(binary), "search", "text", "greet_user", "--session", session_id],
+        cwd=fixture, env=environment, text=True, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, timeout=COMMAND_TIMEOUT, check=False,
+    )
+    require(found.returncode == 0 and "greet_user" in found.stdout + found.stderr,
+            "search text found nothing with PATH stripped of rg")
+    print("PASS search text on the bundled engine", flush=True)
+
+
 def smoke(binary):
     result = run(binary, ["--version"])
     require(result.returncode == 0, f"--version exited {result.returncode}")
@@ -69,6 +113,8 @@ def smoke(binary):
         section = run(binary, ["read", "section", "README.md#Usage", "--session", session_id], fixture)
         require(section.returncode == 0, "read section failed")
         print("PASS read section", flush=True)
+
+        check_bundled_engine(binary, fixture, session_id)
 
         mcp_fixture = Path(second)
         shutil.copy2(fixture / "a.py", mcp_fixture / "a.py")
