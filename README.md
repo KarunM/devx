@@ -22,7 +22,7 @@ dotnet tool install --global DevX.Cli
 devx --help
 ```
 
-**Supported languages.** Symbol indexing covers Python and C# source, and Markdown headings are indexed as sections. Every other file type is covered by `devx search text` (ripgrep-backed, with coverage reporting) and `devx read file --range`. Python indexing needs `python3` on your PATH.
+**Supported languages.** Symbol indexing covers Python and C# source, and Markdown headings are indexed as sections. Every other file type is covered by `devx search text` (ripgrep-backed, with coverage reporting) and `devx read file --range`. Python indexing needs `python3` on your PATH. For Python, `callers` and `references` are text-backed lexical candidates found by name outside strings and comments, not a resolved call graph.
 
 Claude Code MCP setup:
 

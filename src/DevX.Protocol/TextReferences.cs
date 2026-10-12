@@ -19,7 +19,7 @@ public static class TextReferences
     private const int GroupLineNumbers = 5;
     /// <summary>The agent view lists at most this many functions (the busiest first); the JSON carries all of them.</summary>
     private const int GroupsShown = 10;
-    public const string CallersNote = "text-backed: call sites by name, not a resolved call graph";
+    public const string CallersNote = "text-backed lexical candidates outside strings and comments; not a resolved call graph";
 
     public sealed record Hit(string FileId, string Path, int Line, string Text, string Kind);
 
@@ -28,9 +28,12 @@ public static class TextReferences
     /// code. Documented heuristic, deliberately small: a match after a `#` is a Python comment; a line that
     /// starts with a triple quote or any quote character is treated as docstring/string text. Multi-line
     /// docstring bodies and `#` inside string literals are not detected. Returns null when dropped.
+    /// When <paramref name="source"/> (the lexed hit file) is given, the line heuristics are replaced by it:
+    /// a match inside a string literal, docstring or comment is rejected, everything else is kept.
     /// </summary>
-    public static Hit? Classify(ContentSearchResult result, string name)
+    public static Hit? Classify(ContentSearchResult result, string name, PythonLexicalRegions? source = null)
     {
+        if (source?.Line(result.Line) is { } rawLine) return ClassifyLexed(result, name, rawLine, source);
         var text = result.Preview;
         var trimmed = text.TrimStart();
         if (trimmed.StartsWith('"') || trimmed.StartsWith('\'')) return null;
@@ -39,6 +42,22 @@ public static class TextReferences
         {
             if (text.AsSpan(0, match.Index).Contains('#')) continue;
             var after = text.AsSpan(match.Index + match.Length).TrimStart();
+            var kind = trimmed.StartsWith("from ", StringComparison.Ordinal) || trimmed.StartsWith("import ", StringComparison.Ordinal)
+                ? "import"
+                : after.StartsWith("(") ? "call" : "usage";
+            return new Hit(result.FileId, result.Path, result.Line, trimmed.Length > 120 ? trimmed[..120] : trimmed, kind);
+        }
+        return null;
+    }
+
+    private static Hit? ClassifyLexed(ContentSearchResult result, string name, string rawLine, PythonLexicalRegions source)
+    {
+        var trimmed = rawLine.Trim();
+        var word = new Regex($@"(?<![\p{{L}}\p{{N}}_]){Regex.Escape(name)}(?![\p{{L}}\p{{N}}_])", RegexOptions.CultureInvariant);
+        foreach (Match match in word.Matches(rawLine))
+        {
+            if (source.IsInside(result.Line, match.Index)) continue;
+            var after = rawLine.AsSpan(match.Index + match.Length).TrimStart();
             var kind = trimmed.StartsWith("from ", StringComparison.Ordinal) || trimmed.StartsWith("import ", StringComparison.Ordinal)
                 ? "import"
                 : after.StartsWith("(") ? "call" : "usage";
@@ -88,7 +107,7 @@ public static class TextReferences
             ? $"{total} call sites in {groupCount} {(groupCount == 1 ? "function" : "functions")}{(groupCount > GroupsShown ? $" (top {GroupsShown} shown)" : "")}; target {Str(data, "targetPath")}:{Str(data, "targetLine")}; {CallersNote}; pass --full for every site"
             : isCallers
             ? $"{total} call sites ({Str(data, "calls")} calls); target {Str(data, "targetPath")}:{Str(data, "targetLine")}; {CallersNote}"
-            : $"{total} references (calls {Str(data, "calls")}, usages {Str(data, "usages")}, imports {Str(data, "imports")}); target {Str(data, "targetPath")}:{Str(data, "targetLine")}";
+            : $"{total} references (calls {Str(data, "calls")}, usages {Str(data, "usages")}, imports {Str(data, "imports")}); target {Str(data, "targetPath")}:{Str(data, "targetLine")}; {CallersNote}";
         if (Prop(data, "truncated", out var truncated) && truncated.ValueKind == JsonValueKind.True)
             footer += $"; showing {Str(data, "returned")}";
         lines.Add(footer);

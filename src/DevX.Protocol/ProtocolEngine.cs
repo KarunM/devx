@@ -565,9 +565,26 @@ public sealed class ProtocolEngine : IProtocolEngine
             outcome = new ContentSearchOutcome(matches, new ContentSearchCoverage(matches.Count, searchLimit, null, null, false, false, "unknown", ["The configured store does not report search coverage."]));
         }
 
+        var repositoryRoot = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+        var lexed = new Dictionary<string, PythonLexicalRegions?>(StringComparer.Ordinal);
+        PythonLexicalRegions? LexedSource(string path)
+        {
+            if (!IsPython(path) || repositoryRoot is null) return null;
+            if (lexed.TryGetValue(path, out var cached)) return cached;
+            PythonLexicalRegions? regions = null;
+            try
+            {
+                var full = Path.GetFullPath(Path.Combine(repositoryRoot, path));
+                if (full.StartsWith(Path.GetFullPath(repositoryRoot), StringComparison.Ordinal)) regions = PythonLexicalRegions.Scan(System.IO.File.ReadAllText(full));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
+            lexed[path] = regions;
+            return regions;
+        }
+
         var hits = outcome.Matches
             .Where(match => !(match.Line == targetLine && string.Equals(match.Path, targetPath, StringComparison.Ordinal)))
-            .Select(match => TextReferences.Classify(match, name))
+            .Select(match => TextReferences.Classify(match, name, LexedSource(match.Path)))
             .OfType<TextReferences.Hit>()
             .Where(hit => !callersOnly || hit.Kind == "call")
             .ToList();
