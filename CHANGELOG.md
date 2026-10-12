@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.7.0 — 2026-10-12
+
 - `devx read type` outline gains one `bases:` line after the declaration: each declared base of a Python or
   C# type with `path:start-end` when it resolves to exactly one indexed type, `-` otherwise
   (`Metadata.Bases` in JSON), so a hierarchy is followed one `read type` per level (OSS26 B-1).
@@ -39,6 +41,13 @@
   the index.
 - Fix the MCP `test` tool ignoring `testFiles`: they are now forwarded as `targets`, so Python test
   files select pytest exactly as `devx verify test <file>` does.
+- `src/DevX.Cli/Program.cs.bak` was removed from the repository.
+
+### Known limitations
+
+- C# `callers` on an overloaded method fails with `error: Method '<name>' matched multiple implementations.` (exit 1) instead of listing the overloads.
+- C# `callers` can over-report: every method of the file was returned as a caller of a private helper on DevX's own source (pre-existing, not introduced in 1.7.0).
+- Python text-backed `callers`/`references` match by name, so doctest `>>>` lines and names inside strings count as call sites.
 
 ## 1.6.14
 
