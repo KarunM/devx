@@ -62,6 +62,8 @@ line; (2) "who calls / what does it call / where is it used" is answered by `cal
 and `references`, used before any text search; (3) `snapshot <file>` outlines a file and
 `read file --range a:b` reads the lines around a hit.
 
+For C#, `callers`, `callees` and `references` resolve the target like `read` does; overloads of one method are answered grouped per overload, and a name shared by different types lists the capped candidates.
+
 For Python (no resolved call graph) `references` and `callers` are text-backed: the target is resolved
 like `read` does (an ambiguous name lists the capped candidates), then indexed file contents are
 searched for the simple name as a whole word. Comment lines (a match after `#`) and quote-leading

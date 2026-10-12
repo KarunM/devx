@@ -1755,6 +1755,39 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, IRootScopedFile
         return results.DistinctBy(result => result.CalleeMethodId).ToList();
     }
 
+    /// <summary>Every method/constructor of one repository with its signature, span and location: the input for the overload-aware call scan.</summary>
+    public async Task<IReadOnlyList<MethodCandidate>> ListMethodCandidatesAsync(string repositoryId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT s.id, s.repository_id, s.project_id, s.file_id, s.container_id, s.kind, s.name, s.qualified_name, s.signature,
+                   s.start_line, s.end_line, f.path, n.name, p.name, t.name, r.root_path
+            FROM symbols s
+            INNER JOIN files f ON f.id = s.file_id
+            INNER JOIN projects p ON p.id = f.project_id
+            INNER JOIN repositories r ON r.id = p.repository_id
+            INNER JOIN types t ON t.id = s.container_id
+            INNER JOIN namespaces n ON n.id = t.namespace_id
+            WHERE s.kind IN ('Method', 'Constructor') AND s.repository_id = $repository_id
+            ORDER BY s.qualified_name, f.path, s.start_line;
+            """;
+        command.Parameters.AddWithValue("$repository_id", repositoryId);
+        var results = new List<MethodCandidate>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var symbol = new Symbol(
+                reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetString(6), reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetInt32(9), reader.IsDBNull(10) ? null : reader.GetInt32(10), reader.GetString(11));
+            results.Add(new MethodCandidate(symbol, reader.GetString(12), reader.GetString(13), reader.GetString(14), reader.GetString(15)));
+        }
+        return results;
+    }
+
     private async Task<IReadOnlyList<Symbol>> FindMethodsForCallersAsync(string query, CancellationToken cancellationToken)
     {
         var byName = await FindSymbolsByNameAsync(query, cancellationToken);

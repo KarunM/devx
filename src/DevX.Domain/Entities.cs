@@ -252,13 +252,23 @@ public sealed record CallerSummary(
     string Project,
     string FilePath,
     string ContainingType,
-    int? CallSiteLine);
+    int? CallSiteLine,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Relationship = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? CallerSignature = null);
+
+/// <summary>One overload of a method and the callers attributed to it (`Attribution` says how: "arity" = argument count against the parameter list).</summary>
+public sealed record CallerOverload(string Signature, string Path, int StartLine, string Attribution, IReadOnlyList<CallerSummary> Callers);
 
 public sealed record CallerSummaryResponse(
     string Query,
     string MatchKind,
     MethodSummary? TargetMethod,
-    IReadOnlyList<CallerSummary> Callers);
+    IReadOnlyList<CallerSummary> Callers,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? TargetSignature = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CallerOverload>? Overloads = null);
+
+/// <summary>A method row with what a call-graph scan needs: the symbol (signature and span included) and where it lives.</summary>
+public sealed record MethodCandidate(Symbol Symbol, string Namespace, string Project, string TypeName, string RootPath);
 
 public sealed record CalleeSummary(
     string CalleeMethodId,
@@ -268,13 +278,20 @@ public sealed record CalleeSummary(
     string Project,
     string FilePath,
     string ContainingType,
-    int? CallSiteLine);
+    int? CallSiteLine,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Relationship = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? CalleeSignature = null);
+
+/// <summary>One overload of a method and the methods its own body calls.</summary>
+public sealed record CalleeOverload(string Signature, string Path, int StartLine, IReadOnlyList<CalleeSummary> Callees);
 
 public sealed record CalleeSummaryResponse(
     string Query,
     string MatchKind,
     MethodSummary? TargetMethod,
-    IReadOnlyList<CalleeSummary> Callees);
+    IReadOnlyList<CalleeSummary> Callees,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? TargetSignature = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<CalleeOverload>? Overloads = null);
 
 public sealed record ReferenceSummary(
     string ReferenceId,

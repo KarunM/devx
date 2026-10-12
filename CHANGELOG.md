@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.7.1 — 2026-10-12
+
+### Fixed
+
+- C# `callers`, `callees` and `references` resolve their target through the same resolver as `read` (exact, module,
+  suffix, bare name), so `callers "RipgrepLocator.Locate"` answers instead of "was not found".
+- C# `callers`/`callees` on a method with several overloads in one type answer for all of them, grouped per overload
+  (`Overloads[]` with `Signature`, `Path`, `StartLine` and the callers/callees in JSON; one `<QN>(<parameter types>) path:line`
+  header per overload in agent format) instead of failing with "matched multiple implementations".
+- A name shared by methods of different types answers with the same capped candidate list as `read` (exit 2 for `callers`).
+- Callers are attributed to an overload by argument count from the call site in each method body; a caller that is another
+  overload of the same method is reported as `self-delegation`. Single-method answers are unchanged and gain `TargetSignature`.
+
 ## 1.7.0 — 2026-10-12
 
 - `devx read type` outline gains one `bases:` line after the declaration: each declared base of a Python or
@@ -45,7 +58,6 @@
 
 ### Known limitations
 
-- C# `callers` on an overloaded method fails with `error: Method '<name>' matched multiple implementations.` (exit 1) instead of listing the overloads.
 - C# `callers` can over-report: every method of the file was returned as a caller of a private helper on DevX's own source (pre-existing, not introduced in 1.7.0).
 - Python text-backed `callers`/`references` match by name, so doctest `>>>` lines and names inside strings count as call sites.
 

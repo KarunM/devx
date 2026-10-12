@@ -60,6 +60,7 @@ public static class TextReferences
     /// <summary>Agent rendering: one line per hit, then a footer; a coverage notice only when output was cut or capped.</summary>
     public static string? Format(JsonElement data)
     {
+        if (CallOverloads.Format(data) is { } overloaded) return overloaded;
         if (data.ValueKind != JsonValueKind.Object || !Prop(data, "mode", out var mode) || mode.GetString() != "text") return null;
         var lines = new List<string>();
         var grouped = Prop(data, "grouped", out var groupedFlag) && groupedFlag.ValueKind == JsonValueKind.True
