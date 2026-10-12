@@ -43,7 +43,7 @@ devx index .
 devx search text "TODO" --session <session-id>
 ```
 
-Create a session with `devx session create --format json`, then pass its ID to session-scoped commands.
+**Sessions are shared.** Create a session once per repository with `devx session create --format json`; its id is stored in the repository's `.devx/` database (`devx.db`). Any process or agent working in that repository can pass the same id, so one orchestrator can create the session and hand the id to several agents. The guidance block written by `devx init --agents <name>` tells an agent to use the id it was given and to create one only if none was given. Every session-scoped call records its command, duration and the `--agent <label>` that made it, so the history shows which agent read or searched what. Sessions outlive the shell that created them.
 
 ### Output format
 
