@@ -104,8 +104,8 @@ public sealed class ReadOutlineTests
         var server = new McpReferenceServer(f.Engine, f.Store, f.Store, f.Session.Id.Value.ToString());
         var tools = (await server.InitializeAsync()).Tools;
         var read = tools.Single(t => t.Name == "read");
-        Assert.Contains("target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type.", read.Description);
-        Assert.Contains("read type for a member outline, --full/full:true for a whole class.", read.Description);
+        Assert.Contains("target: qualified name (e.g. pkg.mod.Name) or repo path for kind=file.", read.Description);
+        Assert.Contains("read type (outline) answers 'which methods/fields does X have'; --full only for bodies.", read.Description);
         var args = read.InputSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).OrderBy(n => n).ToArray();
         Assert.Contains("target", args); Assert.Contains("kind", args); Assert.Contains("full", args); Assert.Contains("range", args);
         Assert.Contains(tools, t => t.Name == "search"); Assert.Contains(tools, t => t.Name == "patch.apply");

@@ -244,6 +244,7 @@ public sealed class McpReferenceServer
             }
             return string.Join("\n", hits);
         }
+        if (TextReferences.Format(data) is { } textBacked) return textBacked;
         foreach (var collection in new[] { "callers", "callees", "references" })
         {
             if (!TryGetPropertyIgnoreCase(data, collection, out var items)) continue;
@@ -867,7 +868,7 @@ public sealed class McpReferenceServer
                 },
                 required = new[] { "query" }
             }),
-            CreateTool("read", "Read", "Step 2: Use read to inspect a symbol, file, or section before editing. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. Bare or Class.member names resolve when unique. read type for a member outline, --full/full:true for a whole class.", "read", new
+            CreateTool("read", "Read", "Step 2: read a symbol, file or section. target: qualified name (e.g. pkg.mod.Name) or repo path for kind=file. Bare or Class.member names resolve when unique. read type (outline) answers 'which methods/fields does X have'; --full only for bodies. callers/references work for Python (text-backed); callees does not.", "read", new
             {
                 type = "object",
                 properties = new

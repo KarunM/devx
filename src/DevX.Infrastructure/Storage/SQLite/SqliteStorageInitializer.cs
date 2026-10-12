@@ -998,6 +998,7 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, IRootScopedFile
                 candidate => candidate,
                 new IndexedFileIdentityComparer());
             var results = new List<(string Path, int Line, ContentSearchResult Result)>();
+            var unindexedHits = 0;
             foreach (var (root, hit) in ripgrepHits)
             {
                 var hitPath = NormalizeContentPath(hit.Path);
@@ -1008,7 +1009,9 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, IRootScopedFile
                 }
                 if (!indexedByIdentity.TryGetValue((root, hitPath), out var file))
                 {
-                    warningCount++;
+                    // A file ripgrep can read but the index never covered (docs, config) is not an
+                    // unsafe indexed path: drop it and count it where JSON consumers can see it.
+                    unindexedHits++;
                     continue;
                 }
                 AddBoundedResult(results, (hitPath, hit.Line, new ContentSearchResult(file.Id, hitPath, hit.Line, MatchColumn(hit.Text, query), hit.Text)), limit + 1);
@@ -1020,7 +1023,7 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, IRootScopedFile
             if (warningCount > 0) warnings.Add($"{warningCount} indexed path(s) could not be searched safely.");
             bool? complete = outputTruncated ? false : null;
             bool? reportedTruncation = outputTruncated ? true : null;
-            return new ContentSearchOutcome(returned, new ContentSearchCoverage(returned.Count, limit, reportedTruncation, complete, scanCapped, false, "ripgrep", warnings));
+            return new ContentSearchOutcome(returned, new ContentSearchCoverage(returned.Count, limit, reportedTruncation, complete, scanCapped, false, "ripgrep", warnings, unindexedHits));
         }
 
         // The fallback must not be a worse tool than the engine it stands in for, or the answer

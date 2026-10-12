@@ -304,10 +304,10 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var methods = await _repositoryStore.FindMethodSummariesAsync(query, cancellationToken);
-        var unsupported = UnsupportedPythonGraphResponse(query, methods);
-        if (unsupported is not null)
+        var textBacked = await TryTextReferencesAsync(query, session, callersOnly: true, methods, cancellationToken);
+        if (textBacked is not null)
         {
-            return unsupported;
+            return textBacked;
         }
 
         var callers = await _repositoryStore.FindCallersAsync(query, cancellationToken);
@@ -338,16 +338,10 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var methodMatches = await _repositoryStore.FindMethodSummariesAsync(query, cancellationToken);
-        var unsupported = UnsupportedPythonGraphResponse(query, methodMatches);
-        if (unsupported is not null)
+        var textBacked = await TryTextReferencesAsync(query, session, callersOnly: false, methodMatches, cancellationToken);
+        if (textBacked is not null)
         {
-            return unsupported;
-        }
-
-        var symbolMatches = await _searchService.SearchSymbolAsync(new SearchSymbolRequest(query), cancellationToken);
-        if (symbolMatches.Symbols.Any(symbol => symbol.FilePath?.EndsWith(".py", StringComparison.OrdinalIgnoreCase) == true))
-        {
-            return Fail("UnsupportedLanguage", $"References are not supported for Python symbol '{query}'.");
+            return textBacked;
         }
 
         var references = await _repositoryStore.FindReferencesAsync(query, cancellationToken);
@@ -374,7 +368,7 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var methods = await _repositoryStore.FindMethodSummariesAsync(query, cancellationToken);
-        var unsupported = UnsupportedPythonGraphResponse(query, methods);
+        var unsupported = UnsupportedPythonCalleesResponse(query, methods);
         if (unsupported is not null)
         {
             return unsupported;
@@ -400,10 +394,88 @@ public sealed class ProtocolEngine : IProtocolEngine
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new CalleesResponse(new CalleeSummaryResponse(query, target is null ? "Unknown" : "Exact", target, callees))), [], []);
     }
 
-    private static ProtocolResponse? UnsupportedPythonGraphResponse(string query, IReadOnlyList<MethodSummary> methods)
+    private static ProtocolResponse? UnsupportedPythonCalleesResponse(string query, IReadOnlyList<MethodSummary> methods)
         => methods.Any(method => method.FilePath.EndsWith(".py", StringComparison.OrdinalIgnoreCase))
-            ? Fail("UnsupportedLanguage", $"Call graph queries are not supported for Python symbol '{query}'.")
+            ? Fail("UnsupportedLanguage", $"Call graph queries are not supported for Python symbol '{query}'; use `read method {query}` and look at the body (callers/references are available, text-backed).")
             : null;
+
+    /// <summary>
+    /// `callers` / `references` for Python: resolve the target like `read` does, then search indexed file
+    /// contents for the simple name as a whole word and attribute each hit to the innermost indexed symbol
+    /// containing its line. Returns null when the target is not a Python symbol, so the symbol-table (C#)
+    /// path runs unchanged.
+    /// </summary>
+    private async Task<ProtocolResponse?> TryTextReferencesAsync(string query, SessionState session, bool callersOnly, IReadOnlyList<MethodSummary> methodMatches, CancellationToken cancellationToken)
+    {
+        static bool IsPython(string? path) => path?.EndsWith(".py", StringComparison.OrdinalIgnoreCase) == true;
+        IReadOnlyList<SymbolSearchResult> candidates = [];
+        if (_repositoryStore is ISymbolStore)
+        {
+            var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+            if (root is not null)
+            {
+                candidates = (await ReadableSymbolResolver.ResolveAsync(_repositoryStore, root, query, cancellationToken)).Candidates;
+            }
+        }
+        if (!candidates.Any(candidate => IsPython(candidate.FilePath)) && !methodMatches.Any(method => IsPython(method.FilePath)))
+        {
+            return null;
+        }
+        if (candidates.Count == 0)
+        {
+            candidates = methodMatches.Where(method => IsPython(method.FilePath))
+                .Select(method => new SymbolSearchResult(method.Id, "Method", method.Name, method.QualifiedName, method.FilePath, null, null)).ToList();
+        }
+        if (candidates.Count > 1)
+        {
+            var ranked = RankCandidates(candidates, query);
+            return new ProtocolResponse(false, null, [], [new ProtocolError("AmbiguousMatch",
+                $"Symbol '{query}' matched multiple definitions ({candidates.Count}); pass a qualified name.",
+                query, ranked.Select(s => s.QualifiedName).ToList(), ranked, candidates.Count)]);
+        }
+
+        var target = candidates[0];
+        var targetPath = target.FilePath ?? string.Empty;
+        var targetLine = target.StartLine ?? 0;
+        var name = target.Name.Length > 0 ? target.Name : target.QualifiedName.Split('.').Last();
+
+        const int searchLimit = 5000;
+        ContentSearchOutcome outcome;
+        if (_repositoryStore is IContentSearchCoverageStore coverageStore)
+        {
+            outcome = await coverageStore.SearchFileContentsWithCoverageAsync($@"\b{Regex.Escape(name)}\b", searchLimit, cancellationToken);
+        }
+        else
+        {
+            var matches = await _repositoryStore.SearchFileContentsAsync($@"\b{Regex.Escape(name)}\b", searchLimit, cancellationToken);
+            outcome = new ContentSearchOutcome(matches, new ContentSearchCoverage(matches.Count, searchLimit, null, null, false, false, "unknown", ["The configured store does not report search coverage."]));
+        }
+
+        var hits = outcome.Matches
+            .Where(match => !(match.Line == targetLine && string.Equals(match.Path, targetPath, StringComparison.Ordinal)))
+            .Select(match => TextReferences.Classify(match, name))
+            .OfType<TextReferences.Hit>()
+            .Where(hit => !callersOnly || hit.Kind == "call")
+            .ToList();
+        var ranked2 = TextReferences.Rank(hits, targetPath);
+        var kept = ranked2.Take(TextReferences.Cap).ToList();
+
+        IReadOnlyDictionary<(string FileId, int Line), string> enclosing = new Dictionary<(string FileId, int Line), string>();
+        if (_repositoryStore is DevX.Infrastructure.Storage.SQLite.SqliteStorageInitializer sqlite)
+        {
+            enclosing = await sqlite.FindEnclosingSymbolsAsync(kept.Select(hit => (hit.FileId, hit.Line)).Distinct().ToList(), cancellationToken);
+        }
+
+        var references = kept.Select(hit => new TextReference(hit.Path, hit.Line, enclosing.GetValueOrDefault((hit.FileId, hit.Line), "<module>"), hit.Text, hit.Kind)).ToList();
+        var response = new TextReferencesResponse(
+            "text", query, target.QualifiedName, targetPath, targetLine,
+            ranked2.Count, references.Count, ranked2.Count > references.Count,
+            ranked2.Count(hit => hit.Kind == "call"), ranked2.Count(hit => hit.Kind == "usage"), ranked2.Count(hit => hit.Kind == "import"),
+            outcome.Coverage, references,
+            callersOnly ? new TextReferenceMetadata(TextReferences.CallersNote) : null);
+        await RecordHistoryAsync(() => _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, target.Id), cancellationToken));
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
+    }
 
     /// <summary>
     /// A bare "Build failed." / "Tests failed." is what sent the LG1 agent to grep: the run had

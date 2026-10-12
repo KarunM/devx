@@ -101,6 +101,8 @@ public sealed class McpToolContractTests
         Assert.Contains("for callers/usages use callers/references instead of text search", D("search"));
         Assert.Contains("declaration line (bases for a class)", D("search"));
         Assert.Contains("Bare or Class.member names resolve when unique", D("read"));
+        Assert.Contains("read type (outline) answers 'which methods/fields does X have'; --full only for bodies.", D("read"));
+        Assert.Contains("callers/references work for Python (text-backed); callees does not.", D("read"));
         Assert.Contains("who calls this", D("callers"));
         Assert.Contains("what does this call", D("callees"));
         Assert.Contains("where is this used", D("references"));

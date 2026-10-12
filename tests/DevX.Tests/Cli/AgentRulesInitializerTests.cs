@@ -58,6 +58,8 @@ public sealed class AgentRulesInitializerTests
         Assert.Contains("devx callers|callees", content);
         Assert.Contains("devx references", content);
         Assert.Contains("before any `search text`", content);
+        Assert.Contains("`read type` (outline) answers 'which methods/fields does X have' -- use `--full` only when you need bodies.", content);
+        Assert.Contains("`callers`/`references` work for Python too (text-backed); `callees` does not -- read the body instead.", content);
         Assert.Contains("devx snapshot <file>", content);
         Assert.Contains("--range a:b", content);
         // The block is injected into every agent's context: keep it bounded (OSS24: grew by < 700 bytes).

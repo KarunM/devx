@@ -1412,6 +1412,13 @@ static async Task<int> ReferencesAsync(string connectionString, string[] args, s
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
     await RecordMetricAsync(store, new OperationMetric("get references", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
+    // Text-backed (Python) lookups list their candidates exactly like `read` does.
+    var ambiguousTarget = response.Success || format == "json" ? null : response.Errors.FirstOrDefault(error => error.Code == "AmbiguousMatch" && error.Candidates is { Count: > 0 });
+    if (ambiguousTarget is not null)
+    {
+        Console.WriteLine(FormatAmbiguousCandidates(ambiguousTarget, args[1]));
+        return 2;
+    }
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -1530,7 +1537,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     }
     if (args.Length < 3)
     {
-        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies, read type for a member outline (declaration + bases), --full/full:true for a whole class. Bare or Class.member names resolve when unique: do not search first when you know the name.");
+        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies; read type (outline) answers 'which methods/fields does X have' -- use --full only when you need bodies. callers/references work for Python too (text-backed); callees does not -- read the body instead. Bare or Class.member names resolve when unique: do not search first when you know the name.");
         return 1;
     }
 
@@ -1639,7 +1646,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     }
     else
     {
-        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies, read type for a member outline (declaration + bases), --full/full:true for a whole class. Bare or Class.member names resolve when unique: do not search first when you know the name.");
+        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies; read type (outline) answers 'which methods/fields does X have' -- use --full only when you need bodies. callers/references work for Python too (text-backed); callees does not -- read the body instead. Bare or Class.member names resolve when unique: do not search first when you know the name.");
         return 1;
     }
 
@@ -1778,6 +1785,13 @@ static async Task<int> CallersAsync(string connectionString, string[] args, stri
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
     await RecordMetricAsync(store, new OperationMetric("get callers", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
+    // Text-backed (Python) lookups list their candidates exactly like `read` does.
+    var ambiguousTarget = response.Success || format == "json" ? null : response.Errors.FirstOrDefault(error => error.Code == "AmbiguousMatch" && error.Candidates is { Count: > 0 });
+    if (ambiguousTarget is not null)
+    {
+        Console.WriteLine(FormatAmbiguousCandidates(ambiguousTarget, args[1]));
+        return 2;
+    }
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -2693,6 +2707,7 @@ static string FormatAgentResponse(ProtocolResponse response,
 
         return string.Join("\n", hits);
     }
+    if (TextReferences.Format(data) is { } textBacked) return textBacked;
     foreach (var collection in new[] { "Callers", "Callees", "References" })
     {
         if (!TryGetPropertyIgnoreCase(data, collection, out var items)) continue;

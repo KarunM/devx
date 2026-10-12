@@ -142,6 +142,11 @@ public static class RipgrepContentSearcher
                         if (hits.Count >= ScanCeiling)
                         {
                             truncated = true;          // bounded: a common word must not stream forever
+                            // Stop ripgrep now: it is blocked writing into a pipe nobody reads any more,
+                            // so waiting for it to exit below would sit out the whole 30 s timeout and
+                            // then report "no answer" for exactly the common names that hit the ceiling.
+                            try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
+                            catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception) { }
                             break;
                         }
                     }

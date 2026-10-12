@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `devx references` and `devx callers` now work for Python symbols, text-backed: a whole-word search for
+  the name over indexed files, each hit attributed to the enclosing indexed symbol and classified call,
+  usage or import (50 hits max, calls first; `Mode: "text"` in JSON). `callees` still reports Python as
+  unsupported, now with a hint to read the body. C# graph output is unchanged (OSS25 P-1, P-2).
+- Content search no longer reports files that ripgrep reads but the index never covered as "indexed
+  path(s) could not be searched safely"; they are counted in `Coverage.UnindexedHits` (OSS25 P-3).
+- Fix ripgrep content search sitting out its 30 s timeout and returning nothing for a very common name
+  (more than 5,000 matches): ripgrep is now stopped as soon as the scan ceiling is reached.
+- Guidance: `read type` is stated to answer "which methods/fields does X have" (use `--full` for bodies),
+  and `callers`/`references` are stated to work for Python while `callees` does not (OSS25 P-4).
 - Shipped agent guidance (text only): the `devx init` rules block, `devx --help`, the `read`/`search`
   usage lines and the MCP `search`/`read`/`callers`/`callees`/`references`/`snapshot` descriptions now
   say that bare names resolve when unique, that `read type` is an outline with bases, and that

@@ -148,7 +148,8 @@ public sealed record ContentSearchCoverage(
     bool ScanCapped,
     bool FallbackUsed,
     string Engine,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    int UnindexedHits = 0);
 
 public sealed record ContentSearchOutcome(
     IReadOnlyList<ContentSearchResult> Matches,
@@ -292,6 +293,30 @@ public sealed record ReferencesResponse(
     string MatchKind,
     MethodSummary? TargetSymbol,
     IReadOnlyList<ReferenceSummary> References);
+
+/// <summary>One text-backed usage of a name: where it is, which indexed symbol encloses the line, and what kind of use it is.</summary>
+public sealed record TextReference(string Path, int Line, string Enclosing, string Text, string Kind);
+
+public sealed record TextReferenceMetadata(string? Note);
+
+/// <summary>`references` / `callers` for languages without a resolved call graph (Python): a whole-word
+/// usage search over indexed files, attributed to the enclosing indexed symbol. `Mode` is "text"; the
+/// symbol-table (C#) responses are unchanged and carry no Mode.</summary>
+public sealed record TextReferencesResponse(
+    string Mode,
+    string Query,
+    string Target,
+    string TargetPath,
+    int TargetLine,
+    int Total,
+    int Returned,
+    bool Truncated,
+    int Calls,
+    int Usages,
+    int Imports,
+    ContentSearchCoverage? Coverage,
+    IReadOnlyList<TextReference> References,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] TextReferenceMetadata? Metadata = null);
 
 public sealed record IndexStatusResponse(
     bool RepositoryIndexed,

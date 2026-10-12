@@ -62,6 +62,16 @@ line; (2) "who calls / what does it call / where is it used" is answered by `cal
 and `references`, used before any text search; (3) `snapshot <file>` outlines a file and
 `read file --range a:b` reads the lines around a hit.
 
+For Python (no resolved call graph) `references` and `callers` are text-backed: the target is resolved
+like `read` does (an ambiguous name lists the capped candidates), then indexed file contents are
+searched for the simple name as a whole word. Comment lines (a match after `#`) and quote-leading
+lines (docstring or string text) are dropped, as is the definition line; each remaining hit is
+attributed to the innermost indexed symbol containing its line and classified `call`, `usage` or
+`import`. Output is capped at 50 hits ranked calls, usages, imports (same-file first); the response
+carries `Mode: "text"`, totals, the content-search coverage and, for `callers`, a note that call sites
+are found by name. `callees` stays unsupported for Python and says to read the body. Content-search
+coverage reports hits in files the index does not cover as `UnindexedHits`, not as unsafe paths.
+
 ## Rules
 
 -   Prefer DevX search/read APIs over opening source files.
