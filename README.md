@@ -4,12 +4,25 @@ DevX is a local code-intelligence CLI for software engineers and coding agents. 
 
 ## Install
 
-Install the `DevX.Cli` .NET tool package (requires the .NET 10 SDK), or download a single-file binary for your platform from the GitHub Releases page. The binary requires no .NET installation; verify it with `SHA256SUMS.txt` included with each release.
+**Download the binary (no .NET required).** Pick the archive for your platform from the [Releases page](https://github.com/KarunM/devx/releases) (`osx-arm64`, `osx-x64`, `linux-x64`, `linux-arm64` as tar.gz; `win-x64` as zip). Verify it against `SHA256SUMS.txt`, extract it, and put `devx` on your PATH.
+
+```sh
+tar -xzf devx-<version>-<rid>.tar.gz
+chmod +x devx
+mv devx ~/.local/bin/
+devx --help
+```
+
+On Windows, unzip the archive and add the folder to your PATH, then run `devx --help`.
+
+**Or install as a .NET tool** (requires the .NET 10 SDK):
 
 ```sh
 dotnet tool install --global DevX.Cli
 devx --help
 ```
+
+**Supported languages.** Symbol indexing covers Python and C# source, and Markdown headings are indexed as sections. Every other file type is covered by `devx search text` (ripgrep-backed, with coverage reporting) and `devx read file --range`. Python indexing needs `python3` on your PATH.
 
 Claude Code MCP setup:
 
