@@ -10,6 +10,7 @@ public sealed class BuildTestServiceTests
     [Fact]
     public async Task RunTestsAsync_RunsPytestAndPlainCheckScriptsTogether()
     {
+        if (!HostPytestAvailable()) return; // real-pytest integration test; host has no pytest
         var root = Directory.CreateTempSubdirectory("devx-mixed-tests").FullName;
         await File.WriteAllTextAsync(Path.Combine(root, "test_unit.py"), "def test_ok():\n    assert True\n");
         await File.WriteAllTextAsync(Path.Combine(root, "beta_gate_034_test.py"), "print('15/15 checks passed')\n");
@@ -28,6 +29,7 @@ public sealed class BuildTestServiceTests
     [Fact]
     public async Task RunTestsAsync_PythonDirectoryInMixedRepositoryUsesPythonRunner()
     {
+        if (!HostPytestAvailable()) return; // real-pytest integration test; host has no pytest
         var root = Directory.CreateTempSubdirectory("devx-python-directory").FullName;
         var pythonDirectory = Path.Combine(root, "python");
         Directory.CreateDirectory(pythonDirectory);
@@ -419,6 +421,37 @@ public sealed class BuildTestServiceTests
         {
             Environment.SetEnvironmentVariable("DATABASE_URL", original);
             Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static readonly Lazy<bool> HostPytestProbe = new(ProbeHostPytest);
+
+    private static bool HostPytestAvailable() => HostPytestProbe.Value;
+
+    private static bool ProbeHostPytest()
+    {
+        try
+        {
+            var info = new System.Diagnostics.ProcessStartInfo("python3", ["-c", "import pytest"])
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+            };
+            using var process = System.Diagnostics.Process.Start(info);
+            if (process is null) return false;
+            process.StandardOutput.ReadToEnd();
+            process.StandardError.ReadToEnd();
+            if (!process.WaitForExit(15000))
+            {
+                process.Kill(entireProcessTree: true);
+                return false;
+            }
+            return process.ExitCode == 0;
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 
