@@ -4,16 +4,16 @@ DevX is a local code-intelligence CLI for software engineers and coding agents. 
 
 ## Install
 
-**Download the binary (no .NET required).** Pick the archive for your platform from the [Releases page](https://github.com/KarunM/devx/releases) (`osx-arm64`, `osx-x64`, `linux-x64`, `linux-arm64` as tar.gz; `win-x64` as zip). Verify it against `SHA256SUMS.txt`, extract it, and put `devx` on your PATH.
+**Download the binary (no .NET required).** Pick the archive for your platform from the [Releases page](https://github.com/KarunM/devx/releases). Archives are named `devx-<tag>-<rid>.tar.gz` (`osx-arm64`, `osx-x64`, `linux-x64`, `linux-arm64`) or `devx-<tag>-win-x64.zip`, for example `devx-v1.7.0-osx-arm64.tar.gz`. Verify the archive against `SHA256SUMS.txt` first (`grep <rid> SHA256SUMS.txt | shasum -a 256 -c -` on macOS and Linux), then extract it:
 
 ```sh
-tar -xzf devx-<version>-<rid>.tar.gz
-chmod +x devx
-mv devx ~/.local/bin/
-devx --help
+mkdir -p ~/.local/share/devx ~/.local/bin
+tar -xzf devx-v1.7.0-osx-arm64.tar.gz -C ~/.local/share/devx     # pick your platform's archive
+ln -sf ~/.local/share/devx/DevX.Cli ~/.local/bin/devx
+devx version
 ```
 
-On Windows, unzip the archive and add the folder to your PATH, then run `devx --help`.
+Keep the extracted folder intact: the executable (`DevX.Cli`) loads ripgrep, SQLite and the Python helper from the files beside it, so link to it rather than moving it. On Windows, unzip to a folder, add that folder to your PATH, and run `DevX.Cli --help` (the command is `DevX.Cli.exe` on Windows until the next release). The next release will ship the executable as `devx` directly.
 
 **Or install as a .NET tool** (requires the .NET 10 SDK):
 
