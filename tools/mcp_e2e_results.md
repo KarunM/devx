@@ -1,6 +1,6 @@
 # `tools/mcp_e2e.py` — the same journey down both transports
 
-Pinned checkouts from `/Users/karunamadu/repos/devx-bench/public`: Django
+Pinned local checkouts: Django
 `djwork` (`1f0356f`) and sympy `sympywork` (`b4ce69a`). Each run drives the CLI and the
 stdio MCP server with the same calls, so a row is a fair comparison rather than two
 different scripts.
