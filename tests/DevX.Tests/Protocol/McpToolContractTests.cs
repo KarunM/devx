@@ -87,6 +87,27 @@ public sealed class McpToolContractTests
     }
 
     [Fact]
+    public async Task ToolListing_KeepsNamesAndBoundsTheGuidanceText()
+    {
+        var (server, _, _) = await CreateServerAsync("devx-mcp-listing");
+        var tools = await server.ListToolsAsync();
+        Assert.Equal(
+            ["build", "callees", "callers", "edit.replace", "index", "patch.apply", "patch.preview", "patch.validate", "read", "references", "report", "search", "snapshot", "test", "verify"],
+            tools.Select(t => t.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
+        Assert.All(tools, t => Assert.True(t.Description.Length <= 320, $"{t.Name}: {t.Description.Length}"));
+        var total = tools.Sum(t => System.Text.Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(new { name = t.Name, description = t.Description, inputSchema = t.InputSchema })));
+        Assert.InRange(total, 1, 9000);
+        string D(string n) => tools.Single(t => t.Name == n).Description;
+        Assert.Contains("for callers/usages use callers/references instead of text search", D("search"));
+        Assert.Contains("declaration line (bases for a class)", D("search"));
+        Assert.Contains("Bare or Class.member names resolve when unique", D("read"));
+        Assert.Contains("who calls this", D("callers"));
+        Assert.Contains("what does this call", D("callees"));
+        Assert.Contains("where is this used", D("references"));
+        Assert.Contains("outline", D("snapshot"));
+    }
+
+    [Fact]
     public async Task MissingDottedName_ComesBackWithANameThatCanBePasted()
     {
         var (server, session, _) = await CreateServerAsync("devx-mcp-suggest");

@@ -54,6 +54,14 @@ devx test
 devx report
 ```
 
+Shipped guidance (the `devx init` rules block, `devx --help` and the MCP tool descriptions)
+states three facts: (1) bare or `Class.member` names resolve when unique, so an agent that knows
+a name reads it directly instead of searching first; `read type` returns the declaration with
+bases plus a member outline (`--full` for the body) and a symbol hit already shows the declaration
+line; (2) "who calls / what does it call / where is it used" is answered by `callers`, `callees`
+and `references`, used before any text search; (3) `snapshot <file>` outlines a file and
+`read file --range a:b` reads the lines around a hit.
+
 ## Rules
 
 -   Prefer DevX search/read APIs over opening source files.

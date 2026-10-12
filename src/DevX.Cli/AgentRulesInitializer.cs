@@ -91,7 +91,9 @@ public static class AgentRulesInitializer
         builder.AppendLine();
         builder.AppendLine("The four steps are: find it (`search`), read just it (`read`), change it (`replace` or `patch`), then check it. Make your edits, add `--verify` to the LAST one (or run `devx verify` once) -- one check for the batch, not one per edit.");
         builder.AppendLine();
-        builder.AppendLine("Do not spend a second call on what the first one already answered. A `devx search` that matches exactly one symbol returns its source with it, so go straight to the edit; a `devx search text` result already carries the matching line, so read the file only when you need the lines around it.");
+        builder.AppendLine("Do not spend a second call on what the first one already answered. A `devx search` that matches exactly one symbol returns its source with it (a symbol hit shows the declaration line, with bases for a class), so go straight to the edit; a `devx search text` result already carries the matching line, so read the file only when you need the lines around it.");
+        builder.AppendLine();
+        builder.AppendLine("`devx read type \"<Class>\"` gives the declaration line with bases plus a member outline (`--full` for the body); `devx read method \"<Class.method>\"` gives the body. Bare or `Class.member` names resolve when unique, so do not search first when you know the name. For \"who calls / what does it call / where is it used\" use `devx callers|callees \"<Qualified.method>\"` and `devx references \"<Qualified.Name>\"` before any `search text`. `devx snapshot <file>` outlines a file; `devx read file <path> --range a:b` reads lines around a hit.");
         builder.AppendLine();
         builder.AppendLine("`read method --context` adds bounded test-name and same-file name candidates. Treat them as navigation hints, not confirmed caller or test relations.");
         builder.AppendLine();

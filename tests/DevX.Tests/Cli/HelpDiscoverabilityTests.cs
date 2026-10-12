@@ -68,6 +68,26 @@ public sealed class HelpDiscoverabilityTests : CliHarness
     }
 
     [Fact]
+    public async Task Help_TeachesBareNamesOutlineAndCrossReferences()
+    {
+        var root = NewRoot();
+        await WithRoot(root, async r =>
+        {
+            var (_, agent) = await RunAsync(r, "--help", "--agent", "codex");
+            Assert.Contains("devx callers|callees|references", agent);
+            Assert.Contains("bare names resolve when unique", agent);
+            Assert.Contains("devx snapshot <file>", agent);
+
+            var (code, human) = await RunAsync(r, "--help");
+            Assert.Equal(0, code);
+            Assert.Contains("bare or Class.member names resolve when unique", human);
+            Assert.Contains("devx callers|callees <method>", human);
+            Assert.Contains("devx references <symbol>", human);
+            Assert.Contains("devx snapshot <file> --session <id>", human);
+        });
+    }
+
+    [Fact]
     public async Task ASearchQueryIsNotAChanceToPrintHelp()
     {
         // A query is argument text, not a subcommand: --help after it must not print the

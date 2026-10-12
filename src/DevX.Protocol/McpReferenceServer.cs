@@ -856,7 +856,7 @@ public sealed class McpReferenceServer
         return
         [
             CreateTool("edit.replace", "Replace text", "Step 3: Use edit.replace for a simple text edit after search and read. Add all or occurrence to select matches. The edit is NOT verified unless you ask: pass verify:true (build+tests) or verify:\"build\"/\"test\"/\"both\". Add it to your LAST edit, or call verify once when you are done.", "edit.replace", new { type = "object", properties = new { file = new { type = "string" }, old = new { type = "string" }, @new = new { type = "string" }, all = new { type = "boolean" }, occurrence = new { type = "integer" }, verify = new { type = new[] { "boolean", "string" } }, format = new { type = "string" }, sessionId = new { type = "string" } }, required = new[] { "file", "old", "new" } }),
-            CreateTool("search", "Search", "Step 1: Use search to find symbols or text in the indexed repository; it falls back to text when no symbol matches.", "search", new
+            CreateTool("search", "Search", "Step 1: Use search to find symbols or text in the indexed repository; it falls back to text when no symbol matches. A symbol hit shows the declaration line (bases for a class) and the path:lines; for callers/usages use callers/references instead of text search.", "search", new
             {
                 type = "object",
                 properties = new
@@ -867,7 +867,7 @@ public sealed class McpReferenceServer
                 },
                 required = new[] { "query" }
             }),
-            CreateTool("read", "Read", "Step 2: Use read to inspect a symbol, file, or section before editing. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies, read type for a member outline, --full/full:true for a whole class. Optional context:true adds bounded test-name and same-file name candidates as navigation hints.", "read", new
+            CreateTool("read", "Read", "Step 2: Use read to inspect a symbol, file, or section before editing. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. Bare or Class.member names resolve when unique. read type for a member outline, --full/full:true for a whole class.", "read", new
             {
                 type = "object",
                 properties = new
@@ -903,11 +903,11 @@ public sealed class McpReferenceServer
                 required = new[] { "patch" }
             }),
             CreateTool("patch.preview", "Patch Preview", "For structured or multi-file edits only. Simple text edits should use edit.replace.", "patch.validate", new { type = "object", properties = new { sessionId = new { type = "string" }, patch = new { type = "object" } }, required = new[] { "patch" } }),
-            CreateQueryTool("snapshot", "Snapshot", "Get a source file snapshot.", "sessionId", "target"),
+            CreateQueryTool("snapshot", "Snapshot", "Get a source file snapshot: use it for a file's outline (classes, functions) instead of reading the whole file.", "sessionId", "target"),
             CreateTool("index", "Index files", "Rarely needed: the server refreshes stale files on start and after every edit, and a whole-repository index that is already current answers 'already current'. Pass `files` only to force a re-index of paths you know changed.", "index", new { type = "object", properties = new { files = new { type = "array", items = new { type = "string" } }, sessionId = new { type = "string" } }, required = Array.Empty<string>() }),
-            CreateQueryTool("callers", "Callers", "Find callers of a symbol.", "sessionId", "target"),
-            CreateQueryTool("callees", "Callees", "Find callees of a symbol.", "sessionId", "target"),
-            CreateQueryTool("references", "References", "Find references to a symbol.", "sessionId", "target"),
+            CreateQueryTool("callers", "Callers", "Find callers of a method: use it for 'who calls this' before any text search.", "sessionId", "target"),
+            CreateQueryTool("callees", "Callees", "Find callees of a method: use it for 'what does this call' instead of reading and scanning the body.", "sessionId", "target"),
+            CreateQueryTool("references", "References", "Find references to a symbol: use it for 'where is this used' before any text search.", "sessionId", "target"),
             CreateTool("build", "Build", "Run a configured build target.", "build", new { type = "object", properties = new { sessionId = new { type = "string" }, runtime = new { type = "string" }, target = new { type = "string" } }, required = Array.Empty<string>() }),
             CreateTool("test", "Test", "Step 4: Use test to run the configured build and test summary after editing.", "test", new { type = "object", properties = new { sessionId = new { type = "string" }, target = new { type = "string" }, testFiles = new { type = "array", items = new { type = "string" } }, timeoutSeconds = new { type = "integer" } }, required = Array.Empty<string>() }),
             CreateTool("verify", "Verify", "Build, then the relevant tests, in ONE call and one compact summary. mode is build, test, or both (the default). Use it once after your last edit instead of build then test.", "verify", new { type = "object", properties = new { sessionId = new { type = "string" }, mode = new { type = "string" }, runtime = new { type = "string" }, target = new { type = "string" }, targets = new { type = "array", items = new { type = "string" } }, timeoutSeconds = new { type = "integer" } }, required = Array.Empty<string>() }),

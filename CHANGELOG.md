@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Shipped agent guidance (text only): the `devx init` rules block, `devx --help`, the `read`/`search`
+  usage lines and the MCP `search`/`read`/`callers`/`callees`/`references`/`snapshot` descriptions now
+  say that bare names resolve when unique, that `read type` is an outline with bases, and that
+  callers/callees/references answer cross-reference questions before a text search (OSS24).
 - `read type` (and bare `read <Class>` / MCP `read` kind=type) now returns an outline by default:
   the class signature with its bases and one line per direct member with its span; `--full` /
   `full:true` returns the whole body as before. The MCP `read` description and CLI usage now say

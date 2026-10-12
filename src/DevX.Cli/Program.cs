@@ -305,6 +305,8 @@ static void PrintAgentHelp()
     Console.WriteLine("  devx search text <literal>        literal text search");
     Console.WriteLine("  devx read method \"<Qualified>\"    read ONE function; \"<file#Heading>\" for a doc section");
     Console.WriteLine("  devx read <Name> <Name>          several symbols in ONE call, not one call each");
+    Console.WriteLine("  devx read type \"<Class>\"         declaration + bases + member outline (--full = body); bare names resolve when unique, no search first");
+    Console.WriteLine("  devx callers|callees|references \"<Qualified>\"   who calls / what it calls / where used: use before `search text`");
     Console.WriteLine("  devx snapshot <file>              map a file: classes + functions, no bodies");
     Console.WriteLine("  EDIT -- pick one:");
     Console.WriteLine("  devx replace <file> --old <text> --new <text>   one text edit (--all | --occurrence n)");
@@ -615,7 +617,7 @@ static async Task<int> SearchAsync(string connectionString, string[] args, strin
     var implicitSymbol = args.Length >= 2 && args[1] is not ("symbol" or "text") && !args[1].StartsWith("--", StringComparison.Ordinal);
     if (args.Length < (implicitSymbol ? 2 : 4))
     {
-        Console.Error.WriteLine("Usage: devx search <query> [--session <id>] | devx search <symbol|text> <query> [--session <id>]");
+        Console.Error.WriteLine("Usage: devx search <query> [--session <id>] | devx search <symbol|text> <query> [--session <id>]. A symbol hit shows the declaration line (bases for a class) and path:lines; for who-calls/where-used use devx callers|references instead of text search.");
         return 1;
     }
 
@@ -626,7 +628,7 @@ static async Task<int> SearchAsync(string connectionString, string[] args, strin
     var queryParts = PositionalQueryParts(args, implicitSymbol ? 1 : 2);
     if (queryParts.Count == 0)
     {
-        Console.Error.WriteLine("Usage: devx search <query> [--session <id>] | devx search <symbol|text> <query> [<query> ...] [--session <id>]");
+        Console.Error.WriteLine("Usage: devx search <query> [--session <id>] | devx search <symbol|text> <query> [<query> ...] [--session <id>]. A symbol hit shows the declaration line (bases for a class) and path:lines; for who-calls/where-used use devx callers|references instead of text search.");
         return 1;
     }
 
@@ -1528,7 +1530,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     }
     if (args.Length < 3)
     {
-        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies, read type for a member outline, --full/full:true for a whole class.");
+        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies, read type for a member outline (declaration + bases), --full/full:true for a whole class. Bare or Class.member names resolve when unique: do not search first when you know the name.");
         return 1;
     }
 
@@ -1637,7 +1639,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     }
     else
     {
-        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies, read type for a member outline, --full/full:true for a whole class.");
+        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies, read type for a member outline (declaration + bases), --full/full:true for a whole class. Bare or Class.member names resolve when unique: do not search first when you know the name.");
         return 1;
     }
 
@@ -2845,6 +2847,8 @@ Use `devx read method <name> --context` for bounded test/name candidates when re
 3. devx replace <file> --old <text> --new <text> --verify   (edit, then build + tests in the same call)
 4. devx verify [build|test|both]   (check without editing; build + tests, one summary)
 Add --format agent for compact output; no session needed.
+`devx read type <Class>` shows the declaration with bases and a member outline (--full for the body); bare or Class.member names resolve when unique, so skip the search when you know the name.
+For "who calls / what does it call / where is it used" use `devx callers|callees <method>` and `devx references <symbol>` before `search text`; `devx snapshot <file>` outlines a file.
 
 Usage:
   devx version [--format json]
@@ -2857,6 +2861,7 @@ Usage:
   devx search <query> [--session <id>] [--agent <label>]
   devx search <symbol|text> <query> [--session <id>] [--agent <label>]
   devx snapshot <file> --session <id> [--agent <label>]
+  devx callers <method> | devx callees <method> | devx references <symbol> --session <id>   (cross-references; use instead of text search)
   devx read <name|file#Heading|file> [<name> ...] [--session <id>]
   devx read <file|method|type|section> <target> [--range start:end|--full] [--session <id>]
   devx artifact create <name> --content <text>|--content-file <path>|--content-json <json-string>|--content-stdin

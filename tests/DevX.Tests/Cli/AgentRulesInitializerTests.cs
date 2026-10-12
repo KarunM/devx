@@ -45,6 +45,28 @@ public sealed class AgentRulesInitializerTests
     }
 
     [Fact]
+    public async Task InitializeAsync_TeachesBareNamesOutlineAndCrossReferences()
+    {
+        var root = Directory.CreateTempSubdirectory("devx-init-").FullName;
+
+        await AgentRulesInitializer.InitializeAsync(root, ["codex"], global: false);
+        var content = await File.ReadAllTextAsync(Path.Combine(root, "AGENTS.md"));
+
+        Assert.Contains("Bare or `Class.member` names resolve when unique, so do not search first", content);
+        Assert.Contains("declaration line with bases plus a member outline", content);
+        Assert.Contains("a symbol hit shows the declaration line, with bases for a class", content);
+        Assert.Contains("devx callers|callees", content);
+        Assert.Contains("devx references", content);
+        Assert.Contains("before any `search text`", content);
+        Assert.Contains("devx snapshot <file>", content);
+        Assert.Contains("--range a:b", content);
+        // The block is injected into every agent's context: keep it bounded (OSS24: grew by < 700 bytes).
+        var start = content.IndexOf(AgentRulesInitializer.StartMarker, StringComparison.Ordinal);
+        var end = content.IndexOf(AgentRulesInitializer.EndMarker, StringComparison.Ordinal) + AgentRulesInitializer.EndMarker.Length;
+        Assert.InRange(System.Text.Encoding.UTF8.GetByteCount(content[start..end]), 1, 3040);
+    }
+
+    [Fact]
     public async Task InitializeAsync_ReplacesOnlyTheMarkedBlockOnRerun()
     {
         var root = Directory.CreateTempSubdirectory("devx-init-").FullName;
