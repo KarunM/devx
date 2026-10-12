@@ -66,8 +66,7 @@ For C#, `callers`, `callees` and `references` resolve the target like `read` doe
 
 For Python (no resolved call graph) `references` and `callers` are text-backed: the target is resolved
 like `read` does (an ambiguous name lists the capped candidates), then indexed file contents are
-searched for the simple name as a whole word. Comment lines (a match after `#`) and quote-leading
-lines (docstring or string text) are dropped, as is the definition line; each remaining hit is
+searched for the simple name as a whole word. Text-backed Python callers and references are lexical candidates outside strings and comments, not a resolved call graph: each hit file is lexed and a match inside a string literal, docstring or `#` comment is dropped, as is the definition line; each remaining hit is
 attributed to the innermost indexed symbol containing its line and classified `call`, `usage` or
 `import`. Output is capped at 50 hits ranked calls, usages, imports (same-file first); the response
 carries `Mode: "text"`, totals, the content-search coverage and, for `callers`, a note that call sites

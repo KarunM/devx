@@ -67,7 +67,7 @@ public sealed class PythonReferencesTests
         var text = TextReferences.Format(response.Data!.Value)!;
         var lines = text.Split('\n');
         Assert.Equal("pkg/a.py:7 pkg.a.K.m  return helper()", lines[0]);
-        Assert.Equal("3 references (calls 2, usages 0, imports 1); target pkg/a.py:1", lines[^1]);
+        Assert.Equal("3 references (calls 2, usages 0, imports 1); target pkg/a.py:1; " + TextReferences.CallersNote, lines[^1]);
         Assert.Equal(4, lines.Length);
     }
 
@@ -79,9 +79,9 @@ public sealed class PythonReferencesTests
         Assert.Equal(
             ["call pkg/a.py:7", "call pkg/c.py:3", "usage pkg/c.py:2", "import pkg/c.py:1"],
             data.References.Select(r => $"{r.Kind} {r.Path}:{r.Line}").Where(x => !x.Contains("c.py:4")).ToArray());
-        // 'helper' inside a quoted string on line 4 is a usage by name (documented heuristic only drops quote-leading lines); the docstring line 5 is dropped.
+        // 'helper' inside a quoted string (line 4) and the docstring (line 5) are lexically excluded.
         Assert.DoesNotContain(data.References, r => r.Line == 5);
-        Assert.Equal((2, 2, 1), (data.Calls, data.Usages, data.Imports));
+        Assert.Equal((2, 1, 1), (data.Calls, data.Usages, data.Imports));
     }
 
     [Fact]
@@ -121,7 +121,7 @@ public sealed class PythonReferencesTests
         Assert.Equal("text", data.Mode);
         Assert.Equal(["pkg/a.py:7", "pkg/b.py:3"], data.References.Select(r => $"{r.Path}:{r.Line}").ToArray());
         Assert.All(data.References, r => Assert.Equal("call", r.Kind));
-        Assert.Equal("text-backed: call sites by name, not a resolved call graph", data.Metadata!.Note);
+        Assert.Equal(TextReferences.CallersNote, data.Metadata!.Note);
         Assert.Equal(2, data.Total);
     }
 
@@ -160,6 +160,92 @@ public sealed class PythonReferencesTests
         Assert.Null(TextReferences.Format(response.Data!.Value));
     }
 
+    private static async Task<int[]> CallerLines(string source)
+    {
+        var f = await Create(("m.py", source));
+        return Text(await Run(f, ProtocolOperations.GetCallers, "target")).References.Select(r => r.Line).ToArray();
+    }
+
+    private const string Def = "def target(a=0):\n    return a\n";
+    private const string Lexical = "text-backed lexical candidates outside strings and comments; not a resolved call graph";
+
+    [Fact]
+    public async Task D1_ModuleDocstringCallsAreExcludedGruntzPattern()
+    {
+        var source = "\"\"\"\nModule doc.\n    target(e, x)\n    target(e)\n    target(f, x)\n    target(g)\n\"\"\"\n" + Def + "def sign(e):\n    return target(e, 1)\n";
+        var f = await Create(("g.py", source));
+        var data = Text(await Run(f, ProtocolOperations.GetCallers, "target"));
+        Assert.Equal(["g.py:11 g.<module>.sign"], data.References.Select(r => $"{r.Path}:{r.Line} {r.Enclosing}").ToArray());
+    }
+
+    [Fact]
+    public async Task D1_ClassAndFunctionDocstringsAreExcluded()
+    {
+        var source = Def + "class K:\n    \"\"\"K docs\n    target(1)\n    \"\"\"\n    def m(self):\n        \"\"\"\n        target(2)\n        \"\"\"\n        return target(3)\n";
+        Assert.Equal(new[] { 11 }, await CallerLines(source));
+    }
+
+    [Fact]
+    public async Task D1_MultiLineAssignedStringIsExcluded()
+    {
+        var source = Def + "TEXT = \"\"\"\nfirst target(1)\nsecond target(2)\n\"\"\"\nx = target(3)\n";
+        Assert.Equal(new[] { 7 }, await CallerLines(source));
+    }
+
+    [Fact]
+    public async Task D1_HashCommentWithCallIsExcluded()
+    {
+        var source = Def + "# target(1)\nx = target(2)  # target(3)\n";
+        Assert.Equal(new[] { 4 }, await CallerLines(source));
+    }
+
+    [Fact]
+    public async Task D1_HashInsideStringFollowedByRealCallOnSameLineIsKept()
+    {
+        var source = Def + "x = \"a # b\"; y = target(1)\n";
+        Assert.Equal(new[] { 3 }, await CallerLines(source));
+    }
+
+    [Fact]
+    public async Task D1_RawAndFStringsContainingCallAreExcluded()
+    {
+        var source = Def + "a = r\"target(1)\"\nb = f\"see target(2) {a}\"\nc = rb'target(3)'\nd = f\"{target(4)}\"\ne = \"it\\\"s target(5)\"\n";
+        Assert.Equal(new[] { 6 }, await CallerLines(source));
+    }
+
+    [Fact]
+    public async Task D1_RealCallAfterSameLineDocstringCloseIsKept()
+    {
+        var source = Def + "\"\"\"doc target(1)\"\"\"; target(2)\n";
+        Assert.Equal(new[] { 3 }, await CallerLines(source));
+    }
+
+    [Fact]
+    public async Task D1_ImplicitStringConcatenationAcrossLinesIsExcluded()
+    {
+        var source = Def + "msg = (\"one target(1) \"\n       \"two target(2)\")\nz = target(3)\n";
+        Assert.Equal(new[] { 5 }, await CallerLines(source));
+    }
+
+    [Fact]
+    public async Task D1_ReferencesDropStringHitsAndKeepImportAndUsage()
+    {
+        var f = await Create(("m.py", Def), ("n.py", "from m import target\nfn = target\ns = \"target\"\n'''\ntarget\n'''\n"));
+        var data = Text(await Run(f, ProtocolOperations.GetReferences, "target"));
+        Assert.Equal(["import n.py:1", "usage n.py:2"], data.References.Select(r => $"{r.Kind} {r.Path}:{r.Line}").OrderBy(x => x, StringComparer.Ordinal).ToArray());
+    }
+
+    [Fact]
+    public async Task D1_FooterAndNoteSayLexicalCandidates()
+    {
+        var f = await Create(("m.py", Def + "x = target()\n"));
+        var callers = await Run(f, ProtocolOperations.GetCallers, "target");
+        Assert.Equal(Lexical, Text(callers).Metadata!.Note);
+        Assert.Equal("m.py:3 m.<module>.x  x = target()\n1 call sites (1 calls); target m.py:1; " + Lexical, TextReferences.Format(callers.Data!.Value));
+        var refs = await Run(f, ProtocolOperations.GetReferences, "target");
+        Assert.EndsWith("; " + Lexical, TextReferences.Format(refs.Data!.Value));
+    }
+
     [Fact]
     public async Task P3_UnindexedRipgrepHitIsNotCountedAsUnsafePath()
     {
@@ -193,7 +279,7 @@ public sealed class PythonReferencesTests
         var data = Text(response);
         Assert.Empty(data.References);
         Assert.Equal(0, data.Total);
-        Assert.Equal("0 call sites (0 calls); target solo.py:1; text-backed: call sites by name, not a resolved call graph", TextReferences.Format(response.Data!.Value));
+        Assert.Equal("0 call sites (0 calls); target solo.py:1; " + TextReferences.CallersNote, TextReferences.Format(response.Data!.Value));
     }
 
     [Fact]

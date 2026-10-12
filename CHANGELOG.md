@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.7.2 — 2026-10-12
+
+### Fixed
+
+- Filter Python text-backed callers and references inside strings and comments. Module, class and function docstrings,
+  multi-line string literals, f/raw/byte strings and `#` comments no longer produce hits (for example the `<module>`
+  group for a name that only appears in a module docstring); the agent footer and the callers note now call the
+  results lexical candidates, not a resolved call graph.
+
 ## 1.7.1 — 2026-10-12
 
 ### Fixed
