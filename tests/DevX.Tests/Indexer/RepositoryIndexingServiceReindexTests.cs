@@ -11,6 +11,25 @@ namespace DevX.Tests.Indexer;
 public sealed class RepositoryIndexingServiceReindexTests
 {
     [Fact]
+    public async Task ReindexFileAsync_UpdatesGlobalNamespaceSymbols()
+    {
+        var (store, _) = CreateStore();
+        var root = CreateSampleRepo();
+        await IOFile.WriteAllTextAsync(Path.Combine(root, "src", "Sample", "Global.cs"), "public class Widget { public int Frobnicate() => 1; }");
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(root);
+        IOFile.WriteAllText(Path.Combine(root, "src", "Sample", "Global.cs"), "public class Widget { public int Updated() => 2; }");
+
+        try
+        {
+            await indexer.ReindexFileAsync(root, "src/Sample/Global.cs");
+            Assert.Empty(await store.FindSymbolsByNameAsync("Frobnicate"));
+            Assert.Contains(await store.FindSymbolsByNameAsync("Updated"), symbol => symbol.QualifiedName == "Widget.Updated");
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public async Task ReindexFileAsync_UpdatesSymbolsForChangedFile()
     {
         var (store, connectionString) = CreateStore();

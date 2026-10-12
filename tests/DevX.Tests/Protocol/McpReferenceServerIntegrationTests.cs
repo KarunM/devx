@@ -19,13 +19,90 @@ public sealed class McpReferenceServerIntegrationTests
         var response = await server.InitializeAsync();
 
         Assert.Equal("2025-06-18", response.ProtocolVersion);
-        Assert.Equal("1.6.0", response.ServerInfo.Version);
+        Assert.Equal("1.6.5", response.ServerInfo.Version);
         Assert.Contains(response.Tools, tool => tool.Name == "search" && tool.CapabilityId == "search");
         Assert.Contains(response.Tools, tool => tool.Name == "read" && tool.CapabilityId == "read");
         Assert.Contains(response.Tools, tool => tool.Name == "patch.validate" && tool.CapabilityId == "patch.validate");
         Assert.Contains(response.Tools, tool => tool.Name == "patch.apply" && tool.CapabilityId == "patch.apply");
+        Assert.Contains(response.Tools, tool => tool.Name == "edit.replace");
+        Assert.Contains(response.Tools, tool => tool.Name == "verify" && tool.CapabilityId == "verify");
+        Assert.Contains(response.Tools, tool => tool.Name == "patch.preview");
         Assert.Contains(response.Tools, tool => tool.Name == "index" && tool.CapabilityId == "index");
         Assert.Contains(response.Tools, tool => tool.Name == "report" && tool.CapabilityId == "report");
+    }
+
+    [Fact]
+    public async Task StdioServer_InitializeIndexAndReplace_UpdatesFileAndReportsAmbiguity()
+    {
+        var (server, session, root) = await CreateServerAsync("devx-mcp-replace", indexRepository: false, plainFolder: true);
+        var file = Path.Combine(root, "replace.md");
+        await IOFile.WriteAllTextAsync(file, "first old\nsecond old\n");
+        var id = session.Id.Value.ToString();
+        var requests = string.Join("\n", [
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{{\"name\":\"index\",\"arguments\":{{\"sessionId\":\"{id}\"}}}}}}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{{\"name\":\"edit.replace\",\"arguments\":{{\"sessionId\":\"{id}\",\"file\":\"replace.md\",\"old\":\"first\",\"new\":\"updated\"}}}}}}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{{\"name\":\"edit.replace\",\"arguments\":{{\"sessionId\":\"{id}\",\"file\":\"replace.md\",\"old\":\"old\",\"new\":\"new\"}}}}}}"
+        ]) + "\n";
+        var output = new StringWriter(); await new McpStdioServer(server).RunAsync(new StringReader(requests), output);
+        var responses = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => JsonDocument.Parse(line)).ToArray();
+        Assert.Contains("edit.replace", responses[1].RootElement.GetRawText()); Assert.Contains("patch.preview", responses[1].RootElement.GetRawText());
+        Assert.False(responses[3].RootElement.GetProperty("result").GetProperty("isError").GetBoolean());
+        Assert.Equal("updated old\nsecond old\n", await IOFile.ReadAllTextAsync(file));
+        var failed = responses[4].RootElement.GetProperty("result"); Assert.True(failed.GetProperty("isError").GetBoolean()); Assert.Contains("2 times", failed.GetProperty("content")[0].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task EditReplace_VerifiesOnlyWhenAskedAndHonoursTheMode()
+    {
+        var (server, session, root) = await CreateServerAsync("devx-mcp-verify", plainFolder: true,
+            verifyAfterEditFactory: _ => new VerifyAfterEdit(
+                _ => Task.FromResult(new ExecutionRecord("build", true, "", [], "PASS build")),
+                _ => Task.FromResult(new ExecutionRecord("test", true, "", [], "PASS 1 tests")),
+                _ => []));
+        await IOFile.WriteAllTextAsync(Path.Combine(root, "edit.md"), "old");
+        // 1.6.14 behaviour change: an edit with no `verify` argument is NOT verified, so an edit
+        // costs one call. Verifying is opt-in (brief OSS14 adjustment).
+        var plain = await server.CallToolAsync("edit.replace", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            file = "edit.md",
+            old = "old",
+            @new = "new"
+        }));
+        Assert.False(plain.IsError);
+        Assert.DoesNotContain("PASS build", plain.Content.GetProperty("text").GetString());
+
+        await IOFile.WriteAllTextAsync(Path.Combine(root, "edit.md"), "old");
+        var verified = await server.CallToolAsync("edit.replace", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            file = "edit.md",
+            old = "old",
+            @new = "new",
+            verify = true
+        }));
+        Assert.False(verified.IsError);
+        var verifiedText = verified.Content.GetProperty("text").GetString();
+        Assert.Contains("PASS build", verifiedText);
+        Assert.Contains("PASS 1 tests", verifiedText);
+
+        // `verify: "build"` is the build alone, so a caller that only wants to know it compiles
+        // does not pay for the suite.
+        await IOFile.WriteAllTextAsync(Path.Combine(root, "edit.md"), "old");
+        var buildOnly = await server.CallToolAsync("edit.replace", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            file = "edit.md",
+            old = "old",
+            @new = "new",
+            verify = "build"
+        }));
+        Assert.False(buildOnly.IsError);
+        var buildOnlyText = buildOnly.Content.GetProperty("text").GetString();
+        Assert.Contains("PASS build", buildOnlyText);
+        Assert.DoesNotContain("PASS 1 tests", buildOnlyText);
     }
 
     [Fact]
@@ -53,6 +130,156 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.False(read.IsError);
         Assert.True(read.Content.GetProperty("success").GetBoolean());
         Assert.Contains("Program", read.Content.GetRawText(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task CallToolAsync_DefaultAgentFormat_AndJsonRoundTrip()
+    {
+        var (server, session, _) = await CreateServerAsync("devx-mcp-agent-format");
+        var args = new { sessionId = session.Id.Value.ToString(), kind = "symbol", query = "Run" };
+
+        var agent = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(args));
+        var json = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new { args.sessionId, args.kind, args.query, format = "json" }));
+
+        Assert.False(agent.IsError);
+        Assert.Contains("method Sample.Program.Run", agent.Content.GetProperty("text").GetString());
+        Assert.True(agent.Content.GetProperty("success").GetBoolean());
+        Assert.True(json.Content.GetProperty("success").GetBoolean());
+        Assert.True(json.Content.TryGetProperty("data", out _));
+    }
+
+    [Fact]
+    public async Task CallToolAsync_BuildAndTest_UseCompactAgentTextAndKeepJsonPayload()
+    {
+        var (server, session, _) = await CreateServerAsync("devx-mcp-compact-output");
+        var buildArguments = JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString() });
+        var build = await server.CallToolAsync("build", buildArguments);
+        var buildJson = await server.CallToolAsync("build", JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString(), format = "json" }));
+        var test = await server.CallToolAsync("test", JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString() }));
+
+        Assert.False(build.IsError);
+        Assert.Contains("PASS build in", build.Content.GetProperty("text").GetString());
+        Assert.Contains("warnings) log:", build.Content.GetProperty("text").GetString());
+        Assert.True(buildJson.Content.TryGetProperty("data", out _));
+        Assert.Contains("PASS tests", test.Content.GetProperty("text").GetString());
+        Assert.Contains("log:", test.Content.GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public async Task CallToolAsync_TextSearchAndSymbolFallback_ReturnAgentMatchLines()
+    {
+        var (server, session, repositoryRoot) = await CreateServerAsync("devx-mcp-text-agent");
+        await IOFile.WriteAllTextAsync(Path.Combine(repositoryRoot, "notes.md"), "UniquePreview phrase for text search.");
+        var indexed = await server.CallToolAsync("index", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            files = new[] { "notes.md" }
+        }));
+        Assert.False(indexed.IsError);
+
+        var textSearch = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            kind = "text",
+            query = "UniquePreview"
+        }));
+        var fallback = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new
+        {
+            sessionId = session.Id.Value.ToString(),
+            query = "UniquePreview"
+        }));
+
+        AssertAgentSearchText(textSearch);
+        AssertAgentSearchText(fallback);
+
+        void AssertAgentSearchText(McpToolCallResult result)
+        {
+            var text = result.Content.GetProperty("text").GetString()!;
+            Assert.StartsWith("notes.md:1: UniquePreview phrase for text search.", text);
+            // Engine-independent coverage line: ripgrep cannot prove indexed-path coverage, the
+            // built-in scan can (complete=true, so no notice is rendered at all).
+            var lines = text.Split('\n');
+            if (RipgrepLocator.Locate(repositoryRoot).Executable is null)
+            {
+                Assert.Single(lines);
+            }
+            else
+            {
+                Assert.Equal(2, lines.Length);
+                Assert.Equal("Search coverage unknown; results may be incomplete. Ripgrep honors ignore and hidden-file rules, so indexed-path coverage is unknown.", lines[1]);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task StdioServer_SearchDefaultsToPlainAgentLines_AndJsonIsUnchanged()
+    {
+        var (server, session, _) = await CreateServerAsync("devx-mcp-stdio-agent");
+        var id = session.Id.Value.ToString();
+        var requests = string.Join("\n", [
+            $"{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"search\",\"arguments\":{{\"sessionId\":\"{id}\",\"kind\":\"symbol\",\"query\":\"Run\"}}}}}}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"search\",\"arguments\":{{\"sessionId\":\"{id}\",\"kind\":\"symbol\",\"query\":\"Run\",\"format\":\"json\"}}}}}}"
+        ]) + "\n";
+        var output = new StringWriter();
+
+        await new McpStdioServer(server).RunAsync(new StringReader(requests), output);
+
+        var responses = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => JsonDocument.Parse(line)).ToArray();
+        var agentText = responses[0].RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!;
+        var jsonText = responses[1].RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!;
+        Assert.Contains("method Sample.Program.Run", agentText);
+        Assert.DoesNotContain("{\"success\"", agentText);
+        Assert.Contains("\"success\":true", jsonText);
+        Assert.Contains("\"data\"", jsonText);
+        Assert.Equal(responses[0].RootElement.GetProperty("result").GetProperty("isError").GetBoolean(), responses[1].RootElement.GetProperty("result").GetProperty("isError").GetBoolean());
+    }
+
+    [Fact]
+    public async Task ToolsList_DescriptionsShareOrderedAgentGuidance()
+    {
+        var (server, _, _) = await CreateServerAsync("devx-mcp-guidance");
+        var tools = await server.ListToolsAsync();
+        var guidance = BuildAgentGuidance(tools);
+
+        Assert.True(guidance.Split('\n').Length <= 5);
+        var searchIndex = guidance.IndexOf("search", StringComparison.Ordinal);
+        var readIndex = guidance.IndexOf("read", searchIndex + 1, StringComparison.Ordinal);
+        var replaceIndex = guidance.IndexOf("edit.replace", readIndex + 1, StringComparison.Ordinal);
+        var testIndex = guidance.IndexOf("test", replaceIndex + 1, StringComparison.Ordinal);
+        Assert.True(searchIndex >= 0 && readIndex > searchIndex && replaceIndex > readIndex && testIndex > replaceIndex, guidance);
+        Assert.All(tools, tool => Assert.True(tool.InputSchema.GetProperty("properties").TryGetProperty("format", out _)));
+    }
+
+    private static string BuildAgentGuidance(IReadOnlyList<McpToolDescriptor> tools)
+        => string.Join("\n", new[] { "search", "read", "edit.replace", "test" }
+            .Select(name => tools.Single(tool => tool.Name == name).Description));
+
+    [Fact]
+    public async Task McpTools_DefaultSearchKindAndReadKindAndAcceptMultipleTargetsWithoutSessionId()
+    {
+        var (server, _, _) = await CreateServerAsync("devx-mcp-short-forms");
+        var tools = await server.ListToolsAsync();
+        foreach (var tool in tools)
+        {
+            using var schema = JsonDocument.Parse(tool.InputSchema.GetRawText());
+            if (schema.RootElement.TryGetProperty("required", out var required))
+                Assert.DoesNotContain("sessionId", required.EnumerateArray().Select(item => item.GetString()));
+        }
+        using var searchSchema = JsonDocument.Parse(tools.Single(tool => tool.Name == "search").InputSchema.GetRawText());
+        Assert.Equal("query", searchSchema.RootElement.GetProperty("required")[0].GetString());
+        Assert.DoesNotContain("sessionId", searchSchema.RootElement.GetProperty("required").EnumerateArray().Select(item => item.GetString()));
+        using var readSchema = JsonDocument.Parse(tools.Single(tool => tool.Name == "read").InputSchema.GetRawText());
+        Assert.DoesNotContain("sessionId", readSchema.RootElement.GetProperty("required").EnumerateArray().Select(item => item.GetString()));
+
+        var search = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new { query = "Run" }));
+        Assert.False(search.IsError);
+        var bareRead = await server.CallToolAsync("read", JsonSerializer.SerializeToElement(new { target = "Run" }));
+        Assert.False(bareRead.IsError);
+        Assert.Contains("Run", bareRead.Content.GetRawText());
+        var read = await server.CallToolAsync("read", JsonSerializer.SerializeToElement(new { targets = new[] { "src/Sample/Program.cs", "Run" } }));
+        Assert.False(read.IsError);
+        Assert.Contains("=== src/Sample/Program.cs ===", read.Content.GetProperty("text").GetString());
+        Assert.Contains("=== Run ===", read.Content.GetProperty("text").GetString());
     }
 
     [Fact]
@@ -91,7 +318,9 @@ public sealed class McpReferenceServerIntegrationTests
     public async Task CallToolAsync_IndexWithoutFilesIndexesWholeRepository()
     {
         var (server, session, _) = await CreateServerAsync("devx-mcp-whole-index", indexRepository: false);
-        var indexed = await server.CallToolAsync("index", JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString() }));
+        // format:json is the only way to get the envelope now; without it every tool answers
+        // the compact agent text. The payload shape is what this test is about.
+        var indexed = await server.CallToolAsync("index", JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString(), format = "json" }));
 
         Assert.False(indexed.IsError);
         Assert.True(indexed.Content.GetProperty("filesIndexed").GetInt32() > 0);
@@ -121,7 +350,8 @@ public sealed class McpReferenceServerIntegrationTests
         var result = await server.CallToolAsync("index", JsonSerializer.SerializeToElement(new
         {
             sessionId = session.Id.Value.ToString(),
-            files = new[] { "src/Sample/Added.cs" }
+            files = new[] { "src/Sample/Added.cs" },
+            format = "json"
         }));
 
         Assert.False(result.IsError);
@@ -131,7 +361,8 @@ public sealed class McpReferenceServerIntegrationTests
         {
             sessionId = session.Id.Value.ToString(),
             kind = "symbol",
-            query = "AddedByMcp"
+            query = "AddedByMcp",
+            format = "json"
         }));
         Assert.True(search.Content.GetProperty("success").GetBoolean());
         Assert.Contains("AddedByMcp", search.Content.GetRawText());
@@ -159,7 +390,8 @@ public sealed class McpReferenceServerIntegrationTests
         var validate = await server.CallToolAsync("patch.validate", JsonSerializer.SerializeToElement(new
         {
             sessionId = session.Id.Value.ToString(),
-            patch
+            patch,
+            format = "json"
         }));
 
         Assert.False(validate.IsError);
@@ -168,7 +400,8 @@ public sealed class McpReferenceServerIntegrationTests
         var apply = await server.CallToolAsync("patch.apply", JsonSerializer.SerializeToElement(new
         {
             sessionId = session.Id.Value.ToString(),
-            patch
+            patch,
+            format = "json"
         }));
 
         Assert.False(apply.IsError);
@@ -177,7 +410,8 @@ public sealed class McpReferenceServerIntegrationTests
 
         var report = await server.CallToolAsync("report", JsonSerializer.SerializeToElement(new
         {
-            sessionId = session.Id.Value.ToString()
+            sessionId = session.Id.Value.ToString(),
+            format = "json"
         }));
 
         Assert.False(report.IsError);
@@ -202,7 +436,7 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.Equal(3, responses.Length);
         using var initialize = JsonDocument.Parse(responses[0]);
         Assert.Equal("devx", initialize.RootElement.GetProperty("result").GetProperty("serverInfo").GetProperty("name").GetString());
-        Assert.Equal("1.6.0", initialize.RootElement.GetProperty("result").GetProperty("serverInfo").GetProperty("version").GetString());
+        Assert.Equal("1.6.5", initialize.RootElement.GetProperty("result").GetProperty("serverInfo").GetProperty("version").GetString());
         using var list = JsonDocument.Parse(responses[1]);
         Assert.True(list.RootElement.GetProperty("result").GetProperty("tools").GetArrayLength() > 0);
         using var call = JsonDocument.Parse(responses[2]);
@@ -249,7 +483,7 @@ public sealed class McpReferenceServerIntegrationTests
         Assert.True(missingArguments.RootElement.GetProperty("result").GetProperty("isError").GetBoolean());
     }
 
-    private static async Task<(McpReferenceServer Server, SessionState Session, string RepositoryRoot)> CreateServerAsync(string prefix, bool indexRepository = true, bool plainFolder = false)
+    private static async Task<(McpReferenceServer Server, SessionState Session, string RepositoryRoot)> CreateServerAsync(string prefix, bool indexRepository = true, bool plainFolder = false, Func<string, VerifyAfterEdit>? verifyAfterEditFactory = null)
     {
         var repositoryRoot = Directory.CreateTempSubdirectory(prefix).FullName;
         var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
@@ -294,9 +528,10 @@ public sealed class McpReferenceServerIntegrationTests
             store,
             session.Id.Value.ToString(),
             (files, cancellationToken) => indexer.ReindexFilesAsync(repositoryRoot, files, cancellationToken),
-            "1.6.0",
+            "1.6.5",
             cancellationToken => indexer.IndexAsync(repositoryRoot, cancellationToken),
-            cancellationToken => store.InitializeAsync(cancellationToken));
+            cancellationToken => store.InitializeAsync(cancellationToken),
+            verifyAfterEditFactory);
         return (server, session, repositoryRoot);
     }
 

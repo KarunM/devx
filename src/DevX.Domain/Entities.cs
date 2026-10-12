@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace DevX.Domain;
 
 public readonly record struct RepositoryId(Guid Value);
@@ -84,7 +86,10 @@ public sealed record PatchOperation(
     string? MethodText,
     string? Position,
     string? Namespace,
-    string? BeforeState);
+    string? BeforeState,
+    string? OldText = null,
+    int? Occurrence = null,
+    bool ReplaceAll = false);
 public sealed record DiagnosticRecord(
     string Severity,
     string Code,
@@ -113,15 +118,42 @@ public sealed record Symbol(
     int? EndLine = null,
     string? FilePath = null);
 
+public sealed record ReadContextCandidates(
+    IReadOnlyList<Symbol> TestNameMatches,
+    bool TestNameMatchesTruncated,
+    IReadOnlyList<Symbol> SameFileDefinitions,
+    bool SameFileDefinitionsTruncated,
+    bool SameFileDefinitionsAreNameMatches,
+    bool SourceNamesTruncated);
+
 public sealed record SearchSymbolRequest(string Query);
 public sealed record SearchTextRequest(string Query);
 public sealed record SearchResult(
     IReadOnlyList<SymbolSearchResult> Symbols,
     IReadOnlyList<FileSearchResult> Files,
-    IReadOnlyList<ContentSearchResult>? ContentMatches = null);
+    IReadOnlyList<ContentSearchResult>? ContentMatches = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ContentSearchCoverage? ContentCoverage = null);
 public sealed record SymbolSearchResult(string Id, string Kind, string Name, string QualifiedName, string? FilePath, int? StartLine = null, int? EndLine = null, string? FileStatus = null);
 public sealed record FileSearchResult(string Id, string Path, string ProjectName, string RepositoryName, string? FileStatus = null);
 public sealed record ContentSearchResult(string FileId, string Path, int Line, int Column, string Preview);
+
+/// <summary>How much of the indexed global content search was actually observed.</summary>
+/// <param name="OutputTruncated">True means a result beyond the output limit was observed; false means complete coverage established that no result was omitted; null means truncation is unknown.</param>
+/// <param name="Complete">True means every indexed file was scanned; false means an extra hit proved output was omitted; null means coverage is unknown.</param>
+public sealed record ContentSearchCoverage(
+    int ReturnedCount,
+    int ResultLimit,
+    bool? OutputTruncated,
+    bool? Complete,
+    bool ScanCapped,
+    bool FallbackUsed,
+    string Engine,
+    IReadOnlyList<string> Warnings,
+    int UnindexedHits = 0);
+
+public sealed record ContentSearchOutcome(
+    IReadOnlyList<ContentSearchResult> Matches,
+    ContentSearchCoverage Coverage);
 public sealed record FileSnapshot(
     string Id,
     string Project,
@@ -136,8 +168,13 @@ public sealed record FileSnapshot(
     IReadOnlyList<string> Dependencies);
 
 public sealed record FileNamespaceSnapshot(string Id, string Name);
-public sealed record FileTypeSnapshot(string Id, string Name, string Namespace);
-public sealed record FileMethodSnapshot(string Id, string Name, string TypeName, string Namespace);
+public sealed record FileTypeSnapshot(string Id, string Name, string Namespace,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? StartLine = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? EndLine = null);
+public sealed record FileMethodSnapshot(string Id, string Name, string TypeName, string Namespace,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Signature = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? StartLine = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? EndLine = null);
 public sealed record FilePropertySnapshot(string Id, string Name, string TypeName, string Namespace);
 public sealed record FileFieldSnapshot(string Id, string Name, string TypeName, string Namespace);
 public sealed record MethodSummary(
@@ -257,6 +294,35 @@ public sealed record ReferencesResponse(
     MethodSummary? TargetSymbol,
     IReadOnlyList<ReferenceSummary> References);
 
+/// <summary>One text-backed usage of a name: where it is, which indexed symbol encloses the line, and what kind of use it is.</summary>
+public sealed record TextReference(string Path, int Line, string Enclosing, string Text, string Kind);
+
+public sealed record TextReferenceMetadata(string? Note);
+
+/// <summary>Call sites of one enclosing symbol, for the grouped `callers` view.</summary>
+public sealed record TextReferenceGroup(string Enclosing, int Count, string Path, IReadOnlyList<int> Lines);
+
+/// <summary>`references` / `callers` for languages without a resolved call graph (Python): a whole-word
+/// usage search over indexed files, attributed to the enclosing indexed symbol. `Mode` is "text"; the
+/// symbol-table (C#) responses are unchanged and carry no Mode.</summary>
+public sealed record TextReferencesResponse(
+    string Mode,
+    string Query,
+    string Target,
+    string TargetPath,
+    int TargetLine,
+    int Total,
+    int Returned,
+    bool Truncated,
+    int Calls,
+    int Usages,
+    int Imports,
+    ContentSearchCoverage? Coverage,
+    IReadOnlyList<TextReference> References,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] TextReferenceMetadata? Metadata = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? Grouped = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<TextReferenceGroup>? Groups = null);
+
 public sealed record IndexStatusResponse(
     bool RepositoryIndexed,
     string RepositoryRoot,
@@ -343,6 +409,18 @@ public interface IRepositoryStore
     Task DeleteFileAsync(FileId fileId, CancellationToken cancellationToken = default);
 }
 
+/// <summary>Optional richer content-search contract; legacy stores may continue implementing IRepositoryStore only.</summary>
+public interface IContentSearchCoverageStore
+{
+    Task<ContentSearchOutcome> SearchFileContentsWithCoverageAsync(string query, int limit = 100, CancellationToken cancellationToken = default);
+}
+
+/// <summary>Provides an indexed file snapshot scoped to a registered repository root.</summary>
+public interface IRootScopedFileSnapshotStore
+{
+    Task<FileSnapshot?> GetFileSnapshotAsync(RepositoryId repositoryId, string repositoryRoot, string relativePath, CancellationToken cancellationToken = default);
+}
+
 public interface ISymbolStore
 {
     Task InitializeAsync(CancellationToken cancellationToken = default);
@@ -351,6 +429,15 @@ public interface ISymbolStore
     Task<IReadOnlyList<Symbol>> FindSymbolsByQualifiedNameAsync(string qualifiedName, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<Symbol>> FindSymbolsContainingAsync(string query, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<Symbol>> FindClosestSymbolsAsync(string query, int limit = 5, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Optional bounded navigation metadata for a resolved symbol read.
+/// </summary>
+public interface IReadContextStore
+{
+    Task<Symbol?> FindReadContextTargetAsync(RepositoryId repositoryId, string filePath, string qualifiedName, CancellationToken cancellationToken = default);
+    Task<ReadContextCandidates> FindReadContextCandidatesAsync(Symbol target, IReadOnlyList<string> sourceNames, bool sourceNamesTruncated, int limit = 5, CancellationToken cancellationToken = default);
 }
 
 public interface ISessionStore
@@ -366,4 +453,21 @@ public interface ISessionStore
     Task AddExecutionAsync(AddExecutionRequest request, CancellationToken cancellationToken = default);
     Task AddOperationMetricAsync(OperationMetric metric, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<OperationMetric>> GetOperationMetricsAsync(SessionId sessionId, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Durable index state for source paths that may have changed without a confirmed index refresh.
+/// A full-reindex fence cannot be cleared by refreshing only an arbitrary subset of files.
+/// </summary>
+public sealed record DirtyIndexRepository(string RepositoryRoot, bool RequiresFullReindex, IReadOnlyList<string> DirtyFiles);
+
+public interface IIndexFreshnessStore
+{
+    Task<IReadOnlyList<DirtyIndexRepository>> GetDirtyIndexRepositoriesAsync(CancellationToken cancellationToken = default);
+    Task<DirtyIndexRepository?> GetDirtyIndexRepositoryAsync(string repositoryRoot, CancellationToken cancellationToken = default);
+    Task<bool> TryMarkIndexFilesDirtyAsync(string repositoryRoot, IReadOnlyList<string> files, CancellationToken cancellationToken = default);
+    Task MarkIndexFilesDirtyAsync(string repositoryRoot, IReadOnlyList<string> files, CancellationToken cancellationToken = default);
+    Task MarkIndexRepositoryDirtyAsync(string repositoryRoot, IReadOnlyList<string> files, CancellationToken cancellationToken = default);
+    Task ClearDirtyIndexFilesAsync(string repositoryRoot, IReadOnlyList<string> files, CancellationToken cancellationToken = default);
+    Task ClearDirtyIndexRepositoryAsync(string repositoryRoot, CancellationToken cancellationToken = default);
 }

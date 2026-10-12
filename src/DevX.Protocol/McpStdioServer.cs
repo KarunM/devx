@@ -72,7 +72,15 @@ public sealed class McpStdioServer(McpReferenceServer server)
         try
         {
             var response = await server.CallToolAsync(name.GetString() ?? "", arguments, cancellationToken);
-            return new { content = new[] { new { type = "text", text = response.Content.GetRawText() } }, isError = response.IsError };
+            var text = response.Content.GetRawText();
+            var jsonRequested = arguments.ValueKind == JsonValueKind.Object
+                && arguments.TryGetProperty("format", out var format)
+                && format.ValueKind == JsonValueKind.String
+                && format.GetString()!.Equals("json", StringComparison.OrdinalIgnoreCase);
+            if (!jsonRequested && response.Content.ValueKind == JsonValueKind.Object
+                && response.Content.TryGetProperty("text", out var compactText) && compactText.ValueKind == JsonValueKind.String)
+                text = compactText.GetString()!;
+            return new { content = new[] { new { type = "text", text } }, isError = response.IsError };
         }
         catch (Exception error) when (error is InvalidOperationException or FormatException or ArgumentException)
         {

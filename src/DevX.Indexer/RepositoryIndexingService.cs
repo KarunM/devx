@@ -35,9 +35,32 @@ public sealed class RepositoryIndexingService
         var repository = new Repository(new RepositoryId(StableId(rootPath)), Path.GetFileName(rootPath), rootPath);
         await _repositoryStore.InitializeAsync(cancellationToken);
         await _repositoryStore.UpsertRepositoryAsync(repository, cancellationToken);
+        var freshnessStore = _repositoryStore as IIndexFreshnessStore;
+        var dirtyState = freshnessStore is null
+            ? null
+            : await freshnessStore.GetDirtyIndexRepositoryAsync(rootPath, cancellationToken);
+        if (freshnessStore is not null)
+        {
+            await freshnessStore.MarkIndexRepositoryDirtyAsync(rootPath, dirtyState?.DirtyFiles ?? [], cancellationToken);
+            if (dirtyState is not null)
+            {
+                // Reconcile previously fenced files from a clean slate so symbols removed by a
+                // source edit cannot survive a successful full-index recovery.
+                foreach (var dirtyFile in dirtyState.DirtyFiles)
+                {
+                    var dirtyPath = Path.GetFullPath(Path.Combine(rootPath, dirtyFile.Replace('\\', '/')));
+                    if (!dirtyPath.StartsWith(rootPath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+                        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    {
+                        throw new ArgumentException($"Dirty index path '{dirtyFile}' is outside the repository root.", nameof(repositoryPath));
+                    }
+                    await _repositoryStore.DeleteFileAsync(new FileId(StableId(dirtyPath)), cancellationToken);
+                }
+            }
+        }
 
-        var projects = Directory.EnumerateFiles(rootPath, "*.csproj", SearchOption.AllDirectories).Where(path => IsNotIgnored(rootPath, path)).ToList();
-        var allFiles = Directory.EnumerateFiles(rootPath, "*", SearchOption.AllDirectories).ToList();
+        var projects = RepositoryPathGuard.EnumerateFiles(rootPath, "*.csproj").Where(path => IsNotIgnored(rootPath, path)).ToList();
+        var allFiles = RepositoryPathGuard.EnumerateFiles(rootPath).ToList();
         var considered = allFiles.Where(path => IsIndexable(path)
             && (!path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) || projects.Count == 0
                 || projects.Any(project => path.StartsWith(Path.GetDirectoryName(project) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))).ToList();
@@ -49,61 +72,63 @@ public sealed class RepositoryIndexingService
             var project = new Project(new ProjectId(StableId(projectPath)), repository.Id, Path.GetFileNameWithoutExtension(projectPath), RelativePath(rootPath, projectPath));
             await _repositoryStore.UpsertProjectAsync(project, cancellationToken);
 
-            foreach (var filePath in Directory.EnumerateFiles(projectDirectory, "*.cs", SearchOption.AllDirectories).Where(path => IsNotIgnored(rootPath, path)))
+            foreach (var filePath in RepositoryPathGuard.EnumerateFiles(projectDirectory, "*.cs").Where(path => IsNotIgnored(rootPath, path)))
             {
                 var file = new DomainFile(new FileId(StableId(filePath)), project.Id, RelativePath(rootPath, filePath));
                 await _repositoryStore.UpsertFileAsync(file, cancellationToken);
 
                 var parsed = _languageParser.Parse(filePath, await System.IO.File.ReadAllTextAsync(filePath, cancellationToken));
-                if (!string.IsNullOrWhiteSpace(parsed.Namespace))
+                var hasTopLevelProgram = parsed.Types.Any(type => type.Name == "Program" && type.Kind == "Class" && type.Methods.Count > 0);
+                if (!string.IsNullOrWhiteSpace(parsed.Namespace) || hasTopLevelProgram || parsed.Types.Count > 0)
                 {
-                    var namespaceId = new NamespaceId(StableId($"{filePath}:{parsed.Namespace}"));
-                    await _repositoryStore.UpsertNamespaceAsync(new Namespace(namespaceId, file.Id, parsed.Namespace!), cancellationToken);
+                    var namespaceName = parsed.Namespace ?? string.Empty;
+                    var namespaceId = new NamespaceId(StableId($"{filePath}:{namespaceName}"));
+                    await _repositoryStore.UpsertNamespaceAsync(new Namespace(namespaceId, file.Id, namespaceName), cancellationToken);
 
                     foreach (var type in parsed.Types)
                     {
-                        var typeId = new TypeId(StableId($"{filePath}:{parsed.Namespace}:{type.Name}"));
+                        var typeId = new TypeId(StableId($"{filePath}:{namespaceName}:{type.Name}"));
                         await _repositoryStore.UpsertTypeAsync(new DevX.Domain.Type(typeId, namespaceId, type.Name), cancellationToken);
                         await _symbolStore.UpsertSymbolAsync(new Symbol(
-                            StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}").ToString(),
+                            StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}").ToString(),
                             repository.Id.Value.ToString(),
                             project.Id.Value.ToString(),
                             file.Id.Value.ToString(),
                             namespaceId.Value.ToString(),
                             type.Kind,
                             type.Name,
-                            $"{parsed.Namespace}.{type.Name}",
+                            QualifiedName(namespaceName, type.Name),
                             null, type.StartLine, type.EndLine), cancellationToken);
 
                         foreach (var method in type.Methods)
                         {
                             await _repositoryStore.UpsertMethodAsync(new Method(new MethodId(StableId($"{typeId}:{method.Name}:{method.Signature}")), typeId, method.Name), cancellationToken);
                             await _symbolStore.UpsertSymbolAsync(new Symbol(
-                                StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{method.Name}:{method.Signature}").ToString(),
+                                StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}:{method.Name}:{method.Signature}").ToString(),
                                 repository.Id.Value.ToString(),
                                 project.Id.Value.ToString(),
                                 file.Id.Value.ToString(),
                                 typeId.Value.ToString(),
                                 method.IsConstructor ? "Constructor" : "Method",
                                 method.Name,
-                                $"{parsed.Namespace}.{type.Name}.{method.Name}",
+                                QualifiedName(namespaceName, type.Name, method.Name),
                                 method.Signature, method.StartLine, method.EndLine), cancellationToken);
                         }
 
-                        await IndexCallersAsync(filePath, file.Id, parsed.Namespace, type.Name, type.Methods, cancellationToken);
+                        await IndexCallersAsync(filePath, file.Id, namespaceName, type.Name, type.Methods, cancellationToken);
 
                         foreach (var property in type.Properties)
                         {
                             await _repositoryStore.UpsertPropertyAsync(new Property(new PropertyId(StableId($"{typeId}:{property.Name}")), typeId, property.Name), cancellationToken);
                             await _symbolStore.UpsertSymbolAsync(new Symbol(
-                                StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{property.Name}").ToString(),
+                                StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}:{property.Name}").ToString(),
                                 repository.Id.Value.ToString(),
                                 project.Id.Value.ToString(),
                                 file.Id.Value.ToString(),
                                 typeId.Value.ToString(),
                                 "Property",
                                 property.Name,
-                                $"{parsed.Namespace}.{type.Name}.{property.Name}",
+                                QualifiedName(namespaceName, type.Name, property.Name),
                                 property.Type, property.StartLine, property.EndLine), cancellationToken);
                         }
 
@@ -111,14 +136,14 @@ public sealed class RepositoryIndexingService
                         {
                             await _repositoryStore.UpsertFieldAsync(new Field(new FieldId(StableId($"{typeId}:{field.Name}")), typeId, field.Name), cancellationToken);
                             await _symbolStore.UpsertSymbolAsync(new Symbol(
-                                StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{field.Name}").ToString(),
+                                StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}:{field.Name}").ToString(),
                                 repository.Id.Value.ToString(),
                                 project.Id.Value.ToString(),
                                 file.Id.Value.ToString(),
                                 typeId.Value.ToString(),
                                 "Field",
                                 field.Name,
-                                $"{parsed.Namespace}.{type.Name}.{field.Name}",
+                                QualifiedName(namespaceName, type.Name, field.Name),
                                 field.Type, field.StartLine, field.EndLine), cancellationToken);
                         }
                     }
@@ -128,7 +153,7 @@ public sealed class RepositoryIndexingService
 
         if (projects.Count == 0)
         {
-            var looseCSharpFiles = Directory.EnumerateFiles(rootPath, "*.cs", SearchOption.AllDirectories).Where(path => IsNotIgnored(rootPath, path)).ToList();
+            var looseCSharpFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.cs").Where(path => IsNotIgnored(rootPath, path)).ToList();
             if (looseCSharpFiles.Count > 0)
             {
                 var projectPath = Path.Combine(rootPath, "<csharp>");
@@ -139,18 +164,28 @@ public sealed class RepositoryIndexingService
                     var file = new DomainFile(new FileId(StableId(filePath)), project.Id, RelativePath(rootPath, filePath));
                     await _repositoryStore.UpsertFileAsync(file, cancellationToken);
                     var parsed = _languageParser.Parse(filePath, await System.IO.File.ReadAllTextAsync(filePath, cancellationToken));
-                    if (string.IsNullOrWhiteSpace(parsed.Namespace)) continue;
-                    var nsId = new NamespaceId(StableId($"{filePath}:{parsed.Namespace}"));
-                    await _repositoryStore.UpsertNamespaceAsync(new Namespace(nsId, file.Id, parsed.Namespace!), cancellationToken);
+                    var namespaceName = parsed.Namespace ?? string.Empty;
+                    var nsId = new NamespaceId(StableId($"{filePath}:{namespaceName}"));
+                    await _repositoryStore.UpsertNamespaceAsync(new Namespace(nsId, file.Id, namespaceName), cancellationToken);
                     foreach (var type in parsed.Types)
                     {
-                        var typeId = new TypeId(StableId($"{filePath}:{parsed.Namespace}:{type.Name}"));
+                        var typeId = new TypeId(StableId($"{filePath}:{namespaceName}:{type.Name}"));
                         await _repositoryStore.UpsertTypeAsync(new DevX.Domain.Type(typeId, nsId, type.Name), cancellationToken);
-                        await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), nsId.Value.ToString(), type.Kind, type.Name, $"{parsed.Namespace}.{type.Name}", null, type.StartLine, type.EndLine), cancellationToken);
+                        await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), nsId.Value.ToString(), type.Kind, type.Name, QualifiedName(namespaceName, type.Name), null, type.StartLine, type.EndLine), cancellationToken);
                         foreach (var method in type.Methods)
                         {
                             await _repositoryStore.UpsertMethodAsync(new Method(new MethodId(StableId($"{typeId}:{method.Name}:{method.Signature}")), typeId, method.Name), cancellationToken);
-                            await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{parsed.Namespace}:{type.Name}:{method.Name}:{method.Signature}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), typeId.Value.ToString(), "Method", method.Name, $"{parsed.Namespace}.{type.Name}.{method.Name}", method.Signature, method.StartLine, method.EndLine), cancellationToken);
+                            await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}:{method.Name}:{method.Signature}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), typeId.Value.ToString(), "Method", method.Name, QualifiedName(namespaceName, type.Name, method.Name), method.Signature, method.StartLine, method.EndLine), cancellationToken);
+                        }
+                        foreach (var property in type.Properties)
+                        {
+                            await _repositoryStore.UpsertPropertyAsync(new Property(new PropertyId(StableId($"{typeId}:{property.Name}")), typeId, property.Name), cancellationToken);
+                            await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}:{property.Name}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), typeId.Value.ToString(), "Property", property.Name, QualifiedName(namespaceName, type.Name, property.Name), property.Type, property.StartLine, property.EndLine), cancellationToken);
+                        }
+                        foreach (var field in type.Fields)
+                        {
+                            await _repositoryStore.UpsertFieldAsync(new Field(new FieldId(StableId($"{typeId}:{field.Name}")), typeId, field.Name), cancellationToken);
+                            await _symbolStore.UpsertSymbolAsync(new Symbol(StableId($"{repository.Id.Value}:{project.Id.Value}:{file.Id.Value}:{namespaceName}:{type.Name}:{field.Name}").ToString(), repository.Id.Value.ToString(), project.Id.Value.ToString(), file.Id.Value.ToString(), typeId.Value.ToString(), "Field", field.Name, QualifiedName(namespaceName, type.Name, field.Name), field.Type, field.StartLine, field.EndLine), cancellationToken);
                         }
                     }
                 }
@@ -162,6 +197,19 @@ public sealed class RepositoryIndexingService
         await IndexJavaScriptFilesAsync(rootPath, repository, cancellationToken);
         await IndexJsonFilesAsync(rootPath, repository, cancellationToken);
         await IndexHtmlFilesAsync(rootPath, repository, cancellationToken);
+        if (freshnessStore is not null)
+        {
+            if (dirtyState is not null)
+            {
+                var indexedPaths = indexable.Select(path => RelativePath(rootPath, path).Replace('\\', '/'))
+                    .ToHashSet(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+                foreach (var dirtyFile in dirtyState.DirtyFiles.Where(path => !indexedPaths.Contains(path)))
+                {
+                    await RemoveFileAsync(rootPath, dirtyFile, cancellationToken);
+                }
+            }
+            await freshnessStore.ClearDirtyIndexRepositoryAsync(rootPath, cancellationToken);
+        }
         return new RepositoryIndexResult(indexable.Count, indexable.Count == 0
             ? considered.Count == 0 ? "no files with an indexable extension found" : "all files ignored"
             : null);
@@ -175,7 +223,7 @@ public sealed class RepositoryIndexingService
     /// </summary>
     private async Task IndexPythonFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
     {
-        var pythonFiles = Directory.EnumerateFiles(rootPath, "*.py", SearchOption.AllDirectories).Where(path => IsNotIgnored(rootPath, path)).ToList();
+        var pythonFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.py").Where(path => IsNotIgnored(rootPath, path)).ToList();
         if (pythonFiles.Count == 0)
         {
             return;
@@ -200,7 +248,7 @@ public sealed class RepositoryIndexingService
     /// </summary>
     private async Task IndexMarkdownFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
     {
-        var markdownFiles = Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories)
+        var markdownFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.*")
             .Where(path => MarkdownSymbolReader.CanParse(path))
             .Where(path => IsNotIgnored(rootPath, path))
             .OrderBy(path => path, StringComparer.Ordinal)
@@ -227,7 +275,7 @@ public sealed class RepositoryIndexingService
     /// </summary>
     private async Task IndexJavaScriptFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
     {
-        var javaScriptFiles = Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories)
+        var javaScriptFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.*")
             .Where(path => JavaScriptSymbolReader.CanParse(path))
             .Where(path => !path.EndsWith(".min.js", StringComparison.OrdinalIgnoreCase))
             .Where(path => IsNotIgnored(rootPath, path))
@@ -251,7 +299,7 @@ public sealed class RepositoryIndexingService
 
     private async Task IndexJsonFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
     {
-        var jsonFiles = Directory.EnumerateFiles(rootPath, "*.json", SearchOption.AllDirectories)
+        var jsonFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.json")
             .Where(path => IsNotIgnored(rootPath, path))
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToList();
@@ -273,7 +321,7 @@ public sealed class RepositoryIndexingService
 
     private async Task IndexHtmlFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
     {
-        var htmlFiles = Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories)
+        var htmlFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.*")
             .Where(HtmlSymbolReader.CanParse)
             .Where(path => IsNotIgnored(rootPath, path))
             .OrderBy(path => path, StringComparer.Ordinal)
@@ -317,7 +365,7 @@ public sealed class RepositoryIndexingService
                 namespaceId.Value.ToString(),
                 type.Kind,
                 type.Name,
-                $"{parsed.Namespace}.{type.Name}",
+                QualifiedName(parsed.Namespace, type.Name),
                 null, type.StartLine, type.EndLine), cancellationToken);
 
             foreach (var method in type.Methods)
@@ -331,7 +379,7 @@ public sealed class RepositoryIndexingService
                     typeId.Value.ToString(),
                     method.IsConstructor ? "Constructor" : "Method",
                     method.Name,
-                    $"{parsed.Namespace}.{type.Name}.{method.Name}",
+                    QualifiedName(parsed.Namespace, type.Name, method.Name),
                     method.Signature, method.StartLine, method.EndLine), cancellationToken);
             }
 
@@ -346,7 +394,7 @@ public sealed class RepositoryIndexingService
                     typeId.Value.ToString(),
                     "Field",
                     field.Name,
-                    $"{parsed.Namespace}.{type.Name}.{field.Name}",
+                    QualifiedName(parsed.Namespace, type.Name, field.Name),
                     field.Type, field.StartLine, field.EndLine), cancellationToken);
             }
 
@@ -362,13 +410,9 @@ public sealed class RepositoryIndexingService
     public async Task ReindexFileAsync(string repositoryPath, string filePath, CancellationToken cancellationToken = default)
     {
         var rootPath = Path.GetFullPath(repositoryPath);
-        var relativePath = filePath.Replace('\\', '/');
-        var absolutePath = Path.GetFullPath(Path.Combine(rootPath, relativePath));
-
-        if (!absolutePath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException("File path must be inside the repository root.", nameof(filePath));
-        }
+        if (!RepositoryPathGuard.TryResolve(rootPath, filePath, out var absolutePath, out var pathError))
+            throw new ArgumentException(pathError, nameof(filePath));
+        var relativePath = Path.GetRelativePath(rootPath, absolutePath).Replace('\\', '/');
 
         if (!System.IO.File.Exists(absolutePath))
         {
@@ -379,7 +423,19 @@ public sealed class RepositoryIndexingService
         var fileId = new FileId(StableId(absolutePath));
         await _repositoryStore.DeleteFileAsync(fileId, cancellationToken);
 
-        var projectPath = Directory.EnumerateFiles(rootPath, "*.csproj", SearchOption.AllDirectories)
+        if (!absolutePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) && !StructuredSymbolReader.CanParse(absolutePath))
+        {
+            // Unsupported extensions have no indexed source representation. DeleteFileAsync
+            // above removes any stale entry with this stable file id; only then is this one
+            // path safe to clear (a repository-wide dirty fence remains set).
+            if (_repositoryStore is IIndexFreshnessStore fileFreshnessStore)
+            {
+                await fileFreshnessStore.ClearDirtyIndexFilesAsync(rootPath, [relativePath], cancellationToken);
+            }
+            return;
+        }
+
+        var projectPath = RepositoryPathGuard.EnumerateFiles(rootPath, "*.csproj")
             .FirstOrDefault(p => absolutePath.StartsWith(Path.GetDirectoryName(p)!, StringComparison.OrdinalIgnoreCase));
 
         ProjectId projectId;
@@ -405,65 +461,70 @@ public sealed class RepositoryIndexingService
             project = new Project(projectId, repositoryId, Path.GetFileName(rootPath), RelativePath(rootPath, rootPath));
             await _repositoryStore.UpsertProjectAsync(project, cancellationToken);
         }
-        else
+        else if (absolutePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
         {
+            // Loose C# files are supported by a full repository index, but they have no
+            // incrementally resolvable project here. Keep their freshness marker until
+            // that full reconciliation runs.
             throw new InvalidOperationException("Could not determine project for file.");
         }
+        else throw new InvalidOperationException("Could not determine project for file.");
 
         var file = new DomainFile(fileId, project.Id, RelativePath(rootPath, absolutePath));
         await _repositoryStore.UpsertFileAsync(file, cancellationToken);
 
         var parsed = _languageParser.Parse(absolutePath, await System.IO.File.ReadAllTextAsync(absolutePath, cancellationToken));
         parsed = NormalizeStructuredNamespace(parsed, RelativePath(rootPath, absolutePath));
-        if (!string.IsNullOrWhiteSpace(parsed.Namespace))
+        if (absolutePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(parsed.Namespace))
         {
-            var namespaceId = new NamespaceId(StableId($"{absolutePath}:{parsed.Namespace}"));
-            await _repositoryStore.UpsertNamespaceAsync(new Namespace(namespaceId, file.Id, parsed.Namespace!), cancellationToken);
+            var namespaceName = parsed.Namespace ?? string.Empty;
+            var namespaceId = new NamespaceId(StableId($"{absolutePath}:{namespaceName}"));
+            await _repositoryStore.UpsertNamespaceAsync(new Namespace(namespaceId, file.Id, namespaceName), cancellationToken);
 
             foreach (var type in parsed.Types)
             {
-                var typeId = new TypeId(StableId($"{absolutePath}:{parsed.Namespace}:{type.Name}"));
+                var typeId = new TypeId(StableId($"{absolutePath}:{namespaceName}:{type.Name}"));
                 await _repositoryStore.UpsertTypeAsync(new DevX.Domain.Type(typeId, namespaceId, type.Name), cancellationToken);
                 await _symbolStore.UpsertSymbolAsync(new Symbol(
-                    StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{parsed.Namespace}:{type.Name}").ToString(),
+                    StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{namespaceName}:{type.Name}").ToString(),
                     repositoryId.Value.ToString(),
                     projectId.Value.ToString(),
                     fileId.Value.ToString(),
                     namespaceId.Value.ToString(),
                     type.Kind,
                     type.Name,
-                    $"{parsed.Namespace}.{type.Name}",
+                    QualifiedName(namespaceName, type.Name),
                     null, type.StartLine, type.EndLine), cancellationToken);
 
                 foreach (var method in type.Methods)
                 {
                     await _repositoryStore.UpsertMethodAsync(new Method(new MethodId(StableId($"{typeId}:{method.Name}:{method.Signature}")), typeId, method.Name), cancellationToken);
                     await _symbolStore.UpsertSymbolAsync(new Symbol(
-                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{parsed.Namespace}:{type.Name}:{method.Name}:{method.Signature}").ToString(),
+                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{namespaceName}:{type.Name}:{method.Name}:{method.Signature}").ToString(),
                         repositoryId.Value.ToString(),
                         projectId.Value.ToString(),
                         fileId.Value.ToString(),
                         typeId.Value.ToString(),
                         method.IsConstructor ? "Constructor" : "Method",
                         method.Name,
-                        $"{parsed.Namespace}.{type.Name}.{method.Name}",
+                        QualifiedName(namespaceName, type.Name, method.Name),
                         method.Signature, method.StartLine, method.EndLine), cancellationToken);
                 }
 
-                await IndexCallersAsync(absolutePath, file.Id, parsed.Namespace, type.Name, type.Methods, cancellationToken);
+                await IndexCallersAsync(absolutePath, file.Id, namespaceName, type.Name, type.Methods, cancellationToken);
 
                 foreach (var property in type.Properties)
                 {
                     await _repositoryStore.UpsertPropertyAsync(new Property(new PropertyId(StableId($"{typeId}:{property.Name}")), typeId, property.Name), cancellationToken);
                     await _symbolStore.UpsertSymbolAsync(new Symbol(
-                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{parsed.Namespace}:{type.Name}:{property.Name}").ToString(),
+                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{namespaceName}:{type.Name}:{property.Name}").ToString(),
                         repositoryId.Value.ToString(),
                         projectId.Value.ToString(),
                         fileId.Value.ToString(),
                         typeId.Value.ToString(),
                         "Property",
                         property.Name,
-                        $"{parsed.Namespace}.{type.Name}.{property.Name}",
+                        QualifiedName(namespaceName, type.Name, property.Name),
                         property.Type, property.StartLine, property.EndLine), cancellationToken);
                 }
 
@@ -471,17 +532,21 @@ public sealed class RepositoryIndexingService
                 {
                     await _repositoryStore.UpsertFieldAsync(new Field(new FieldId(StableId($"{typeId}:{field.Name}")), typeId, field.Name), cancellationToken);
                     await _symbolStore.UpsertSymbolAsync(new Symbol(
-                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{parsed.Namespace}:{type.Name}:{field.Name}").ToString(),
+                        StableId($"{repositoryId.Value}:{projectId.Value}:{fileId.Value}:{namespaceName}:{type.Name}:{field.Name}").ToString(),
                         repositoryId.Value.ToString(),
                         projectId.Value.ToString(),
                         fileId.Value.ToString(),
                         typeId.Value.ToString(),
                         "Field",
                         field.Name,
-                        $"{parsed.Namespace}.{type.Name}.{field.Name}",
+                        QualifiedName(namespaceName, type.Name, field.Name),
                         field.Type, field.StartLine, field.EndLine), cancellationToken);
                 }
             }
+        }
+        if (_repositoryStore is IIndexFreshnessStore freshnessStore)
+        {
+            await freshnessStore.ClearDirtyIndexFilesAsync(rootPath, [relativePath], cancellationToken);
         }
     }
 
@@ -493,6 +558,11 @@ public sealed class RepositoryIndexingService
             .Select(path => path.Replace('\\', '/'))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+
+        if (_repositoryStore is IIndexFreshnessStore freshnessStore)
+        {
+            await freshnessStore.MarkIndexFilesDirtyAsync(repositoryPath, normalized, cancellationToken);
+        }
 
         if (normalized.Length == 0)
         {
@@ -524,7 +594,18 @@ public sealed class RepositoryIndexingService
             }
             if (!SupportsIncrementalFile(path))
             {
-                skippedFiles.Add(new SkippedFile(path, $"Unsupported file type for incremental indexing: '{Path.GetExtension(path)}'. Run 'devx index .' for a full reindex."));
+                try
+                {
+                    // ReindexFileAsync first deletes any stale indexed row. For truly
+                    // unsupported extensions it then clears this path's fence; supported
+                    // loose C# still throws and remains fenced for full-index recovery.
+                    await ReindexFileAsync(repositoryPath, path, cancellationToken);
+                    skippedFiles.Add(new SkippedFile(path, $"Unsupported file type for incremental indexing: '{Path.GetExtension(path)}'. No indexed entry was retained."));
+                }
+                catch (Exception error) when (error is IOException or ArgumentException or InvalidOperationException or NotSupportedException or Microsoft.Data.Sqlite.SqliteException)
+                {
+                    skippedFiles.Add(new SkippedFile(path, $"ERROR: {error.Message}"));
+                }
                 continue;
             }
 
@@ -533,7 +614,7 @@ public sealed class RepositoryIndexingService
                 await ReindexFileAsync(repositoryPath, path, cancellationToken);
                 updated++;
             }
-            catch (Exception error) when (error is IOException or ArgumentException)
+            catch (Exception error) when (error is IOException or ArgumentException or InvalidOperationException or NotSupportedException or Microsoft.Data.Sqlite.SqliteException)
             {
                 skippedFiles.Add(new SkippedFile(path, $"ERROR: {error.Message}"));
             }
@@ -541,6 +622,37 @@ public sealed class RepositoryIndexingService
 
         return new IndexRefreshResult("files", updated, skippedFiles.Count, normalized, full, skippedFiles);
     }
+
+    /// <summary>
+    /// Drop a file that no longer exists from the index. <see cref="ReindexFilesAsync"/> cannot
+    /// do this: it reports a missing file as an error and leaves the index holding a file that is
+    /// gone, so a delete through a patch (`DeleteFile`) would leave `devx search` finding a
+    /// document that is not there. Symbols follow the file by ON DELETE CASCADE.
+    /// </summary>
+    public async Task RemoveFileAsync(string repositoryPath, string filePath, CancellationToken cancellationToken = default)
+    {
+        var rootPath = Path.GetFullPath(repositoryPath);
+        var absolutePath = Path.GetFullPath(Path.Combine(rootPath, filePath.Replace('\\', '/')));
+        if (!absolutePath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("File path must be inside the repository root.", nameof(filePath));
+        }
+
+        await _repositoryStore.DeleteFileAsync(new FileId(StableId(absolutePath)), cancellationToken);
+        if (_repositoryStore is IIndexFreshnessStore freshnessStore)
+        {
+            await freshnessStore.ClearDirtyIndexFilesAsync(rootPath, [filePath.Replace('\\', '/')], cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// How many files the index holds for the repository rooted at <paramref name="repositoryPath"/>,
+    /// 0 when that path has never been indexed. The repository id is derived exactly as
+    /// <see cref="IndexAsync(string, CancellationToken)"/> derives it, so the count is about the
+    /// index a whole-repository run would rewrite -- which is what lets a caller skip that run.
+    /// </summary>
+    public Task<int> CountIndexedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default)
+        => _repositoryStore.CountIndexedFilesAsync(new RepositoryId(StableId(Path.GetFullPath(repositoryPath))), cancellationToken);
 
     public async Task<IndexRefreshResult> ReindexChangedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default)
     {
@@ -691,10 +803,13 @@ public sealed class RepositoryIndexingService
 
     private async Task<Symbol?> FindCallerSymbolAsync(FileId fileId, string @namespace, string typeName, string callerName, CancellationToken cancellationToken)
     {
-        var qualified = string.IsNullOrWhiteSpace(@namespace) ? $"{typeName}.{callerName}" : $"{@namespace}.{typeName}.{callerName}";
+        var qualified = QualifiedName(@namespace, typeName, callerName);
         var matches = await _symbolStore.FindSymbolsByQualifiedNameAsync(qualified, cancellationToken);
         return matches.FirstOrDefault(symbol => symbol.FileId == fileId.Value.ToString() && symbol.Kind is "Method" or "Constructor");
     }
+
+    private static string QualifiedName(string? @namespace, params string[] parts)
+        => string.Join('.', (string.IsNullOrWhiteSpace(@namespace) ? parts : [@namespace, .. parts]));
 
     private static Guid StableId(string value)
     {

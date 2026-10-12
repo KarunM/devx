@@ -8,8 +8,29 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>devx</ToolCommandName>
     <PackageId>DevX.Cli</PackageId>
-    <Version>1.6.0</Version>
+    <Version>1.7.0</Version>
   </PropertyGroup>
+
+  <!--
+    ripgrep ships with DevX so that `devx search text` has a real engine on a machine where
+    `rg` is not installed. The binaries are never committed: tools/fetch_ripgrep.py downloads
+    the pinned release, verifies its sha256 and unpacks it into bundled-rg/<rid>/rg, and the
+    release workflow runs that before packing. Nothing here when the folder is absent, so a
+    plain `dotnet build` or `dotnet pack` in a checkout keeps working.
+  -->
+  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)../../bundled-rg')">
+    <None Include="$(MSBuildThisFileDirectory)../../bundled-rg/**/*"
+          Pack="true"
+          PackagePath="tools/$(TargetFramework)/any/rg-tools/" />
+  </ItemGroup>
+
+  <!-- The licence of everything redistributed in this package (ripgrep) travels with it. -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\..\THIRD-PARTY-NOTICES"
+          Pack="true"
+          PackagePath=""
+          Visible="false" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\DevX.Application\DevX.Application.csproj" />

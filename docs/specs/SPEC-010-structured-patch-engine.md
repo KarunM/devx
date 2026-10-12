@@ -79,6 +79,10 @@ Validation:
 - only the selected method changes
 - neighboring methods remain unchanged
 
+### Text replace
+
+Replace an exact text fragment in a file. The canonical operation is `ReplaceText`; `TextReplace` is accepted as an alias. Supply `oldText` and `replacementText`. By default the old text must match exactly once. Use `occurrence` (one-based) to select one match or `replaceAll: true` to replace every match. Validation and apply report the number of matches when the text is absent or ambiguous. Rollback restores the captured before-state.
+
 ### InsertMethod
 
 Insert a new method into an existing type.
@@ -166,6 +170,10 @@ Existing commands remain:
   ]
 }
 ```
+
+### Text replace
+
+Replace an exact text fragment in a file. The canonical operation is `ReplaceText`; `TextReplace` is accepted as an alias. Supply `oldText` and `replacementText`. By default the old text must match exactly once. Use `occurrence` (one-based) to select one match or `replaceAll: true` to replace every match. Validation and apply report the number of matches when the text is absent or ambiguous. Rollback restores the captured before-state.
 
 ### InsertMethod
 

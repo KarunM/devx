@@ -38,6 +38,8 @@ public static class ReadableSymbolResolver
         if (exact.Count > 0) return new(exact, stripped > 0 ? "prefix-stripped" : "exact");
         var module = candidates.Where(s => ModuleMatch(s, normalized)).ToList();
         if (module.Count > 0) return new(module, stripped > 0 ? "prefix-stripped" : "module-path");
+        var suffix = candidates.Where(s => s.QualifiedName.EndsWith("." + normalized, StringComparison.Ordinal)).ToList();
+        if (suffix.Count > 0) return new(suffix, "suffix");
         // A supplied module prefix is a constraint; never silently return another module's symbol.
         if (normalized.Contains('.')) return new([], stripped > 0 ? "prefix-stripped" : "module-path");
         return new(candidates.Where(s => Same(s.Name, normalized)).ToList(), "short-name");

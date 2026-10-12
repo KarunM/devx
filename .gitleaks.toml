@@ -1,0 +1,17 @@
+# gitleaks configuration.
+#
+# The default ruleset applies unchanged. The single allowlist below exists because
+# `docs/benchmarks/results-v1.md` records a 40-character git commit SHA in its results
+# table, and the `generic-api-key` rule reads a bare hex string of that length as a
+# credential. It is an identifier quoted from the benchmark run, not a secret.
+#
+# The entry names the file and the rule rather than matching a pattern, so a genuine
+# credential in any other file -- or a different kind of finding in this one -- is still
+# reported.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "benchmark results table quotes a git commit SHA, which generic-api-key reads as a credential"
+paths = ['''docs/benchmarks/results-v1.md''']
+rules = ["generic-api-key"]

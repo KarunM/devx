@@ -7,7 +7,7 @@ namespace DevX.Cli;
 /// Wraps an IRepositoryStore to override the repository root path for sandbox mode.
 /// All operations delegate to the inner store except GetRepositoryRootPathAsync.
 /// </summary>
-public sealed class SandboxRepositoryStore : IRepositoryStore, ISymbolStore, ISessionStore
+public sealed class SandboxRepositoryStore : IRepositoryStore, IRootScopedFileSnapshotStore, ISymbolStore, IReadContextStore, ISessionStore, IIndexFreshnessStore, IContentSearchCoverageStore
 {
     private readonly IRepositoryStore _innerStore;
     private readonly string _sandboxRoot;
@@ -54,8 +54,28 @@ public sealed class SandboxRepositoryStore : IRepositoryStore, ISymbolStore, ISe
     public Task<IReadOnlyList<ContentSearchResult>> SearchFileContentsAsync(string query, int limit = 100, CancellationToken cancellationToken = default)
         => _innerStore.SearchFileContentsAsync(query, limit, cancellationToken);
 
+    public async Task<ContentSearchOutcome> SearchFileContentsWithCoverageAsync(string query, int limit = 100, CancellationToken cancellationToken = default)
+    {
+        if (_innerStore is IContentSearchCoverageStore coverageStore)
+        {
+            return await coverageStore.SearchFileContentsWithCoverageAsync(query, limit, cancellationToken);
+        }
+
+        var matches = await _innerStore.SearchFileContentsAsync(query, limit, cancellationToken);
+        return new ContentSearchOutcome(matches, new ContentSearchCoverage(matches.Count, limit, null, null, false, false, "unknown", ["The configured store does not report search coverage."]));
+    }
+
     public Task<FileSnapshot?> GetFileSnapshotAsync(string fileIdOrPath, CancellationToken cancellationToken = default)
         => _innerStore.GetFileSnapshotAsync(fileIdOrPath, cancellationToken);
+
+    public async Task<FileSnapshot?> GetFileSnapshotAsync(RepositoryId repositoryId, string repositoryRoot, string relativePath, CancellationToken cancellationToken = default)
+    {
+        if (_innerStore is not IRootScopedFileSnapshotStore scopedStore) return null;
+        var indexedRoot = await _innerStore.GetRepositoryRootPathAsync(repositoryId, cancellationToken);
+        return indexedRoot is null
+            ? null
+            : await scopedStore.GetFileSnapshotAsync(repositoryId, indexedRoot, relativePath, cancellationToken);
+    }
 
     public Task<IReadOnlyList<MethodSummary>> FindMethodSummariesAsync(string query, CancellationToken cancellationToken = default)
         => _innerStore.FindMethodSummariesAsync(query, cancellationToken);
@@ -103,6 +123,16 @@ public sealed class SandboxRepositoryStore : IRepositoryStore, ISymbolStore, ISe
     public Task<IReadOnlyList<Symbol>> FindSymbolsContainingAsync(string query, CancellationToken cancellationToken = default)
         => ((ISymbolStore)_innerStore).FindSymbolsContainingAsync(query, cancellationToken);
 
+    public Task<Symbol?> FindReadContextTargetAsync(RepositoryId repositoryId, string filePath, string qualifiedName, CancellationToken cancellationToken = default)
+        => _innerStore is IReadContextStore contextStore
+            ? contextStore.FindReadContextTargetAsync(repositoryId, filePath, qualifiedName, cancellationToken)
+            : Task.FromResult<Symbol?>(null);
+
+    public Task<ReadContextCandidates> FindReadContextCandidatesAsync(Symbol target, IReadOnlyList<string> sourceNames, bool sourceNamesTruncated, int limit = 5, CancellationToken cancellationToken = default)
+        => _innerStore is IReadContextStore contextStore
+            ? contextStore.FindReadContextCandidatesAsync(target, sourceNames, sourceNamesTruncated, limit, cancellationToken)
+            : Task.FromResult(new ReadContextCandidates([], false, [], false, false, sourceNamesTruncated || sourceNames.Count > 64));
+
     public Task<IReadOnlyList<Symbol>> FindClosestSymbolsAsync(string query, int limit = 5, CancellationToken cancellationToken = default)
         => ((ISymbolStore)_innerStore).FindClosestSymbolsAsync(query, limit, cancellationToken);
 
@@ -136,4 +166,30 @@ public sealed class SandboxRepositoryStore : IRepositoryStore, ISymbolStore, ISe
 
     public Task<IReadOnlyList<OperationMetric>> GetOperationMetricsAsync(SessionId sessionId, CancellationToken cancellationToken = default)
         => ((ISessionStore)_innerStore).GetOperationMetricsAsync(sessionId, cancellationToken);
+
+    // IIndexFreshnessStore delegation. A sandbox shares the same persistent fence store, keyed by
+    // the sandbox root returned to the protocol engine. Unsupported stores fail closed.
+    public Task<IReadOnlyList<DirtyIndexRepository>> GetDirtyIndexRepositoriesAsync(CancellationToken cancellationToken = default)
+        => FreshnessStore.GetDirtyIndexRepositoriesAsync(cancellationToken);
+
+    public Task<DirtyIndexRepository?> GetDirtyIndexRepositoryAsync(string repositoryRoot, CancellationToken cancellationToken = default)
+        => FreshnessStore.GetDirtyIndexRepositoryAsync(repositoryRoot, cancellationToken);
+
+    public Task<bool> TryMarkIndexFilesDirtyAsync(string repositoryRoot, IReadOnlyList<string> files, CancellationToken cancellationToken = default)
+        => FreshnessStore.TryMarkIndexFilesDirtyAsync(repositoryRoot, files, cancellationToken);
+
+    public Task MarkIndexFilesDirtyAsync(string repositoryRoot, IReadOnlyList<string> files, CancellationToken cancellationToken = default)
+        => FreshnessStore.MarkIndexFilesDirtyAsync(repositoryRoot, files, cancellationToken);
+
+    public Task MarkIndexRepositoryDirtyAsync(string repositoryRoot, IReadOnlyList<string> files, CancellationToken cancellationToken = default)
+        => FreshnessStore.MarkIndexRepositoryDirtyAsync(repositoryRoot, files, cancellationToken);
+
+    public Task ClearDirtyIndexFilesAsync(string repositoryRoot, IReadOnlyList<string> files, CancellationToken cancellationToken = default)
+        => FreshnessStore.ClearDirtyIndexFilesAsync(repositoryRoot, files, cancellationToken);
+
+    public Task ClearDirtyIndexRepositoryAsync(string repositoryRoot, CancellationToken cancellationToken = default)
+        => FreshnessStore.ClearDirtyIndexRepositoryAsync(repositoryRoot, cancellationToken);
+
+    private IIndexFreshnessStore FreshnessStore
+        => _innerStore as IIndexFreshnessStore ?? throw new NotSupportedException("The repository store does not support durable index freshness state.");
 }

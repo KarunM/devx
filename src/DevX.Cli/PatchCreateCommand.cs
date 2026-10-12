@@ -53,7 +53,20 @@ public static class PatchCreateCommand
         var operationName = GetOption(args, "--op");
         if (string.IsNullOrWhiteSpace(operationName))
         {
-            Console.Error.WriteLine("Missing --op. Supported: CreateFile, DeleteFile, ReplaceMethod, InsertMethod, AddUsing, InsertText, ReplaceLineRange.");
+            Console.Error.WriteLine(
+                "Missing --op. Supported: " + string.Join(", ", PatchOperationCatalog.Names) + ".");
+            Console.Error.WriteLine(
+                "For a text edit use: devx replace <file> --old <text> --new <text>");
+            return 1;
+        }
+
+        // 1.6.10 regression: this used to write the artifact and let `patch validate` reject
+        // an invented op, so an agent spent a round trip learning the op did not exist. Fail
+        // here instead, name the op it typed, and point at `devx replace`, which is the tool
+        // it was reaching for.
+        if (!PatchOperationCatalog.IsKnown(operationName))
+        {
+            Console.Error.WriteLine(PatchOperationCatalog.UnknownOpMessage(operationName));
             return 1;
         }
 
@@ -88,7 +101,10 @@ public static class PatchCreateCommand
             MethodText: methodText,
             Position: GetOption(args, "--position"),
             Namespace: GetOption(args, "--namespace"),
-            BeforeState: beforeState);
+            BeforeState: beforeState,
+            OldText: GetOption(args, "--old-text") ?? GetOption(args, "--old"),
+            Occurrence: int.TryParse(GetOption(args, "--occurrence"), out var occurrence) ? occurrence : null,
+            ReplaceAll: HasFlag(args, "--all"));
 
         var operations = new List<PatchOperation>();
         var appending = HasFlag(args, "--append");
@@ -199,7 +215,9 @@ public static class PatchCreateCommand
 
     private static async Task<string?> TryReadBeforeStateAsync(string connectionString, Guid sessionGuid, string operationPath, string operationName)
     {
-        if (!operationName.Equals("ReplaceMethod", StringComparison.OrdinalIgnoreCase)
+        if (!operationName.Equals("ReplaceText", StringComparison.OrdinalIgnoreCase)
+            && !operationName.Equals("TextReplace", StringComparison.OrdinalIgnoreCase)
+            && !operationName.Equals("ReplaceMethod", StringComparison.OrdinalIgnoreCase)
             && !operationName.Equals("InsertMethod", StringComparison.OrdinalIgnoreCase)
             && !operationName.Equals("ReplaceLineRange", StringComparison.OrdinalIgnoreCase))
         {
@@ -222,7 +240,10 @@ public static class PatchCreateCommand
                 return null;
             }
 
-            var fullPath = Path.GetFullPath(Path.Combine(repositoryRoot, operationPath));
+            if (!RepositoryPathGuard.TryResolve(repositoryRoot, operationPath, out var fullPath, out _))
+            {
+                return null;
+            }
             return IOFile.Exists(fullPath) ? await IOFile.ReadAllTextAsync(fullPath) : null;
         }
         catch

@@ -18,9 +18,22 @@ return exitCode;
 static async Task<int> RunAsync(string[] args)
 {
     OperationContext.TaskLabel.Value = GetOption(args, "--task");
-    if (args.Length == 0 || args[0] is "--help" or "-h")
+    var helpCommand = "";
+    if (args.Length == 0 || WantsHelp(args, out helpCommand))
     {
-        PrintHelp();
+        // An agent asking for help wants the ten commands, not the manual: 17 of the 64
+        // unexplained calls in the v2 arm-B transcripts were `devx --help`.
+        //
+        // 1.6.10 regression: this only looked at args[0], so the RULES_B-style invocation
+        // with the global flags first (`devx --session x --agent codex --task v1 --help`)
+        // fell through to the dispatcher and answered "Unknown command '--session'".
+        // Help is now recognised wherever it sits among the leading options.
+        //
+        // `devx patch create --help` must reach the ops list, not the manual: an agent that
+        // never saw the op names invented them (see PatchOperationCatalog).
+        if (helpCommand is "patch create" or "patch") Console.WriteLine(PatchOperationCatalog.HelpText());
+        else if (args.Contains("--agent", StringComparer.Ordinal)) PrintAgentHelp();
+        else PrintHelp();
         return 0;
     }
 
@@ -35,7 +48,16 @@ static async Task<int> RunAsync(string[] args)
         return await InitAsync(args, GetOption(args, "--format") ?? "text");
     }
 
-    var format = GetOption(args, "--format") ?? "text";
+    if (!args.Contains("--session", StringComparer.Ordinal) && args[0] is ("index" or "search" or "read" or "method" or "type" or "callers" or "callees" or "references" or "snapshot" or "test" or "build" or "verify" or "run" or "replace" or "patch"))
+    {
+        args = await AddAutomaticSessionAsync(args);
+    }
+    if (args[0] is "search" or "read" or "snapshot" or "callers" or "callees" or "references" or "method" or "type")
+    {
+        await EnsureAutomaticIndexAsync();
+    }
+
+    var format = ResolveFormat(args);
     var command = args[0];
     var databasePath = ResolveDatabasePath();
     var connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
@@ -64,7 +86,7 @@ static async Task<int> RunAsync(string[] args)
                 return 1;
             }
 
-            await IndexAsync(connectionString, args[1], GetAgentLabel(args));
+            await IndexAsync(connectionString, args[1], args, GetAgentLabel(args));
             return 0;
 
         case "search":
@@ -75,6 +97,27 @@ static async Task<int> RunAsync(string[] args)
 
         case "patch":
             return await PatchAsync(connectionString, args, format);
+
+        case "replace":
+            {
+                var replaceStore = new SqliteStorageInitializer(connectionString);
+                await replaceStore.InitializeAsync();
+                var replaceSearch = new SearchService(replaceStore, replaceStore);
+                var replaceIndexer = new RepositoryIndexingService(replaceStore);
+                return await ReplaceCommand.RunAsync(args, Environment.CurrentDirectory, root =>
+                {
+                    var runner = new DotnetBuildTestService();
+                    return new VerifyAfterEdit(
+                        file => VerifyAfterEdit.RunBuildAsync(runner, root, file),
+                        files => runner.RunTestsAsync(root, files, TimeSpan.FromSeconds(300)),
+                        file => VerifyAfterEdit.FindRelevantTestFiles(root, file, replaceStore, replaceSearch));
+                },
+                // Re-indexes the edited file by default; `--no-index` opts out (brief OSS12 item 2).
+                args.Contains("--no-index", StringComparer.Ordinal)
+                    ? null
+                    : async file => { await replaceIndexer.ReindexFilesAsync(Environment.CurrentDirectory, [file]); },
+                replaceStore);
+            }
 
         case "health":
             return await HealthAsync(connectionString, args, format);
@@ -90,6 +133,9 @@ static async Task<int> RunAsync(string[] args)
 
         case "test":
             return await RunTestsAsync(connectionString, args, format);
+
+        case "verify":
+            return await RunVerifyAsync(connectionString, args, format);
 
         case "diagnostics":
             return await DiagnosticsAsync(connectionString, args, format);
@@ -139,8 +185,138 @@ static async Task<int> RunAsync(string[] args)
             return await McpServeAsync(connectionString);
 
         default:
-            Console.Error.WriteLine($"Unknown command '{command}'.");
+            Console.Error.WriteLine($"Unknown command '{command}'."
+                + (ClosestCommand(command) is { } near ? $" Did you mean '{near}'?" : " Run 'devx --help --agent' for the command list."));
             return 1;
+    }
+}
+
+// Options whose next token is their VALUE, not a command. `devx --session <id> --help`
+// must not read the session id as a command name.
+static bool HelpScanValueOption(string token) => token switch
+{
+    "--session" or "--agent" or "--task" or "--format" or "--op" or "--path"
+        or "--content" or "--content-file" or "--replacement" or "--replacement-file"
+        or "--method" or "--method-text" or "--method-text-file" or "--position"
+        or "--namespace" or "--containing-type" or "--type-id" or "--occurrence"
+        or "--old" or "--old-text" or "--new" or "--output" or "--input" or "--period"
+        or "--blocked-terms" or "--runtime" or "--target" or "--timeout" or "--org"
+        or "--team" or "--repo" or "--name" or "--capability" or "--failed-command"
+        or "--reason" or "--action" or "--command" or "--file" or "--coverage-start"
+        or "--coverage-end" or "--range" => true,
+    _ => false
+};
+
+// The two-word command forms, so `devx patch create --help` reaches the patch help while
+// `devx search Foo --help` is left alone (Foo is a query, not a subcommand).
+static bool TwoWordCommand(string two) => two switch
+{
+    "patch create" or "patch preview" or "patch validate" or "patch apply" or "patch rollback"
+        or "index status" or "index update" or "index changed" or "artifact create"
+        or "artifact delete" or "artifact path" or "search symbol" or "search text"
+        or "read method" or "read type" or "read section" or "report html" or "report export"
+        or "fallback record" or "fallback observe" or "session create" or "session list" => true,
+    _ => false
+};
+
+// --help has to work wherever it sits among the leading options -- RULES_B tells agents to
+// pass --session/--agent/--task on every call, and on 1.6.10 that turned `devx --help` into
+// "Unknown command '--session'". It must still NOT hijack a prompt that merely mentions it
+// (`devx ask "explain --help"`), so the scan stops as soon as real argument text begins.
+static bool WantsHelp(string[] args, out string command)
+{
+    command = "";
+    var words = 0;
+    for (var i = 0; i < args.Length; i++)
+    {
+        var token = args[i];
+        if (token is "--help" or "-h")
+        {
+            return true;
+        }
+        if (token.StartsWith('-'))
+        {
+            if (HelpScanValueOption(token))
+            {
+                i++;
+            }
+            continue;
+        }
+        words++;
+        if (words == 1)
+        {
+            command = token;
+            continue;
+        }
+        if (words == 2 && TwoWordCommand($"{command} {token}"))
+        {
+            command = $"{command} {token}";
+            continue;
+        }
+        return false;
+    }
+    return false;
+}
+
+// The commands an agent actually reaches for. Used only to turn a typo into a fix.
+static string? ClosestCommand(string command)
+{
+    string[] KnownCommands =
+    {
+        "init", "index", "search", "read", "snapshot", "session", "capabilities",
+        "test", "build", "verify", "patch", "replace", "mcp", "ask", "report", "version"
+    };
+    string? best = null;
+    var bestDistance = int.MaxValue;
+    foreach (var candidate in KnownCommands)
+    {
+        var distance = Levenshtein(command, candidate);
+        if (distance < bestDistance) { bestDistance = distance; best = candidate; }
+    }
+    // Only suggest an actual neighbour; "frobnicate" should get the help line instead.
+    return bestDistance <= Math.Max(2, command.Length / 3) ? best : null;
+}
+
+static int Levenshtein(string a, string b)
+{
+    var previous = new int[b.Length + 1];
+    var current = new int[b.Length + 1];
+    for (var j = 0; j <= b.Length; j++) previous[j] = j;
+    for (var i = 1; i <= a.Length; i++)
+    {
+        current[0] = i;
+        for (var j = 1; j <= b.Length; j++)
+            current[j] = Math.Min(Math.Min(current[j - 1] + 1, previous[j] + 1),
+                previous[j - 1] + (char.ToLowerInvariant(a[i - 1]) == char.ToLowerInvariant(b[j - 1]) ? 0 : 1));
+        (previous, current) = (current, previous);
+    }
+    return previous[b.Length];
+}
+
+// Deliberately short: this is the whole point of it existing next to PrintHelp. The edit
+// line is the one that matters -- on 1.6.10 it named only `patch`, so agents guessed at op
+// names instead of using `devx replace`, which is what they wanted.
+static void PrintAgentHelp()
+{
+    Console.WriteLine("devx cheat sheet (add --session <id>; piped output is already agent format)");
+    Console.WriteLine("  --format json still gives the full JSON shape; --format text gives the human text");
+    Console.WriteLine("  devx index .                      index the repo (or: index update <files>)");
+    Console.WriteLine("  devx search symbol <name>         find it; one hit returns its source too");
+    Console.WriteLine("  devx search text <literal>        literal text search");
+    Console.WriteLine("  devx read method \"<Qualified>\"    read ONE function; \"<file#Heading>\" for a doc section");
+    Console.WriteLine("  devx read <Name> <Name>          several symbols in ONE call, not one call each");
+    Console.WriteLine("  devx read type \"<Class>\"         declaration + bases + member outline (--full = body); bare names resolve when unique, no search first");
+    Console.WriteLine("  devx callers|callees|references \"<Qualified>\"   who calls / what it calls / where used: use before `search text`");
+    Console.WriteLine("  devx snapshot <file>              map a file: classes + functions, no bodies");
+    Console.WriteLine("  EDIT -- pick one:");
+    Console.WriteLine("  devx replace <file> --old <text> --new <text>   one text edit (--all | --occurrence n)");
+    Console.WriteLine("  devx patch create|validate|apply  whole-function edits by name (--op; see --help)");
+    Console.WriteLine("  then check it in ONE call: add --verify to the LAST edit, or run `devx verify`");
+    Console.WriteLine("  devx verify [build|test|both]     build + tests, one summary (`verify build` = build only)");
+    Console.WriteLine("  devx capabilities                 what this build can do");
+    if (IsAskConfigured(Environment.CurrentDirectory))
+    {
+        Console.WriteLine("  devx ask \"<question>\"             ask the configured LLM about this repo");
     }
 }
 
@@ -148,10 +324,10 @@ static async Task<int> McpServeAsync(string connectionString)
 {
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
-    var root = Path.GetFullPath(Environment.CurrentDirectory);
+    var root = FindRepositoryRoot(Environment.CurrentDirectory);
     var repository = new Repository(new RepositoryId(StableId(root)), Path.GetFileName(root), root);
     await store.UpsertRepositoryAsync(repository);
-    var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+    var session = await AutomaticSessionResolver.GetOrCreateAsync(store, root, repository);
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
     var indexer = new RepositoryIndexingService(store);
     var reference = new McpReferenceServer(
@@ -162,7 +338,10 @@ static async Task<int> McpServeAsync(string connectionString)
         (files, cancellationToken) => indexer.ReindexFilesAsync(root, files, cancellationToken),
         GetProductVersion(),
         cancellationToken => indexer.IndexAsync(root, cancellationToken),
-        cancellationToken => store.InitializeAsync(cancellationToken));
+        cancellationToken => store.InitializeAsync(cancellationToken),
+        // Left null so the server's start-of-session refresh and its "already current" answer
+        // degrade to indexing rather than failing when git cannot report changed files.
+        changedFilesAsync: indexer.GetChangedFilesAsync);
     await new McpStdioServer(reference).RunAsync(Console.In, Console.Out);
     return 0;
 }
@@ -197,17 +376,60 @@ static async Task<int> InitAsync(string[] args, string format)
     }
 }
 
-static async Task IndexAsync(string connectionString, string repositoryPath, string? agentLabel)
+static async Task IndexAsync(string connectionString, string repositoryPath, string[] args, string? agentLabel)
 {
     var started = DateTimeOffset.UtcNow;
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
     var indexer = new RepositoryIndexingService(store);
+
+    // `devx index .` on an untouched checkout used to walk and re-parse every file: on Django
+    // that is 3,292 files and over 13 minutes of work to arrive at the index that was already
+    // on disk. And on a checkout with one edited file it did the same 13 minutes, because the
+    // CLI had no notion of a changed file at all. The MCP server got both answers; the CLI --
+    // the way the benchmark drives it -- did not, which is the call that looked like a hang.
+    if (!args.Contains("--force", StringComparer.Ordinal) && await CurrentIndexAsync(indexer, repositoryPath) is { } answer)
+    {
+        await store.AddOperationMetricAsync(new OperationMetric("index", started, DateTimeOffset.UtcNow - started, true, null, AgentLabel: agentLabel));
+        Console.WriteLine(answer);
+        return;
+    }
+
     var result = await indexer.IndexAsync(repositoryPath);
     await store.AddOperationMetricAsync(new OperationMetric("index", started, DateTimeOffset.UtcNow - started, true, null, AgentLabel: agentLabel));
     Console.WriteLine(result.Reason is null
         ? $"Indexed {result.FilesIndexed} files."
         : $"Indexed {result.FilesIndexed} files. Reason: {result.Reason}.");
+}
+
+/// <summary>
+/// What `devx index .` should say instead of doing the full run, or null when the full run is
+/// genuinely needed. Git being unavailable (a plain folder, no repository) means DevX cannot
+/// tell what changed, and the answer to "cannot tell" is to do the work.
+/// </summary>
+static async Task<string?> CurrentIndexAsync(RepositoryIndexingService indexer, string repositoryPath)
+{
+    IReadOnlyList<string> changed;
+    try
+    {
+        changed = await indexer.GetChangedFilesAsync(repositoryPath);
+    }
+    catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+    {
+        return null;
+    }
+
+    var indexed = await indexer.CountIndexedFilesAsync(repositoryPath);
+
+    // Nothing is indexed yet, so there is nothing to bring up to date file by file.
+    if (indexed == 0) return null;
+    if (changed.Count == 0) return $"already current ({indexed} files).";
+
+    // A repository that is already indexed and has a handful of edited files is the common
+    // case an agent is in, and re-parsing its whole tree for those files is the expensive
+    // mistake. Only the files git names are re-indexed.
+    var refreshed = await indexer.ReindexChangedFilesAsync(repositoryPath);
+    return $"Indexed {refreshed.UpdatedFiles} files (re-indexed the {changed.Count} files git reports as changed, out of {indexed}).";
 }
 
 static async Task<int> IndexUpdateAsync(string connectionString, string[] args, string format)
@@ -267,7 +489,11 @@ static async Task<int> IndexUpdateAsync(string connectionString, string[] args, 
     var indexer = new RepositoryIndexingService(store);
     var started = DateTimeOffset.UtcNow;
     var result = await indexer.ReindexFilesAsync(repositoryRoot, filePaths.ToArray());
-    var updateSucceeded = result.UpdatedFiles > 0 || !result.SkippedFilePaths.Any(file => file.Reason.StartsWith("ERROR:", StringComparison.Ordinal));
+    var errorSkips = result.SkippedFilePaths.Where(file => file.Reason.StartsWith("ERROR:", StringComparison.Ordinal)).ToArray();
+    var hasNonMissingError = errorSkips.Any(file => file.Reason != "ERROR: file missing");
+    // Preserve partial success when at least one requested file refreshed and another is
+    // missing; the missing path remains fenced, so this does not claim the whole index is fresh.
+    var updateSucceeded = !hasNonMissingError && (result.UpdatedFiles > 0 || errorSkips.Length == 0);
     await store.AddOperationMetricAsync(new OperationMetric("index update", started, DateTimeOffset.UtcNow - started, updateSucceeded, sessionId,
         JsonSerializer.Serialize(new { UnsupportedFilesSkipped = result.SkippedFilePaths.Count(f => f.Reason.StartsWith("Unsupported file type", StringComparison.Ordinal)) }), GetAgentLabel(args)));
 
@@ -388,14 +614,25 @@ static async Task<int> IndexStatusAsync(string connectionString, string[] args, 
 
 static async Task<int> SearchAsync(string connectionString, string[] args, string format)
 {
-    if (args.Length < 4)
+    var implicitSymbol = args.Length >= 2 && args[1] is not ("symbol" or "text") && !args[1].StartsWith("--", StringComparison.Ordinal);
+    if (args.Length < (implicitSymbol ? 2 : 4))
     {
-        Console.Error.WriteLine("Usage: devx search <symbol|text> <query> --session <id>");
+        Console.Error.WriteLine("Usage: devx search <query> [--session <id>] | devx search <symbol|text> <query> [--session <id>]. A symbol hit shows the declaration line (bases for a class) and path:lines; for who-calls/where-used use devx callers|references instead of text search.");
         return 1;
     }
 
-    var searchKind = args[1];
-    var query = args[2];
+    var searchKind = implicitSymbol ? "symbol" : args[1];
+    // Several queries in one call: `devx search text "a" "b"` is the alternation `a|b`, so a
+    // guess that missed costs nothing instead of another round trip. In the 1.6.11 transcripts
+    // 34 of the 40 chained `search text` calls were a different word tried one at a time.
+    var queryParts = PositionalQueryParts(args, implicitSymbol ? 1 : 2);
+    if (queryParts.Count == 0)
+    {
+        Console.Error.WriteLine("Usage: devx search <query> [--session <id>] | devx search <symbol|text> <query> [<query> ...] [--session <id>]. A symbol hit shows the declaration line (bases for a class) and path:lines; for who-calls/where-used use devx callers|references instead of text search.");
+        return 1;
+    }
+
+    var query = searchKind == "text" ? string.Join('|', queryParts) : queryParts[0];
     var sessionId = GetOption(args, "--session");
     if (sessionId is null)
     {
@@ -414,9 +651,84 @@ static async Task<int> SearchAsync(string connectionString, string[] args, strin
 
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric($"search {searchKind}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
-    WriteResponse(response, format);
+    if (implicitSymbol && response.Success && response.Data is { ValueKind: JsonValueKind.Object } data && TryGetPropertyIgnoreCase(data, "Symbols", out var matches) && matches.ValueKind == JsonValueKind.Array && matches.GetArrayLength() == 0)
+    {
+        Console.Error.WriteLine("(no symbol match; showing text matches)");
+        response = await engine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.SearchText, sessionId, JsonSerializer.SerializeToElement(new { query })));
+        searchKind = "text";
+    }
+    // Search and read in one call. Only for a SINGLE hit: several equal hits must always be
+    // listed, never silently resolved to one. The hit line is printed first, so the agent
+    // keeps the identity (qualified name, path, span) as well as the source. Agent format
+    // only -- --format json keeps its exact shape.
+    string? autoRead = null;
+    if (format == "agent" && searchKind == "symbol" && response.Success && response.Data is { ValueKind: JsonValueKind.Object } searchData && TryGetPropertyIgnoreCase(searchData, "Symbols", out var singleHits) && singleHits.ValueKind == JsonValueKind.Array && singleHits.GetArrayLength() == 1)
+    {
+        var hit = singleHits[0];
+        var id = JsonPropertyText(hit, "Id");
+        var kind = JsonPropertyText(hit, "Kind");
+        if (id.Length > 0)
+        {
+            var operation = kind is "Class" or "Type" or "Record" or "Interface" or "Struct" or "Enum" ? "READ_TYPE" : "READ_METHOD";
+            var read = await engine.ExecuteAsync(new ProtocolRequest("1.0", operation, sessionId, JsonSerializer.SerializeToElement(new { id })));
+            if (read.Success) autoRead = AutoReadText(read);
+        }
+    }
+
+    // Every content hit is named for the symbol it sits in -- the one thing a plain `rg -n`
+    // cannot say, and what makes the next call a `read <symbol>` instead of a guess.
+    IReadOnlyDictionary<(string FileId, int Line), string>? enclosingSymbols = null;
+    if (format == "agent" && searchKind == "text" && response.Success && response.Data is { ValueKind: JsonValueKind.Object } hitData && TryGetPropertyIgnoreCase(hitData, "ContentMatches", out var contentHits) && contentHits.ValueKind == JsonValueKind.Array)
+    {
+        var points = contentHits.EnumerateArray()
+            .Take(10)
+            .Select(item => (FileId: JsonPropertyText(item, "FileId"), Line: int.TryParse(JsonPropertyText(item, "Line"), out var at) ? at : 0))
+            .Where(point => point.FileId.Length > 0 && point.Line > 0)
+            .ToList();
+        if (points.Count > 0)
+        {
+            enclosingSymbols = await store.FindEnclosingSymbolsAsync(points);
+        }
+    }
+
+    await RecordMetricAsync(store, new OperationMetric($"search {searchKind}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, query), GetAgentLabel(args)));
+    WriteResponse(response, format, enclosingSymbols);
+    if (autoRead is not null) Console.WriteLine(autoRead);
     return response.Success ? 0 : 1;
+}
+
+// Read/search history is best-effort: a read-only session database must not fail the command.
+static async Task RecordMetricAsync(ISessionStore store, OperationMetric metric)
+{
+    try { await store.AddOperationMetricAsync(metric); }
+    catch (Exception error) when (error is not OperationCanceledException)
+    {
+        Console.Error.WriteLine("history not recorded: " + error.Message);
+    }
+}
+
+static List<string> PositionalQueryParts(string[] args, int start)
+{
+    // The options `search` accepts that take a value, so their value is never mistaken for a
+    // query. Everything else that starts with `-` is a flag.
+    string[] valueOptions = ["--session", "--agent", "--task", "--format"];
+    var parts = new List<string>();
+    for (var i = start; i < args.Length; i++)
+    {
+        if (args[i].StartsWith('-'))
+        {
+            if (valueOptions.Contains(args[i], StringComparer.Ordinal))
+            {
+                i++;                       // skip the option's value
+            }
+
+            continue;
+        }
+
+        parts.Add(args[i]);
+    }
+
+    return parts;
 }
 
 static async Task<int> SessionAsync(string connectionString, string[] args, string format)
@@ -446,6 +758,49 @@ static Guid StableId(string value)
     Span<byte> guidBytes = stackalloc byte[16];
     hash.AsSpan(0, 16).CopyTo(guidBytes);
     return new Guid(guidBytes);
+}
+
+static async Task<string[]> AddAutomaticSessionAsync(string[] args)
+{
+    var connectionString = new SqliteConnectionStringBuilder { DataSource = ResolveDatabasePath() }.ToString();
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var root = FindRepositoryRoot(Environment.CurrentDirectory);
+    var repository = new Repository(new RepositoryId(StableId(root)), Path.GetFileName(root), root);
+    var session = await AutomaticSessionResolver.GetOrCreateAsync(store, root, repository);
+    return [.. args, "--session", session.Id.Value.ToString()];
+}
+
+static string FindRepositoryRoot(string path)
+{
+    var root = Path.GetFullPath(path);
+    for (var directory = new DirectoryInfo(root); directory is not null; directory = directory.Parent)
+    {
+        if (Directory.Exists(Path.Combine(directory.FullName, ".devx")) || Directory.Exists(Path.Combine(directory.FullName, ".git")) || IOFile.Exists(Path.Combine(directory.FullName, ".git")))
+            return directory.FullName;
+    }
+    return root;
+}
+
+static async Task EnsureAutomaticIndexAsync()
+{
+    var connectionString = new SqliteConnectionStringBuilder { DataSource = ResolveDatabasePath() }.ToString();
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var root = Path.GetFullPath(Environment.CurrentDirectory);
+    for (var directory = new DirectoryInfo(root); directory is not null; directory = directory.Parent)
+    {
+        if (Directory.Exists(Path.Combine(directory.FullName, ".devx")) || Directory.Exists(Path.Combine(directory.FullName, ".git")) || IOFile.Exists(Path.Combine(directory.FullName, ".git")))
+        {
+            root = directory.FullName;
+            break;
+        }
+    }
+    var repository = await store.GetRepositoryByRootPathAsync(root);
+    if (repository is not null && await store.CountIndexedFilesAsync(repository.Id) > 0)
+        return;
+    var result = await new RepositoryIndexingService(store).IndexAsync(root);
+    Console.Error.WriteLine($"(indexed {result.FilesIndexed} files)");
 }
 
 static async Task<int> PatchAsync(string connectionString, string[] args, string format)
@@ -499,18 +854,94 @@ static async Task<int> PatchAsync(string connectionString, string[] args, string
     var patchJson = await IOFile.ReadAllTextAsync(patchPath);
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
-    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var engine = WriteEngine(store, args);
     using var document = JsonDocument.Parse(patchJson);
+    // Brief OSS14 item 2: `--verify[=build|test|both]` on the edit commands. Opt-in, so a patch
+    // applied without the flag behaves exactly as it did in 1.6.13.
+    var verifyMode = VerifyAfterEdit.ParseVerifyFlag(args);
+    var patchedPaths = verifyMode is null ? [] : PatchPaths(document.RootElement);
     var request = new ProtocolRequest("1.0", ProtocolOperations.Patch, sessionId, document.RootElement.Clone());
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
     await store.AddOperationMetricAsync(new OperationMetric("patch", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, patchPath), GetAgentLabel(args)));
     WriteResponse(response, format);
-    return response.Success ? 0 : 1;
+    if (!response.Success) return 1;
+    return verifyMode is { } mode && patchedPaths.Count > 0
+        ? await VerifyPatchedFilesAsync(format, mode, patchedPaths)
+        : 0;
+}
+
+// Every `path` the patch names, at any depth: one file for a ReplaceMethod, several for a
+// multi-file patch. Blank and duplicate values are dropped.
+static IReadOnlyList<string> PatchPaths(JsonElement patch)
+{
+    var paths = new List<string>();
+    void Walk(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (property.NameEquals("path") && property.Value.ValueKind == JsonValueKind.String)
+                {
+                    var value = property.Value.GetString();
+                    if (!string.IsNullOrWhiteSpace(value) && !paths.Contains(value, StringComparer.Ordinal)) paths.Add(value);
+                }
+                else Walk(property.Value);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray()) Walk(item);
+        }
+    }
+    Walk(patch);
+    return paths;
+}
+
+// The verify half of `devx patch apply --verify`: the build for the first patched file (which
+// locates its project) and the relevant tests of every patched file, in one response.
+static async Task<int> VerifyPatchedFilesAsync(string format, VerifyMode mode, IReadOnlyList<string> paths)
+{
+    var root = FindRepositoryRoot(Environment.CurrentDirectory);
+    var runner = new DotnetBuildTestService();
+    var build = mode == VerifyMode.Test
+        ? VerifyAfterEdit.TestOnlyBuild(paths[0])
+        : await VerifyAfterEdit.RunBuildAsync(runner, root, paths[0]);
+    ExecutionRecord? tests = null;
+    if (build.Success && mode != VerifyMode.Build)
+    {
+        var relevant = paths.SelectMany(path => VerifyAfterEdit.FindRelevantTestFiles(root, path))
+            .Distinct(StringComparer.Ordinal).ToArray();
+        tests = await runner.RunTestsAsync(root, relevant, TimeSpan.FromSeconds(300));
+    }
+    var verification = new VerifyAfterEditResult(build, tests, build.Summary.StartsWith("skip", StringComparison.OrdinalIgnoreCase));
+    var success = build.Success && (tests?.Success ?? true);
+    if (format == "json")
+    {
+        Console.WriteLine(JsonSerializer.Serialize(new { Verify = new { Mode = VerifyAfterEdit.ModeName(mode), Build = build.Summary, Tests = tests?.Summary } }));
+    }
+    else if (success)
+    {
+        Console.WriteLine(VerifyAfterEdit.FormatOneLine("patch", verification));
+    }
+    else
+    {
+        foreach (var line in VerifyAfterEdit.FormatVerifyLines(verification)) Console.WriteLine(line);
+    }
+    return success ? 0 : 1;
 }
 
 static async Task<int> ArtifactAsync(string[] args, string format)
     => await DevX.Cli.ArtifactCommand.RunAsync(args.Skip(1).ToArray(), format);
+
+// Brief OSS12 item 2: a write re-indexes the files it touched, by default, on every path --
+// replace, patch apply, patch rollback, patch create/delete, and the MCP edits that go through
+// the same ProtocolEngine. `--no-index` is the opt-out. Agents used to be told to run
+// `devx index update` after each edit; 43 such calls in one series of 39 runs.
+static ProtocolEngine WriteEngine(SqliteStorageInitializer store, string[] args)
+    => new(new SearchService(store, store), store, store, new DotnetBuildTestService(), new PatchLifecycleService(),
+        refreshIndexAfterEdit: !args.Contains("--no-index", StringComparer.Ordinal));
 
 static async Task<int> PatchCreateAsync(string connectionString, string[] args, string format)
     => await DevX.Cli.PatchCreateCommand.RunAsync(connectionString, args, format);
@@ -610,7 +1041,7 @@ static async Task<int> PatchRollbackAsync(string connectionString, string[] args
     var patchJson = await IOFile.ReadAllTextAsync(patchPath);
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
-    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var engine = WriteEngine(store, args);
     using var document = JsonDocument.Parse(patchJson);
     var request = new ProtocolRequest("1.0", ProtocolOperations.PatchRollback, sessionId, document.RootElement.Clone());
     var started = DateTimeOffset.UtcNow;
@@ -640,7 +1071,8 @@ static async Task<int> RunBuildAsync(string connectionString, string[] args, str
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
     await store.AddOperationMetricAsync(new OperationMetric("build", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, GetOption(args, "--target")), GetAgentLabel(args)));
-    WriteResponse(response, format);
+    if (format == "json") WriteResponse(response, format);
+    else Console.WriteLine(ValidationOutputFormatter.Format(response, "build"));
     return response.Success ? 0 : 1;
 }
 
@@ -665,7 +1097,8 @@ static async Task<int> RunTestsAsync(string connectionString, string[] args, str
         runtime = GetOption(args, "--runtime"),
         target = GetOption(args, "--target"),
         targets = testFiles,
-        timeoutSeconds
+        timeoutSeconds,
+        filter = GetOption(args, "--filter")
     }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
@@ -678,6 +1111,50 @@ static async Task<int> RunTestsAsync(string connectionString, string[] args, str
     {
         Console.WriteLine(ValidationOutputFormatter.Format(response, "test"));
     }
+    return response.Success ? 0 : 1;
+}
+
+// Brief OSS14 item 1: `devx verify [build|test|both] [target...]` -- the build and the relevant
+// tests in ONE call with ONE compact summary. build and test stay exactly as they were, for a
+// caller that wants only one of the two; verify is the "edit then check" call agents were making
+// as three round-trips.
+static async Task<int> RunVerifyAsync(string connectionString, string[] args, string format)
+{
+    var sessionId = GetOption(args, "--session");
+    if (sessionId is null)
+    {
+        Console.Error.WriteLine("Missing --session. Verify requires a session (add --session <id>, or run from the repository).");
+        return 1;
+    }
+
+    var positionals = GetPositionals(args, 1);
+    var mode = positionals.Count > 0 && VerifyAfterEdit.IsModeName(positionals[0])
+        ? VerifyAfterEdit.ParseMode(positionals[0])
+        : VerifyMode.Both;
+    var targets = positionals.Count > 0 && VerifyAfterEdit.IsModeName(positionals[0])
+        ? positionals.Skip(1).ToArray()
+        : positionals.ToArray();
+    var timeoutSeconds = int.TryParse(GetOption(args, "--timeout"), out var parsedTimeout) && parsedTimeout > 0
+        ? parsedTimeout
+        : 300;
+
+    var store = new SqliteStorageInitializer(connectionString);
+    await store.InitializeAsync();
+    var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+    var request = new ProtocolRequest("1.0", ProtocolOperations.RunVerify, sessionId, JsonSerializer.SerializeToElement(new
+    {
+        runtime = GetOption(args, "--runtime"),
+        target = GetOption(args, "--target"),
+        mode = VerifyAfterEdit.ModeName(mode),
+        targets,
+        timeoutSeconds,
+        filter = GetOption(args, "--filter")
+    }));
+    var started = DateTimeOffset.UtcNow;
+    var response = await engine.ExecuteAsync(request);
+    await store.AddOperationMetricAsync(new OperationMetric("verify", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, GetOption(args, "--target")), GetAgentLabel(args)));
+    if (format == "json") WriteResponse(response, format);
+    else Console.WriteLine(ValidationOutputFormatter.FormatVerify(response));
     return response.Success ? 0 : 1;
 }
 
@@ -790,14 +1267,24 @@ static async Task<int> DoctorAsync(string connectionString, string[] args, strin
         await store.AddOperationMetricAsync(new OperationMetric("doctor", DateTimeOffset.UtcNow, TimeSpan.Zero, doctor.Health.Status != "Unavailable", sessionId, AgentLabel: GetAgentLabel(args)));
     }
 
+    // Which engine answers `devx search text` is a real diagnostic: with no ripgrep the
+    // in-process scan answers, and a caller comparing two machines needs to know that.
+    var searchEngine = DevX.Infrastructure.Storage.SQLite.RipgrepLocator.Locate(repositoryRoot);
+
     if (format == "json")
     {
-        Console.WriteLine(JsonSerializer.Serialize(doctor));
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            doctor.Health,
+            doctor.Findings,
+            SearchEngine = new { searchEngine.Engine, searchEngine.Executable, searchEngine.Version, Description = searchEngine.Describe() },
+        }));
         return doctor.Health.Status == "Unavailable" ? 1 : 0;
     }
 
     Console.WriteLine("DevX Doctor");
     Console.WriteLine($"Status: {doctor.Health.Status}");
+    Console.WriteLine($"Search engine: {searchEngine.Describe()}");
     foreach (var finding in doctor.Findings)
     {
         Console.WriteLine($"- [{finding.Severity}] {finding.Summary}");
@@ -815,7 +1302,10 @@ static async Task<int> DoctorAsync(string connectionString, string[] args, strin
 
 static async Task<int> SnapshotAsync(string connectionString, string[] args, string format)
 {
-    if (args.Length < 2)
+    var target = args.Skip(1).FirstOrDefault(argument => !argument.StartsWith("--", StringComparison.Ordinal)
+        && argument != GetOption(args, "--session") && argument != GetOption(args, "--agent")
+        && argument != GetOption(args, "--task") && argument != GetOption(args, "--format"));
+    if (target is null)
     {
         Console.Error.WriteLine("Usage: devx snapshot <file> --session <id>");
         return 1;
@@ -830,10 +1320,12 @@ static async Task<int> SnapshotAsync(string connectionString, string[] args, str
 
     var store = new SqliteStorageInitializer(connectionString);
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
-    var request = new ProtocolRequest("1.0", ProtocolOperations.GetFileSnapshot, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
+    var snapshotPayload = new Dictionary<string, string> { ["query"] = target };
+    if (format == "agent") snapshotPayload["format"] = format;
+    var request = new ProtocolRequest("1.0", ProtocolOperations.GetFileSnapshot, sessionId, JsonSerializer.SerializeToElement(snapshotPayload));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric("snapshot", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric("snapshot", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, target), GetAgentLabel(args)));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -867,7 +1359,7 @@ static async Task<int> MethodAsync(string connectionString, string[] args, strin
     var request = new ProtocolRequest("1.0", operation, sessionId, JsonSerializer.SerializeToElement(new { query = args[2] }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric($"method {action}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric($"method {action}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -893,7 +1385,7 @@ static async Task<int> TypeAsync(string connectionString, string[] args, string 
     var request = new ProtocolRequest("1.0", ProtocolOperations.GetTypeOperation, sessionId, JsonSerializer.SerializeToElement(new { query = args[2] }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric("type get", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric("type get", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -919,16 +1411,133 @@ static async Task<int> ReferencesAsync(string connectionString, string[] args, s
     var request = new ProtocolRequest("1.0", ProtocolOperations.GetReferences, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric("get references", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric("get references", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
+    // Text-backed (Python) lookups list their candidates exactly like `read` does.
+    var ambiguousTarget = response.Success || format == "json" ? null : response.Errors.FirstOrDefault(error => error.Code == "AmbiguousMatch" && error.Candidates is { Count: > 0 });
+    if (ambiguousTarget is not null)
+    {
+        Console.WriteLine(FormatAmbiguousCandidates(ambiguousTarget, args[1]));
+        return 2;
+    }
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
 
-static async Task<int> ReadAsync(string connectionString, string[] args, string format)
+static async Task<int> ReadAsync(string connectionString, string[] args, string format,
+    List<(string Target, ProtocolResponse Response)>? batchResponses = null)
 {
+    var positional = args.Skip(1).TakeWhile(argument => !argument.StartsWith("--", StringComparison.Ordinal)).ToArray();
+    var inferredKind = positional.Length == 1;
+    if (args.Length > 1 && args[1] == "method")
+    {
+        if (!TryParseExplicitMethodRead(args, out var methodTargets, out var methodOptions, out var parseError))
+        {
+            Console.Error.WriteLine($"invalid read method request: {parseError}");
+            return 2;
+        }
+
+        var hasId = GetOption(args, "--id") is not null;
+        var hasQuery = GetOption(args, "--query") is not null;
+        if (hasId && hasQuery)
+        {
+            Console.Error.WriteLine("invalid read method request: use either --id or --query, not both");
+            return 2;
+        }
+
+        if ((hasId || hasQuery) && methodTargets.Length > 0)
+        {
+            Console.Error.WriteLine("invalid read method request: --id/--query cannot be combined with positional targets");
+            return 2;
+        }
+
+        if (methodTargets.Length == 0 && !hasId && !hasQuery)
+        {
+            Console.Error.WriteLine("invalid read method request: provide a target or use --id/--query");
+            return 2;
+        }
+
+        if (methodTargets.Length > 10)
+        {
+            Console.Error.WriteLine("invalid read method request: at most 10 targets are allowed");
+            return 2;
+        }
+
+        if (methodTargets.Length > 1)
+        {
+            if (string.IsNullOrWhiteSpace(GetOption(args, "--session")))
+            {
+                Console.Error.WriteLine("invalid read method batch: --session is required");
+                return 2;
+            }
+
+            var results = new List<(string Target, ProtocolResponse Response)>();
+            foreach (var target in methodTargets)
+            {
+                var singleArgs = new[] { "read", "method", target }.Concat(methodOptions).ToArray();
+                await ReadAsync(connectionString, singleArgs, format, results);
+            }
+
+            if (format == "json")
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new
+                {
+                    results = results.Select(item => new
+                    {
+                        target = item.Target,
+                        success = item.Response.Success,
+                        data = item.Response.Data,
+                        errors = item.Response.Errors
+                    })
+                }));
+            }
+            else
+            {
+                foreach (var item in results)
+                {
+                    Console.WriteLine($"=== {item.Target} ===");
+                    if (!item.Response.Success)
+                    {
+                        Console.WriteLine($"error [{item.Target}]: {string.Join("; ", item.Response.Errors.Select(error => error.Message))}");
+                    }
+                    else if (format == "agent")
+                    {
+                        WriteResponse(item.Response, format);
+                    }
+                    else
+                    {
+                        WriteSourceResponse(item.Response, HasFlag(methodOptions, "--context"));
+                    }
+                }
+            }
+
+            return results.Any(item => !item.Response.Success) ? 2 : 0;
+        }
+    }
+
+    if (positional.Length > 1 && positional[0] is not ("file" or "method" or "type" or "section"))
+    {
+        var failed = false;
+        foreach (var target in positional)
+        {
+            Console.WriteLine($"=== {target} ===");
+            var one = await ReadAsync(connectionString, ["read", target, .. args.Skip(1 + positional.Length)], format);
+            if (one != 0) failed = true;
+        }
+        return failed ? 2 : 0;
+    }
+    if (positional.Length == 1)
+    {
+        var target = positional[0];
+        var kind = target.Contains('#') ? "section" :
+            ((target.Contains(Path.DirectorySeparatorChar) || Path.HasExtension(target)) && IOFile.Exists(target) ? "file" : "method");
+        var remainder = args.Skip(2).ToArray();
+        args = ["read", kind, target, .. remainder];
+        if (kind == "file" && !HasFlag(args, "--full") && GetOption(args, "--range") is null) args = [.. args, "--full"];
+        positional = [kind, target];
+    }
     if (args.Length < 3)
     {
-        Console.Error.WriteLine("Usage: devx read <file|method|type> <target> --session <id> [--range start:end|--full]");
+        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies; read type (outline) also shows a bases: line with each base's path -- follow a hierarchy one read type per level, no search between; it answers 'which methods/fields does X have' -- use --full only when you need bodies. callers/references work for Python too (text-backed); callees does not -- read the body instead. Bare or Class.member names resolve when unique: do not search first when you know the name.");
         return 1;
     }
 
@@ -945,6 +1554,20 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
     ProtocolRequest request;
     var started = DateTimeOffset.UtcNow;
+    var readTarget = args[2];
+    if (action is "method" or "type" && GetOption(args, "--id") is null && GetOption(args, "--query") is null && !readTarget.Contains('.'))
+    {
+        var lookup = await engine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.SearchSymbol, sessionId, JsonSerializer.SerializeToElement(new { query = readTarget })));
+        if (lookup.Data is { ValueKind: JsonValueKind.Object } result && TryGetPropertyIgnoreCase(result, "Symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array)
+        {
+            var exact = symbols.EnumerateArray().Where(symbol => TryGetPropertyIgnoreCase(symbol, "Name", out var name) && name.GetString() == readTarget).ToArray();
+            if (exact.Length == 1)
+            {
+                var symbolKind = JsonPropertyText(exact[0], "Kind");
+                if (inferredKind && symbolKind is "Class" or "Type" or "Record" or "Interface" or "Struct" or "Enum") action = "type";
+            }
+        }
+    }
 
     if (action == "file")
     {
@@ -956,7 +1579,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
             return 1;
         }
 
-        request = new ProtocolRequest("1.0", "READ_FILE", sessionId, JsonSerializer.SerializeToElement(new { query = args[2], range, full }), GetAgentLabel(args));
+        request = new ProtocolRequest("1.0", "READ_FILE", sessionId, JsonSerializer.SerializeToElement(new { query = readTarget, range, full }), GetAgentLabel(args));
     }
     else if (action == "method")
     {
@@ -964,12 +1587,14 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
         var query = GetOption(args, "--query");
         if (id is null && query is null)
         {
-            query = args[2];
+            query = readTarget;
         }
 
-        request = id is not null
-            ? new ProtocolRequest("1.0", "READ_METHOD", sessionId, JsonSerializer.SerializeToElement(new { id }), GetAgentLabel(args))
-            : new ProtocolRequest("1.0", "READ_METHOD", sessionId, JsonSerializer.SerializeToElement(new { query }), GetAgentLabel(args));
+        var methodPayload = new Dictionary<string, object?>();
+        if (id is not null) methodPayload["id"] = id;
+        else methodPayload["query"] = query;
+        if (HasFlag(args, "--context")) methodPayload["context"] = true;
+        request = new ProtocolRequest("1.0", "READ_METHOD", sessionId, JsonSerializer.SerializeToElement(methodPayload), GetAgentLabel(args));
     }
     else if (action == "type")
     {
@@ -977,19 +1602,39 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
         var query = GetOption(args, "--query");
         if (id is null && query is null)
         {
-            query = args[2];
+            query = readTarget;
         }
 
         request = id is not null
-            ? new ProtocolRequest("1.0", "READ_TYPE", sessionId, JsonSerializer.SerializeToElement(new { id }), GetAgentLabel(args))
-            : new ProtocolRequest("1.0", "READ_TYPE", sessionId, JsonSerializer.SerializeToElement(new { query }), GetAgentLabel(args));
+            ? new ProtocolRequest("1.0", "READ_TYPE", sessionId, JsonSerializer.SerializeToElement(new { id, full = HasFlag(args, "--full") }), GetAgentLabel(args))
+            : new ProtocolRequest("1.0", "READ_TYPE", sessionId, JsonSerializer.SerializeToElement(new { query, full = HasFlag(args, "--full") }), GetAgentLabel(args));
     }
     else if (action == "section")
     {
         var separator = args[2].LastIndexOf('#');
-        if (separator <= 0 || separator == args[2].Length - 1)
+        if (separator <= 0)
         {
-            Console.Error.WriteLine("Usage: devx read section <file>#<heading> --session <id>");
+            // 19 of 23 `read section` calls in the v2 arm-B transcripts failed on exactly
+            // this -- a missing '#Heading'. Answer with the headings rather than an error,
+            // so the retry is a paste instead of another search. A trailing '#' is not this
+            // case: it names nothing, and the engine answers it with the file itself.
+            var snapshot = await engine.ExecuteAsync(new ProtocolRequest("1.0", ProtocolOperations.GetFileSnapshot, sessionId, JsonSerializer.SerializeToElement(new { query = args[2] }), GetAgentLabel(args)));
+            Console.Error.WriteLine("devx read section needs a heading: devx read section <file>#<heading>");
+            var headings = new List<string>();
+            var payload = snapshot.Data;
+            // The snapshot payload nests its collections under Data.Snapshot.
+            if (payload is { ValueKind: JsonValueKind.Object } outer && TryGetPropertyIgnoreCase(outer, "Snapshot", out var inner))
+                payload = inner;
+            if (snapshot.Success && payload is { ValueKind: JsonValueKind.Object } snapData)
+                foreach (var collection in new[] { "Types", "Methods" })
+                    if (TryGetPropertyIgnoreCase(snapData, collection, out var items) && items.ValueKind == JsonValueKind.Array)
+                        headings.AddRange(items.EnumerateArray().Select(item => JsonPropertyText(item, "Name")).Where(name => name.Length > 0));
+            if (headings.Count == 0) Console.Error.WriteLine($"no headings found in '{args[2]}' (is it indexed?)");
+            else
+            {
+                Console.Error.WriteLine($"headings in {args[2]}:");
+                foreach (var heading in headings) Console.Error.WriteLine($"  devx read section \"{args[2]}#{heading}\"");
+            }
             return 1;
         }
 
@@ -1001,21 +1646,94 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     }
     else
     {
-        Console.Error.WriteLine("Usage: devx read <file|method|type> <target> --session <id> [--range start:end|--full]");
+        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies; read type (outline) also shows a bases: line with each base's path -- follow a hierarchy one read type per level, no search between; it answers 'which methods/fields does X have' -- use --full only when you need bodies. callers/references work for Python too (text-backed); callees does not -- read the body instead. Bare or Class.member names resolve when unique: do not search first when you know the name.");
         return 1;
     }
 
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric($"read {action}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
-    if (format == "json" || action == "type")
+    await RecordMetricAsync(store, new OperationMetric($"read {action}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
+    if (batchResponses is not null)
+    {
+        batchResponses.Add((args[2], response));
+        return response.Success ? 0 : 1;
+    }
+    var ambiguousError = response.Success || format == "json" ? null : response.Errors.FirstOrDefault(error => error.Code == "AmbiguousMatch" && error.Candidates is { Count: > 0 });
+    if (ambiguousError is not null)
+    {
+        Console.WriteLine(FormatAmbiguousCandidates(ambiguousError, args[2]));
+        return 2;
+    }
+    if (format is "json" or "agent" || action == "type")
     {
         WriteResponse(response, format);
     }
     else
     {
-        WriteSourceResponse(response);
+        WriteSourceResponse(response, HasFlag(args, "--context"));
     }
     return response.Success ? 0 : 1;
+}
+
+static string FormatAmbiguousCandidates(ProtocolError error, string target)
+{
+    var total = error.TotalCandidates ?? error.Candidates!.Count;
+    var lines = new List<string> { $"ambiguous: {target} matches {total} symbols" };
+    foreach (var candidate in error.Candidates!.Take(10))
+        lines.Add($"{candidate.QualifiedName}  {RelativeAgentPath(candidate.FilePath ?? string.Empty)}:{candidate.StartLine}-{candidate.EndLine}  {candidate.Kind}");
+    lines.Add($"TotalCandidates: {total}" + (total > 10 ? " (showing 10)" : string.Empty));
+    lines.Add("Symbol matched multiple definitions; pass a qualified name from the list above.");
+    return string.Join("\n", lines);
+}
+
+static bool TryParseExplicitMethodRead(string[] args, out string[] targets, out string[] options, out string? error)
+{
+    var parsedTargets = new List<string>();
+    var parsedOptions = new List<string>();
+    var valueOptions = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "--id", "--query", "--session", "--agent", "--format", "--task", "--range"
+    };
+    var flagOptions = new HashSet<string>(StringComparer.Ordinal) { "--context", "--full" };
+
+    for (var index = 2; index < args.Length; index++)
+    {
+        var argument = args[index];
+        if (!argument.StartsWith("--", StringComparison.Ordinal))
+        {
+            parsedTargets.Add(argument);
+            continue;
+        }
+
+        if (flagOptions.Contains(argument))
+        {
+            parsedOptions.Add(argument);
+            continue;
+        }
+
+        if (!valueOptions.Contains(argument))
+        {
+            targets = [];
+            options = [];
+            error = $"unrecognized option or extra argument '{argument}'";
+            return false;
+        }
+
+        if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
+        {
+            targets = [];
+            options = [];
+            error = $"option '{argument}' requires a value";
+            return false;
+        }
+
+        parsedOptions.Add(argument);
+        parsedOptions.Add(args[++index]);
+    }
+
+    targets = parsedTargets.ToArray();
+    options = parsedOptions.ToArray();
+    error = null;
+    return true;
 }
 
 static bool HasFlag(string[] args, string name)
@@ -1031,11 +1749,25 @@ static bool HasFlag(string[] args, string name)
     return false;
 }
 
+static bool TryGetPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)
+{
+    if (element.ValueKind == JsonValueKind.Object)
+    {
+        foreach (var property in element.EnumerateObject())
+            if (property.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) { value = property.Value; return true; }
+    }
+    value = default;
+    return false;
+}
+
+static string JsonPropertyText(JsonElement element, string name)
+    => TryGetPropertyIgnoreCase(element, name, out var value) ? value.ToString() : string.Empty;
+
 static async Task<int> CallersAsync(string connectionString, string[] args, string format)
 {
     if (args.Length < 2)
     {
-        Console.Error.WriteLine("Usage: devx callers <method> --session <id>");
+        Console.Error.WriteLine("Usage: devx callers <method> [--full] --session <id>");
         return 1;
     }
 
@@ -1049,10 +1781,17 @@ static async Task<int> CallersAsync(string connectionString, string[] args, stri
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
-    var request = new ProtocolRequest("1.0", ProtocolOperations.GetCallers, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
+    var request = new ProtocolRequest("1.0", ProtocolOperations.GetCallers, sessionId, JsonSerializer.SerializeToElement(new { query = args[1], full = HasFlag(args, "--full") }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric("get callers", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric("get callers", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
+    // Text-backed (Python) lookups list their candidates exactly like `read` does.
+    var ambiguousTarget = response.Success || format == "json" ? null : response.Errors.FirstOrDefault(error => error.Code == "AmbiguousMatch" && error.Candidates is { Count: > 0 });
+    if (ambiguousTarget is not null)
+    {
+        Console.WriteLine(FormatAmbiguousCandidates(ambiguousTarget, args[1]));
+        return 2;
+    }
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -1078,7 +1817,7 @@ static async Task<int> CalleesAsync(string connectionString, string[] args, stri
     var request = new ProtocolRequest("1.0", ProtocolOperations.GetCallees, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric("get callees", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric("get callees", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -1154,6 +1893,17 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
     var traceAsk = HasFlag(args, "--trace-ask") || HasFlag(args, "--debug-ask");
     var useContextWorkflow = HasFlag(args, "--context-workflow");
 
+    // Refuse before anything else -- before reading stdin, before touching the index, and
+    // well before any HTTP attempt. `devx ask` with no configured endpoint used to dial
+    // http://localhost:8080 and fail slowly with a bare connection error.
+    var llmConfig = LoadLlmConfig(FindRepositoryRoot(Environment.CurrentDirectory));
+    if (llmConfig is null)
+    {
+        Console.Error.WriteLine(
+            "devx ask is not configured (set llm.endpoint in .devx/config.json)");
+        return 1;
+    }
+
     var promptBuilder = new System.Text.StringBuilder();
     for (var i = 1; i < args.Length; i++)
     {
@@ -1194,7 +1944,7 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
         Console.WriteLine($"session_reused={(!bootstrap.SessionCreated).ToString().ToLowerInvariant()}");
         Console.WriteLine("phase=RepoMap");
 
-        using var contextLlm = LlmClientFactory.Create(LoadLlmConfig(Environment.CurrentDirectory) ?? new LlmConfig("mlx-lm", "mlx-community/Qwen3-8B-4bit", "http://localhost:8080", 0.7, 8192, 8192, 4000, 8));
+        using var contextLlm = LlmClientFactory.Create(llmConfig);
         var contextEngine = new ProtocolEngine(new SearchService(store, (ISymbolStore)store), (ISessionStore)store, store);
         var contextWorkflow = new AskContextWorkflow(contextLlm, contextEngine, traceAsk);
         var contextResult = await contextWorkflow.RunAsync(userPrompt, bootstrap.RepoMap, bootstrap.Session);
@@ -1222,7 +1972,7 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
             return 0;
         }
 
-        var editLlm = LlmClientFactory.Create(LoadLlmConfig(Environment.CurrentDirectory) ?? new LlmConfig("mlx-lm", "mlx-community/Qwen3-8B-4bit", "http://localhost:8080", 0.7, 8192, 8192, 4000, 8));
+        var editLlm = LlmClientFactory.Create(llmConfig);
         var editWorkflow = new AskEditWorkflow(editLlm, traceAsk);
         if (traceAsk)
         {
@@ -1244,7 +1994,9 @@ static async Task<int> AskAsync(string connectionString, string[] args, string f
 
     var root = await store.GetRepositoryRootPathAsync(session.RepositoryId);
     var repositoryRoot = root ?? Environment.CurrentDirectory;
-    var llmConfig = LoadLlmConfig(repositoryRoot) ?? new LlmConfig("mlx-lm", "mlx-community/Qwen3-8B-4bit", "http://localhost:8080", 0.7, 8192, 8192, 4000, 8);
+    // The session's own repository root wins if it has a config; otherwise keep the config
+    // the gate above already resolved. Never invent an endpoint (1.6.11).
+    llmConfig = LoadLlmConfig(repositoryRoot) ?? llmConfig;
     llmConfig = ApplyEnvOverrides(llmConfig);
 
     SandboxManager? sandbox = null;
@@ -1439,6 +2191,13 @@ static async Task<int> CapabilitiesAsync(string connectionString, string[] args,
     }
     return 0;
 }
+
+// `devx ask` needs an LLM endpoint the user actually configured. Nothing else in the CLI
+// does, so this is what decides whether `ask` is advertised -- and whether it is allowed to
+// try at all. Before 1.6.11 an unconfigured repo silently fell back to
+// http://localhost:8080 and the call failed minutes later with a connection error that told
+// the agent nothing; the endpoint is never guessed now.
+static bool IsAskConfigured(string path) => LoadLlmConfig(FindRepositoryRoot(path)) is not null;
 
 static LlmConfig? LoadLlmConfig(string repositoryRoot)
 {
@@ -1882,11 +2641,21 @@ static string? GetPatchPath(string[] args)
     return null;
 }
 
-static void WriteResponse(ProtocolResponse response, string format)
+static string ResolveFormat(string[] args)
+    => OutputFormat.Resolve(GetOption(args, "--format"), OutputFormat.LooksLikeAnAgent());
+
+static void WriteResponse(ProtocolResponse response, string format,
+    IReadOnlyDictionary<(string FileId, int Line), string>? enclosingSymbols = null)
 {
     if (format == "json")
     {
         Console.WriteLine(JsonSerializer.Serialize(response));
+        return;
+    }
+
+    if (format == "agent")
+    {
+        Console.WriteLine(FormatAgentResponse(response, enclosingSymbols));
         return;
     }
 
@@ -1902,7 +2671,109 @@ static void WriteResponse(ProtocolResponse response, string format)
     }
 }
 
-static void WriteSourceResponse(ProtocolResponse response)
+static string FormatAgentResponse(ProtocolResponse response,
+    IReadOnlyDictionary<(string FileId, int Line), string>? enclosingSymbols = null)
+{
+    if (!response.Success) return string.Join("\n", response.Errors.Select(error => $"error: {error.Message}"));
+    if (response.Data is not { } data) return string.Empty;
+    if (TryGetPropertyIgnoreCase(data, "symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array && symbols.GetArrayLength() > 0)
+    {
+        var hits = symbols.EnumerateArray().Take(10).Select(item => $"{JsonPropertyText(item, "Kind").ToLowerInvariant()} {JsonPropertyText(item, "QualifiedName")} {RelativeAgentPath(JsonPropertyText(item, "FilePath"))}:{JsonPropertyText(item, "StartLine")}-{JsonPropertyText(item, "EndLine")}").ToList();
+        if (symbols.GetArrayLength() > hits.Count) hits.Add($"... {symbols.GetArrayLength() - hits.Count} more");
+        return string.Join("\n", hits);
+    }
+    if (TryGetPropertyIgnoreCase(data, "contentMatches", out var matches) && matches.ValueKind == JsonValueKind.Array)
+    {
+        var hits = matches.EnumerateArray().Take(10).Select(item =>
+        {
+            var preview = JsonPropertyText(item, "Preview").Trim();
+            var line = JsonPropertyText(item, "Line");
+            var symbol = enclosingSymbols is not null
+                && enclosingSymbols.TryGetValue((JsonPropertyText(item, "FileId"), int.TryParse(line, out var at) ? at : 0), out var name)
+                    ? $" [{name}]"
+                    : string.Empty;
+            return $"{RelativeAgentPath(JsonPropertyText(item, "Path"))}:{line}: {preview[..Math.Min(120, preview.Length)]}{symbol}";
+        }).ToList();
+        if (matches.GetArrayLength() > hits.Count)
+        {
+            // The cap stays; the message now says what to do about it. "N more" alone told the
+            // agent nothing, which is why the next call was usually the same search reworded.
+            hits.Add($"... {matches.GetArrayLength() - hits.Count} more: narrow with a second word, "
+                     + "alternation (a|b), or several queries in one call, e.g. devx search text \"a\" \"b\"");
+        }
+
+        var coverageNote = ContentSearchCoverageFormatter.Format(data);
+        if (coverageNote is not null) hits.Add(coverageNote);
+
+        return string.Join("\n", hits);
+    }
+    if (TextReferences.Format(data) is { } textBacked) return textBacked;
+    foreach (var collection in new[] { "Callers", "Callees", "References" })
+    {
+        if (!TryGetPropertyIgnoreCase(data, collection, out var items)) continue;
+        if (items.ValueKind == JsonValueKind.Object && TryGetPropertyIgnoreCase(items, collection, out var nested)) items = nested;
+        if (items.ValueKind == JsonValueKind.Array)
+            return string.Join("\n", items.EnumerateArray().Select(item => $"{RelativeAgentPath(JsonPropertyText(item, "FilePath"))}:{JsonPropertyText(item, collection == "References" ? "LineNumber" : "CallSiteLine")}: {JsonPropertyText(item, "QualifiedName")}"));
+    }
+    if (TryGetPropertyIgnoreCase(data, "snapshot", out var snapshot))
+    {
+        var lines = new List<string> { $"{RelativeAgentPath(JsonPropertyText(snapshot, "Path"))} ({JsonPropertyText(snapshot, "Language")}, {JsonPropertyText(snapshot, "ApproximateLoc")} lines)" };
+        if (TryGetPropertyIgnoreCase(snapshot, "types", out var types) && types.ValueKind == JsonValueKind.Array)
+            lines.AddRange(types.EnumerateArray().Where(type => JsonPropertyText(type, "StartLine").Length > 0 && JsonPropertyText(type, "EndLine").Length > 0).Select(type => $"type {JsonPropertyText(type, "Name")} :{JsonPropertyText(type, "StartLine")}-{JsonPropertyText(type, "EndLine")}"));
+        if (TryGetPropertyIgnoreCase(snapshot, "methods", out var methods) && methods.ValueKind == JsonValueKind.Array)
+            lines.AddRange(methods.EnumerateArray().Where(method => JsonPropertyText(method, "StartLine").Length > 0 && JsonPropertyText(method, "EndLine").Length > 0).Select(method => $"  method {JsonPropertyText(method, "Name")}({AgentSignature(JsonPropertyText(method, "Signature"))}) :{JsonPropertyText(method, "StartLine")}-{JsonPropertyText(method, "EndLine")}"));
+        return string.Join("\n", lines);
+    }
+    if (TryGetPropertyIgnoreCase(data, "path", out var path) && TryGetPropertyIgnoreCase(data, "source", out var source))
+    {
+        var p = RelativeAgentPath(path.GetString() ?? "");
+        int.TryParse(JsonPropertyText(data, "StartLine"), out var start); int.TryParse(JsonPropertyText(data, "EndLine"), out var end);
+        var name = JsonPropertyText(data, "QualifiedName");
+        var kind = JsonPropertyText(data, "Kind");
+        // A `read section <file>#<name>` asked for a heading and got a symbol; say which one,
+        // so the caller can tell a resolution from a literal match.
+        var resolved = string.Empty;
+        if (TryGetPropertyIgnoreCase(data, "Metadata", out var metadata) && metadata.ValueKind == JsonValueKind.Object
+            && JsonPropertyText(metadata, "ResolvedVia") == "section-symbol")
+        {
+            var note = JsonPropertyText(metadata, "Message");
+            if (note.Length > 0) resolved = note + "\n";
+        }
+        var context = TryGetPropertyIgnoreCase(data, "Metadata", out metadata) ? FormatReadContext(metadata) : string.Empty;
+        var cappedNote = !string.IsNullOrEmpty(kind) && TryGetPropertyIgnoreCase(data, "Truncated", out var truncatedFlag) && truncatedFlag.ValueKind == JsonValueKind.True
+            ? $" (truncated: {JsonPropertyText(data, "ReturnedLines")} of {end - start + 1} lines shown; pass --full for the rest)" : string.Empty;
+        return $"{resolved}{p}:{start}-{end}{(string.IsNullOrEmpty(name) ? "" : $" {name}")}{(string.IsNullOrEmpty(kind) ? "" : $" [{kind}]")}{cappedNote}\n{source.GetString()}{context}";
+    }
+    return data.GetRawText();
+}
+
+// The source an auto-read appends to a single-hit search result. An EXPLICIT read always
+// returns its source (the 1.6.1 paging stands); this cap is only for source the agent did
+// not ask for, so an unlucky one-hit search cannot dump a 900-line method into the context.
+static string AutoReadText(ProtocolResponse read)
+{
+    const int AutoReadMaxLines = 80;
+    var text = FormatAgentResponse(read);
+    if (read.Data is not { ValueKind: JsonValueKind.Object } data) return text;
+    var head = text.Split('\n')[0];
+    int.TryParse(JsonPropertyText(data, "StartLine"), out var start);
+    int.TryParse(JsonPropertyText(data, "EndLine"), out var end);
+    var span = end >= start && start > 0 ? end - start + 1 : 0;
+    if (span <= AutoReadMaxLines) return text;
+    var body = text.Contains('\n') ? text[(text.IndexOf('\n') + 1)..] : string.Empty;
+    var first = body.Split('\n').FirstOrDefault(line => !string.IsNullOrWhiteSpace(line))?.Trim() ?? string.Empty;
+    return $"{head} {first}\nread to get {span} lines";
+}
+
+static string RelativeAgentPath(string path) => string.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path) ? path : Path.GetRelativePath(Environment.CurrentDirectory, path);
+static string AgentSignature(string signature)
+{
+    var start = signature.IndexOf('(');
+    var end = signature.IndexOf(')', start + 1);
+    return start >= 0 && end > start ? signature[(start + 1)..end] : signature;
+}
+
+static void WriteSourceResponse(ProtocolResponse response, bool showContext = false)
 {
     if (!response.Success || response.Data is null)
     {
@@ -1917,11 +2788,51 @@ static void WriteSourceResponse(ProtocolResponse response)
         return;
     }
 
+    // A section request that named a symbol rather than a heading resolves to it; print what
+    // it resolved to, so the reader is not left guessing why the span is not the whole file.
+    if (source.Metadata is System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Object } metadata
+        && metadata.TryGetProperty("ResolvedVia", out var resolvedVia) && resolvedVia.GetString() == "section-symbol"
+        && metadata.TryGetProperty("Message", out var resolvedMessage) && resolvedMessage.ValueKind == System.Text.Json.JsonValueKind.String)
+    {
+        Console.WriteLine(resolvedMessage.GetString());
+    }
     var location = source.StartLine == source.EndLine
         ? $"{source.Path}:{source.StartLine}"
         : $"{source.Path}:{source.StartLine}-{source.EndLine}";
     Console.WriteLine(location);
     if (source.SourceReturned && source.Source.Length > 0) Console.WriteLine(source.Source);
+    if (showContext && source.Metadata is System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Object } contextMetadata)
+    {
+        Console.Write(FormatReadContext(contextMetadata));
+    }
+}
+
+static string FormatReadContext(JsonElement metadata)
+{
+    if (!TryGetPropertyIgnoreCase(metadata, "Context", out var context)) return string.Empty;
+    var candidatesFound = false;
+    var lines = new List<string>();
+    foreach (var groupName in new[] { "TestNameMatches", "SameFileCandidates" })
+    {
+        if (!TryGetPropertyIgnoreCase(context, groupName, out var candidates) || candidates.ValueKind != JsonValueKind.Array) continue;
+        foreach (var candidate in candidates.EnumerateArray())
+        {
+            if (!candidatesFound) lines.Add("navigation candidates (incomplete; name/path evidence only):");
+            candidatesFound = true;
+            var relation = TryGetPropertyIgnoreCase(candidate, "Relation", out var relationValue) ? relationValue.GetString() : "candidate";
+            var qualifiedName = TryGetPropertyIgnoreCase(candidate, "QualifiedName", out var nameValue) ? nameValue.GetString() : "";
+            var path = TryGetPropertyIgnoreCase(candidate, "FilePath", out var pathValue) ? pathValue.GetString() : "";
+            var line = TryGetPropertyIgnoreCase(candidate, "StartLine", out var lineValue) && lineValue.ValueKind == JsonValueKind.Number
+                ? $":{lineValue.GetInt32()}" : "";
+            var symbolId = TryGetPropertyIgnoreCase(candidate, "SymbolId", out var idValue) ? idValue.GetString() : "";
+            lines.Add($"  {relation}: {qualifiedName}  {path}{line}  id={symbolId}");
+        }
+    }
+    if (!candidatesFound) lines.Add("no supported navigation candidates");
+    if (TryGetPropertyIgnoreCase(context, "TestNameMatchesTruncated", out var testsTruncated) && testsTruncated.ValueKind == JsonValueKind.True) lines.Add("  +more test candidates");
+    if (TryGetPropertyIgnoreCase(context, "SameFileCandidatesTruncated", out var definitionsTruncated) && definitionsTruncated.ValueKind == JsonValueKind.True) lines.Add("  +more same-file candidates");
+    if (TryGetPropertyIgnoreCase(context, "SourceNamesTruncated", out var sourceNamesTruncated) && sourceNamesTruncated.ValueKind == JsonValueKind.True) lines.Add("  source name scan truncated");
+    return "\n" + string.Join("\n", lines);
 }
 
 static void PrintVersion(string format)
@@ -1945,6 +2856,15 @@ static string GetProductVersion()
 static void PrintHelp()
 {
     Console.WriteLine("""
+1. devx search <name>   (symbols; falls back to text)
+2. devx read <name> [more names]   (source of a symbol, file, or file#Heading)
+Use `devx read method <name> --context` for bounded test/name candidates when related code needs discovery.
+3. devx replace <file> --old <text> --new <text> --verify   (edit, then build + tests in the same call)
+4. devx verify [build|test|both]   (check without editing; build + tests, one summary)
+Add --format agent for compact output; no session needed.
+`devx read type <Class>` shows the declaration, a `bases:` line with each base's path (follow a hierarchy one read type per level, no search in between) and a member outline (--full for the body); bare or Class.member names resolve when unique, so skip the search when you know the name.
+For "who calls / what does it call / where is it used" use `devx callers|callees <method>` and `devx references <symbol>` before `search text`; `devx snapshot <file>` outlines a file.
+
 Usage:
   devx version [--format json]
   devx --version
@@ -1953,21 +2873,28 @@ Usage:
   devx index status [--session <id>]
   devx index update <file> [<file> ...] --session <id>
   devx index changed --session <id>
-  devx search <symbol|text> <query> --session <id> [--agent <label>]
+  devx search <query> [--session <id>] [--agent <label>]
+  devx search <symbol|text> <query> [--session <id>] [--agent <label>]
   devx snapshot <file> --session <id> [--agent <label>]
-  devx read <file|method|type|section> <target> --session <id> [--range start:end|--full]
+  devx callers <method> | devx callees <method> | devx references <symbol> --session <id>   (cross-references; use instead of text search)
+  devx callers <method> --full   (many call sites are grouped by function; --full lists every site)
+  devx read <name|file#Heading|file> [<name> ...] [--session <id>]
+  devx read <file|method|type|section> <target> [--range start:end|--full] [--session <id>]
   devx artifact create <name> --content <text>|--content-file <path>|--content-json <json-string>|--content-stdin
   devx artifact delete <name>
   devx artifact path <name>
   devx patch create <output-file> --session <id> --op <Operation> --path <relative-path> [options] [--append]
+  devx replace <file> --old <text> --new <text> [--all | --occurrence <n>] [--verify[=build|test|both]]
+  Editing: simple edit -> devx replace; structured/multi-file edits -> devx patch
   devx patch preview <patch-file> --session <id>
   devx patch validate <patch-file> --session <id>
-  devx patch apply <patch-file> --session <id>
+  devx patch apply <patch-file> --session <id> [--verify[=build|test|both]]
   devx patch rollback <patch-file> --session <id>
   devx health [--session <id>]
   devx doctor [--session <id>]
   devx build --session <id> [--runtime <kind>] [--target <path|name>]
   devx test [<file> ...] --session <id> [--runtime <kind>] [--target <path|name>] [--timeout <seconds>]
+  devx verify [build|test|both] [<file|dir> ...] [--runtime <kind>] [--target <path|name>] [--timeout <seconds>]
   devx report html [--period 30d] [--session <id>] [--output <file>] [--format html|json] [--anonymize] [--blocked-terms <file>]
   devx report --session <id> --format json [--anonymize] [--blocked-terms <file>]
   devx report html --input <events.json> [--org <name>] [--team <name>] [--repo <name>]
@@ -2004,12 +2931,19 @@ Artifact options:
   --content-stdin
 
 Global options:
-  --format <json|text>
+  --format <json|text|agent>
   --session <id>
   --agent <label>
   --task <label>   Attribute recorded calls to a brief/task (caller supplied)
 
 Notes:
-  build, test, and report require explicit --session selection.
+  build, test, and verify find the repository's session themselves -- --session is optional.
+  report requires explicit --session selection.
 """);
+    // `ask` only exists for a repo that configured an endpoint, so it is advertised only
+    // there -- an unconfigured repo gets no pointer to a command that will refuse to run.
+    if (IsAskConfigured(Environment.CurrentDirectory))
+    {
+        Console.WriteLine("  devx ask \"<question>\"   ask the LLM configured in .devx/config.json");
+    }
 }

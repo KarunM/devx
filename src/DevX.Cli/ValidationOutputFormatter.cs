@@ -1,12 +1,34 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using DevX.Domain;
+using DevX.Indexer;
 using DevX.Protocol;
 
 namespace DevX.Cli;
 
 public static class ValidationOutputFormatter
 {
+    /// <summary>`devx verify`: one line when it passed -- status, what ran, and where the full log
+    /// is -- and the failing run's own `path:line: message` lines when it did not (brief OSS14
+    /// adjustment, 2026-10-09: a verify that passed must not add five lines to an edit's reply).</summary>
+    public static string FormatVerify(ProtocolResponse response)
+    {
+        var payload = response.Data?.Deserialize<VerifyExecutionResponse>();
+        if (payload is null) return Format(response, "verify");
+        var verification = new VerifyAfterEditResult(
+            payload.Build.Execution,
+            payload.Tests?.Execution,
+            payload.Build.Execution.Summary.StartsWith("skip", StringComparison.OrdinalIgnoreCase));
+        if (response.Success) return VerifyAfterEdit.FormatOneLine("verify", verification);
+        var lines = VerifyAfterEdit.FormatVerifyLines(verification).ToList();
+        if (lines.Count == 0)
+        {
+            var error = response.Errors.FirstOrDefault();
+            lines.Add(error is null ? "FAIL verify" : $"FAIL verify — {error.Code}: {error.Message}");
+        }
+        return string.Join(Environment.NewLine, lines);
+    }
+
     public static string Format(ProtocolResponse response, string capability)
     {
         var label = capability.Equals("test", StringComparison.OrdinalIgnoreCase) ? "tests" : capability;
@@ -20,6 +42,7 @@ public static class ValidationOutputFormatter
 
         if (payload?.Execution is { } execution)
         {
+            if (!string.IsNullOrWhiteSpace(execution.Summary)) return execution.Summary;
             var detail = execution.Diagnostics.FirstOrDefault();
             var headline = detail is null
                 ? $"FAIL {label}"

@@ -11,7 +11,7 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace DevX.Infrastructure.Storage.SQLite;
 
-public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, ISessionStore
+public sealed class SqliteStorageInitializer : IRepositoryStore, IRootScopedFileSnapshotStore, ISymbolStore, IReadContextStore, ISessionStore, IIndexFreshnessStore, IContentSearchCoverageStore
 {
     private readonly string _connectionString;
 
@@ -34,6 +34,18 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 root_path TEXT NOT NULL UNIQUE
+            );
+
+            CREATE TABLE IF NOT EXISTS dirty_index_repositories (
+                root_path TEXT PRIMARY KEY,
+                requires_full_reindex INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS dirty_index_files (
+                root_path TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                PRIMARY KEY (root_path, file_path),
+                FOREIGN KEY (root_path) REFERENCES dirty_index_repositories(root_path) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS projects (
@@ -157,6 +169,221 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
         await EnsureReferenceColumnsAsync(connection, cancellationToken);
         await EnsureSymbolColumnsAsync(connection, cancellationToken);
     }
+
+    public async Task<IReadOnlyList<DirtyIndexRepository>> GetDirtyIndexRepositoriesAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT r.root_path, r.requires_full_reindex, f.file_path
+            FROM dirty_index_repositories r
+            LEFT JOIN dirty_index_files f ON f.root_path = r.root_path
+            ORDER BY r.root_path, f.file_path;
+            """;
+        var states = new List<DirtyIndexRepository>();
+        var byRoot = new Dictionary<string, (bool Full, List<string> Files)>(StringComparer.Ordinal);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var root = reader.GetString(0);
+            if (!byRoot.TryGetValue(root, out var state))
+            {
+                state = (reader.GetInt64(1) != 0, []);
+                byRoot[root] = state;
+            }
+            if (!reader.IsDBNull(2)) state.Files.Add(reader.GetString(2));
+        }
+        states.AddRange(byRoot.Select(pair => new DirtyIndexRepository(pair.Key, pair.Value.Full, pair.Value.Files)));
+        return states;
+    }
+
+    public async Task<DirtyIndexRepository?> GetDirtyIndexRepositoryAsync(string repositoryRoot, CancellationToken cancellationToken = default)
+        => (await GetDirtyIndexRepositoriesAsync(cancellationToken))
+            .FirstOrDefault(state => PathsEqual(state.RepositoryRoot, NormalizeRepositoryRoot(repositoryRoot)));
+
+    public async Task<bool> TryMarkIndexFilesDirtyAsync(string repositoryRoot, IReadOnlyList<string> files, CancellationToken cancellationToken = default)
+    {
+        var root = NormalizeRepositoryRoot(repositoryRoot);
+        var normalizedFiles = NormalizeDirtyFiles(files, root);
+        if (normalizedFiles.Length == 0) return false;
+
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var check = connection.CreateCommand())
+        {
+            check.Transaction = (SqliteTransaction)transaction;
+            check.CommandText = "SELECT 1 FROM dirty_index_repositories WHERE root_path = $root LIMIT 1;";
+            check.Parameters.AddWithValue("$root", root);
+            if (await check.ExecuteScalarAsync(cancellationToken) is not null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+        }
+
+        await using (var insertRoot = connection.CreateCommand())
+        {
+            insertRoot.Transaction = (SqliteTransaction)transaction;
+            insertRoot.CommandText = "INSERT INTO dirty_index_repositories(root_path, requires_full_reindex) VALUES($root, 0);";
+            insertRoot.Parameters.AddWithValue("$root", root);
+            await insertRoot.ExecuteNonQueryAsync(cancellationToken);
+        }
+        foreach (var file in normalizedFiles)
+        {
+            await using var insertFile = connection.CreateCommand();
+            insertFile.Transaction = (SqliteTransaction)transaction;
+            insertFile.CommandText = "INSERT INTO dirty_index_files(root_path, file_path) VALUES($root, $file);";
+            insertFile.Parameters.AddWithValue("$root", root);
+            insertFile.Parameters.AddWithValue("$file", file);
+            await insertFile.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return true;
+    }
+
+    public async Task MarkIndexRepositoryDirtyAsync(string repositoryRoot, IReadOnlyList<string> files, CancellationToken cancellationToken = default)
+    {
+        var root = NormalizeRepositoryRoot(repositoryRoot);
+        var normalizedFiles = NormalizeDirtyFiles(files, root);
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var upsertRoot = connection.CreateCommand())
+        {
+            upsertRoot.Transaction = (SqliteTransaction)transaction;
+            upsertRoot.CommandText = """
+                INSERT INTO dirty_index_repositories(root_path, requires_full_reindex) VALUES($root, 1)
+                ON CONFLICT(root_path) DO UPDATE SET requires_full_reindex = 1;
+                """;
+            upsertRoot.Parameters.AddWithValue("$root", root);
+            await upsertRoot.ExecuteNonQueryAsync(cancellationToken);
+        }
+        foreach (var file in normalizedFiles)
+        {
+            await using var insertFile = connection.CreateCommand();
+            insertFile.Transaction = (SqliteTransaction)transaction;
+            insertFile.CommandText = "INSERT OR IGNORE INTO dirty_index_files(root_path, file_path) VALUES($root, $file);";
+            insertFile.Parameters.AddWithValue("$root", root);
+            insertFile.Parameters.AddWithValue("$file", file);
+            await insertFile.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task MarkIndexFilesDirtyAsync(string repositoryRoot, IReadOnlyList<string> files, CancellationToken cancellationToken = default)
+    {
+        var root = NormalizeRepositoryRoot(repositoryRoot);
+        var normalizedFiles = NormalizeDirtyFiles(files, root);
+        if (normalizedFiles.Length == 0) return;
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var insertRoot = connection.CreateCommand())
+        {
+            insertRoot.Transaction = (SqliteTransaction)transaction;
+            insertRoot.CommandText = "INSERT OR IGNORE INTO dirty_index_repositories(root_path, requires_full_reindex) VALUES($root, 0);";
+            insertRoot.Parameters.AddWithValue("$root", root);
+            await insertRoot.ExecuteNonQueryAsync(cancellationToken);
+        }
+        foreach (var file in normalizedFiles)
+        {
+            await using var insertFile = connection.CreateCommand();
+            insertFile.Transaction = (SqliteTransaction)transaction;
+            insertFile.CommandText = "INSERT OR IGNORE INTO dirty_index_files(root_path, file_path) VALUES($root, $file);";
+            insertFile.Parameters.AddWithValue("$root", root);
+            insertFile.Parameters.AddWithValue("$file", file);
+            await insertFile.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task ClearDirtyIndexFilesAsync(string repositoryRoot, IReadOnlyList<string> files, CancellationToken cancellationToken = default)
+    {
+        var root = NormalizeRepositoryRoot(repositoryRoot);
+        var normalizedFiles = NormalizeDirtyFiles(files, root);
+        if (normalizedFiles.Length == 0) return;
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var check = connection.CreateCommand())
+        {
+            check.Transaction = (SqliteTransaction)transaction;
+            check.CommandText = "SELECT requires_full_reindex FROM dirty_index_repositories WHERE root_path = $root;";
+            check.Parameters.AddWithValue("$root", root);
+            if (Convert.ToInt64(await check.ExecuteScalarAsync(cancellationToken) ?? 1) == 0)
+            {
+                foreach (var file in normalizedFiles)
+                {
+                    await using var deleteFile = connection.CreateCommand();
+                    deleteFile.Transaction = (SqliteTransaction)transaction;
+                    deleteFile.CommandText = "DELETE FROM dirty_index_files WHERE root_path = $root AND file_path = $file;";
+                    deleteFile.Parameters.AddWithValue("$root", root);
+                    deleteFile.Parameters.AddWithValue("$file", file);
+                    await deleteFile.ExecuteNonQueryAsync(cancellationToken);
+                }
+                await using var deleteRoot = connection.CreateCommand();
+                deleteRoot.Transaction = (SqliteTransaction)transaction;
+                deleteRoot.CommandText = """
+                    DELETE FROM dirty_index_repositories
+                    WHERE root_path = $root AND requires_full_reindex = 0
+                      AND NOT EXISTS (SELECT 1 FROM dirty_index_files WHERE root_path = $root);
+                    """;
+                deleteRoot.Parameters.AddWithValue("$root", root);
+                await deleteRoot.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task ClearDirtyIndexRepositoryAsync(string repositoryRoot, CancellationToken cancellationToken = default)
+    {
+        var root = NormalizeRepositoryRoot(repositoryRoot);
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var deleteFiles = connection.CreateCommand())
+        {
+            deleteFiles.Transaction = (SqliteTransaction)transaction;
+            deleteFiles.CommandText = "DELETE FROM dirty_index_files WHERE root_path = $root;";
+            deleteFiles.Parameters.AddWithValue("$root", root);
+            await deleteFiles.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await using (var deleteRoot = connection.CreateCommand())
+        {
+            deleteRoot.Transaction = (SqliteTransaction)transaction;
+            deleteRoot.CommandText = "DELETE FROM dirty_index_repositories WHERE root_path = $root;";
+            deleteRoot.Parameters.AddWithValue("$root", root);
+            await deleteRoot.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    private static string NormalizeRepositoryRoot(string repositoryRoot)
+        => Path.TrimEndingDirectorySeparator(Path.GetFullPath(repositoryRoot));
+
+    private static string[] NormalizeDirtyFiles(IReadOnlyList<string> files, string root)
+        => files.Where(file => !string.IsNullOrWhiteSpace(file))
+            .Select(file => NormalizeDirtyFile(file, root))
+            .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
+            .ToArray();
+
+    private static string NormalizeDirtyFile(string file, string root)
+    {
+        if (Path.IsPathRooted(file))
+        {
+            var fullRoot = Path.GetFullPath(root);
+            var fullPath = Path.GetFullPath(file);
+            var relative = Path.GetRelativePath(fullRoot, fullPath);
+            if (!Path.IsPathRooted(relative) && relative != ".." && !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                return relative.Replace('\\', '/');
+        }
+        return file.Replace('\\', '/').TrimStart('/');
+    }
+
+    private static bool PathsEqual(string left, string right)
+        => string.Equals(left, right, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
     private static async Task EnsureSymbolColumnsAsync(SqliteConnection connection, CancellationToken cancellationToken)
     {
@@ -411,6 +638,157 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
     public async Task<IReadOnlyList<Symbol>> FindSymbolsByNameAsync(string name, CancellationToken cancellationToken = default)
         => await FindSymbolsAsync("name", name, cancellationToken);
 
+    public async Task<Symbol?> FindReadContextTargetAsync(RepositoryId repositoryId, string filePath, string qualifiedName, CancellationToken cancellationToken = default)
+    {
+        var repositoryRoot = await GetRepositoryRootPathAsync(repositoryId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(repositoryRoot)) return null;
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT s.id, s.repository_id, s.project_id, s.file_id, s.container_id, s.kind, s.name, s.qualified_name,
+                   s.signature, s.start_line, s.end_line, f.path
+            FROM symbols s
+            INNER JOIN files f ON f.id = s.file_id
+            INNER JOIN repositories r ON r.id = s.repository_id
+            WHERE r.root_path = $root_path AND f.path = $file_path
+              AND (s.qualified_name = $qualified_name OR s.name = $name)
+              AND (s.kind = 'Method' OR s.kind = 'Function')
+            ORDER BY CASE WHEN s.qualified_name = $qualified_name THEN 0 ELSE 1 END, s.start_line, s.id
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$root_path", Path.GetFullPath(repositoryRoot));
+        command.Parameters.AddWithValue("$file_path", filePath);
+        command.Parameters.AddWithValue("$qualified_name", qualifiedName);
+        command.Parameters.AddWithValue("$name", qualifiedName.Split('.').Last());
+        var rows = await ReadSymbolsAsync(command, cancellationToken);
+        return rows.FirstOrDefault();
+    }
+
+    public async Task<ReadContextCandidates> FindReadContextCandidatesAsync(Symbol target, IReadOnlyList<string> sourceNames, bool sourceNamesTruncated, int limit = 5, CancellationToken cancellationToken = default)
+    {
+        var boundedLimit = Math.Clamp(limit, 1, 20);
+        var boundedNames = sourceNames.Where(name => !string.IsNullOrWhiteSpace(name)).Distinct(StringComparer.Ordinal).Take(64).ToList();
+        var tests = await ReadTestContextSymbolsAsync(target, boundedLimit, cancellationToken);
+        var sameFileMatches = boundedNames.Count == 0
+            ? []
+            : await ReadSameFileContextSymbolsAsync(target, boundedNames, boundedLimit, cancellationToken);
+        return new ReadContextCandidates(
+            tests.Take(boundedLimit).ToList(),
+            tests.Count > boundedLimit,
+            sameFileMatches.Take(boundedLimit).ToList(),
+            sameFileMatches.Count > boundedLimit,
+            sameFileMatches.Count > 0,
+            sourceNamesTruncated || sourceNames.Count > boundedNames.Count);
+    }
+
+    private async Task<List<Symbol>> ReadTestContextSymbolsAsync(Symbol target, int limit, CancellationToken cancellationToken)
+    {
+        var targetModule = Path.GetFileNameWithoutExtension(target.FilePath);
+        if (string.IsNullOrWhiteSpace(targetModule)) return [];
+        var escapedModule = targetModule.Replace("!", "!!", StringComparison.Ordinal)
+            .Replace("%", "!%", StringComparison.Ordinal)
+            .Replace("_", "!_", StringComparison.Ordinal);
+        var testPathPatterns = new[]
+        {
+            $"%/test_{escapedModule}.%", $"test_{escapedModule}.%",
+            $"%/{escapedModule}!_test.%", $"{escapedModule}!_test.%",
+        };
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+                SELECT s.id, s.repository_id, s.project_id, s.file_id, s.container_id, s.kind, s.name, s.qualified_name,
+                       s.signature, s.start_line, s.end_line, f.path
+                FROM symbols s
+                INNER JOIN files f ON f.id = s.file_id
+                WHERE s.repository_id = $repository_id
+                  AND s.id <> $target_id
+                  AND (s.kind = 'Method' OR s.kind = 'Function')
+                  AND lower(s.name) = lower($exact_test_name)
+                  AND (
+                    lower(f.path) LIKE lower($test_path_0) ESCAPE '!' OR lower(f.path) LIKE lower($test_path_1) ESCAPE '!' OR
+                    lower(f.path) LIKE lower($test_path_2) ESCAPE '!' OR lower(f.path) LIKE lower($test_path_3) ESCAPE '!'
+                  )
+                ORDER BY s.qualified_name, f.path, s.start_line
+                LIMIT $limit;
+                """
+            ;
+        command.Parameters.AddWithValue("$repository_id", target.RepositoryId);
+        command.Parameters.AddWithValue("$target_id", target.Id);
+        command.Parameters.AddWithValue("$exact_test_name", $"test_{target.Name}");
+        for (var index = 0; index < testPathPatterns.Length; index++)
+            command.Parameters.AddWithValue($"$test_path_{index}", testPathPatterns[index]);
+        command.Parameters.AddWithValue("$limit", limit + 1);
+        return await ReadSymbolsAsync(command, cancellationToken);
+    }
+
+    private async Task<List<Symbol>> ReadSameFileContextSymbolsAsync(Symbol target, IReadOnlyList<string> names, int limit, CancellationToken cancellationToken)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        if (names.Count == 0)
+        {
+            command.CommandText = """
+                SELECT s.id, s.repository_id, s.project_id, s.file_id, s.container_id, s.kind, s.name, s.qualified_name,
+                       s.signature, s.start_line, s.end_line, f.path
+                FROM symbols s
+                INNER JOIN files f ON f.id = s.file_id
+                WHERE s.repository_id = $repository_id
+                  AND s.file_id = $file_id
+                  AND s.id <> $target_id
+                  AND (s.kind = 'Method' OR s.kind = 'Function')
+                ORDER BY s.start_line, s.qualified_name
+                LIMIT $limit;
+                """;
+        }
+        else
+        {
+            var nameParameters = names.Select((_, index) => $"$name{index}").ToArray();
+            var orderCases = string.Join(" ", names.Select((_, index) => $"WHEN $name{index} THEN {index}"));
+            command.CommandText = $"""
+                SELECT s.id, s.repository_id, s.project_id, s.file_id, s.container_id, s.kind, s.name, s.qualified_name,
+                       s.signature, s.start_line, s.end_line, f.path
+                FROM symbols s
+                INNER JOIN files f ON f.id = s.file_id
+                WHERE s.repository_id = $repository_id
+                  AND s.file_id = $file_id
+                  AND s.id <> $target_id
+                  AND (s.kind = 'Method' OR s.kind = 'Function')
+                  AND s.name IN ({string.Join(", ", nameParameters)})
+                ORDER BY CASE s.name {orderCases} ELSE {names.Count} END, s.start_line, s.qualified_name
+                LIMIT $limit;
+                """;
+            for (var index = 0; index < names.Count; index++)
+            {
+                command.Parameters.AddWithValue(nameParameters[index], names[index]);
+            }
+        }
+        command.Parameters.AddWithValue("$repository_id", target.RepositoryId);
+        command.Parameters.AddWithValue("$target_id", target.Id);
+        command.Parameters.AddWithValue("$limit", limit + 1);
+        command.Parameters.AddWithValue("$file_id", target.FileId);
+        return await ReadSymbolsAsync(command, cancellationToken);
+    }
+
+    private static async Task<List<Symbol>> ReadSymbolsAsync(SqliteCommand command, CancellationToken cancellationToken)
+    {
+        var results = new List<Symbol>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(new Symbol(
+                reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4), reader.GetString(5), reader.GetString(6),
+                reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetInt32(9), reader.IsDBNull(10) ? null : reader.GetInt32(10),
+                reader.GetString(11)));
+        }
+
+        return results;
+    }
+
     public async Task<IReadOnlyList<Symbol>> FindSymbolsByQualifiedNameAsync(string qualifiedName, CancellationToken cancellationToken = default)
         => await FindSymbolsAsync("qualified_name", qualifiedName, cancellationToken);
 
@@ -551,10 +929,16 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
         string query,
         int limit = 100,
         CancellationToken cancellationToken = default)
+        => (await SearchFileContentsWithCoverageAsync(query, limit, cancellationToken)).Matches;
+
+    public async Task<ContentSearchOutcome> SearchFileContentsWithCoverageAsync(
+        string query,
+        int limit = 100,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(query) || limit <= 0)
         {
-            return [];
+            return new ContentSearchOutcome([], new ContentSearchCoverage(0, Math.Max(0, limit), null, null, false, false, "none", ["No scan was performed for an empty query or non-positive result limit."]));
         }
 
         await using var connection = new SqliteConnection(_connectionString);
@@ -577,13 +961,107 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
             }
         }
 
-        var matches = new List<ContentSearchResult>();
-        foreach (var file in indexedFiles)
+        // SQLite is an inventory of candidates, not authority to follow a path that has
+        // become a link since indexing. Validate every row against its own repository root
+        // before either ripgrep or the in-process fallback can read it.
+        var safeIndexedFiles = indexedFiles
+            .Where(file => RepositoryPathGuard.TryResolve(file.Root, file.Path, out _, out _))
+            .ToList();
+        var warningCount = indexedFiles.Count - safeIndexedFiles.Count;
+
+        // ripgrep -- the repository's configured copy, the one bundled with DevX, or the one on
+        // PATH, in that order: it is the regex engine, and it reads the tree instead of
+        // every indexed file, which is what makes `a|b` and a regex possible at all. The
+        // in-process scan below stays as the fallback and its result set is the same shape, so
+        // nothing downstream -- and no `--format json` payload -- depends on which one answered.
+        var ripgrepHits = new List<(string Root, RipgrepContentSearcher.Hit Hit)>();
+        var ripgrepAnswered = safeIndexedFiles.Count > 0;
+        var scanCapped = false;
+        foreach (var root in safeIndexedFiles.Select(file => Path.GetFullPath(file.Root)).Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal))
+        {
+            if (!RipgrepContentSearcher.TrySearch(root, query, out var found, out var rootScanCapped, cancellationToken))
+            {
+                ripgrepAnswered = false;
+                break;
+            }
+
+            scanCapped |= rootScanCapped;
+            ripgrepHits.AddRange(found.Select(hit => (root, hit)));
+        }
+
+        if (ripgrepAnswered)
+        {
+            // Only files the index knows: a ContentSearchResult carries a FileId, and the
+            // in-process scan could only ever match indexed files either.
+            var indexedByIdentity = safeIndexedFiles.ToDictionary(
+                candidate => (Root: Path.GetFullPath(candidate.Root), Path: NormalizeContentPath(candidate.Path)),
+                candidate => candidate,
+                new IndexedFileIdentityComparer());
+            var results = new List<(string Path, int Line, ContentSearchResult Result)>();
+            var unindexedHits = 0;
+            foreach (var (root, hit) in ripgrepHits)
+            {
+                var hitPath = NormalizeContentPath(hit.Path);
+                if (!RepositoryPathGuard.TryResolve(root, hitPath, out _, out _))
+                {
+                    warningCount++;
+                    continue;
+                }
+                if (!indexedByIdentity.TryGetValue((root, hitPath), out var file))
+                {
+                    // A file ripgrep can read but the index never covered (docs, config) is not an
+                    // unsafe indexed path: drop it and count it where JSON consumers can see it.
+                    unindexedHits++;
+                    continue;
+                }
+                AddBoundedResult(results, (hitPath, hit.Line, new ContentSearchResult(file.Id, hitPath, hit.Line, MatchColumn(hit.Text, query), hit.Text)), limit + 1);
+            }
+            var outputTruncated = results.Count > limit;
+            var returned = results.Take(limit).Select(item => item.Result).ToList();
+            var warnings = new List<string> { "Ripgrep honors ignore and hidden-file rules, so indexed-path coverage is unknown." };
+            if (scanCapped) warnings.Add("Ripgrep stopped at its 5,000-match scan ceiling for at least one root.");
+            if (warningCount > 0) warnings.Add($"{warningCount} indexed path(s) could not be searched safely.");
+            bool? complete = outputTruncated ? false : null;
+            bool? reportedTruncation = outputTruncated ? true : null;
+            return new ContentSearchOutcome(returned, new ContentSearchCoverage(returned.Count, limit, reportedTruncation, complete, scanCapped, false, "ripgrep", warnings, unindexedHits));
+        }
+
+        // The fallback must not be a worse tool than the engine it stands in for, or the answer
+        // would depend on whether ripgrep happens to be installed. So the pattern is a regex
+        // here too; only one that will not compile -- `GetValueOrDefault(`, which agents really
+        // typed -- is matched as literal alternatives instead.
+        System.Text.RegularExpressions.Regex? pattern = null;
+        var alternatives = new[] { query };
+        try
+        {
+            pattern = new System.Text.RegularExpressions.Regex(
+                query,
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase
+                | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        }
+        catch (ArgumentException)
+        {
+            // Not a regex: `a|b` is still the alternation an agent expects, so split on it.
+            var parts = query.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (parts.Length > 0)
+            {
+                alternatives = parts;
+            }
+        }
+
+        var fallbackResults = new List<(string Path, int Line, ContentSearchResult Result)>();
+        var fallbackWarnings = warningCount;
+        foreach (var file in safeIndexedFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var fullPath = Path.GetFullPath(Path.Combine(file.Root, file.Path.Replace('/', Path.DirectorySeparatorChar)));
+            if (!RepositoryPathGuard.TryResolve(file.Root, file.Path, out var fullPath, out _))
+            {
+                fallbackWarnings++;
+                continue;
+            }
             if (!System.IO.File.Exists(fullPath))
             {
+                fallbackWarnings++;
                 continue;
             }
 
@@ -594,26 +1072,183 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or DecoderFallbackException)
             {
+                fallbackWarnings++;
                 continue;
             }
 
             for (var index = 0; index < lines.Length; index++)
             {
-                var column = lines[index].IndexOf(query, StringComparison.OrdinalIgnoreCase);
+                var column = -1;
+                if (pattern is not null)
+                {
+                    var match = pattern.Match(lines[index]);
+                    if (match.Success)
+                    {
+                        column = match.Index;
+                    }
+                }
+                else
+                {
+                    foreach (var alternative in alternatives)
+                    {
+                        var at = lines[index].IndexOf(alternative, StringComparison.OrdinalIgnoreCase);
+                        if (at >= 0 && (column < 0 || at < column))
+                        {
+                            column = at;
+                        }
+                    }
+                }
+
                 if (column < 0)
                 {
                     continue;
                 }
 
-                matches.Add(new ContentSearchResult(file.Id, file.Path, index + 1, column + 1, lines[index].Trim()));
-                if (matches.Count >= limit)
-                {
-                    return matches;
-                }
+                AddBoundedResult(fallbackResults, (file.Path, index + 1, new ContentSearchResult(file.Id, file.Path, index + 1, column + 1, lines[index].Trim())), limit + 1);
             }
         }
 
-        return matches;
+        var fallbackTruncated = fallbackResults.Count > limit;
+        var fallbackReturned = fallbackResults.Take(limit).Select(item => item.Result).ToList();
+        var fallbackMessages = fallbackWarnings == 0 ? Array.Empty<string>() : new[] { $"{fallbackWarnings} indexed file(s) could not be searched completely." };
+        bool? fallbackComplete = fallbackTruncated ? false : fallbackWarnings > 0 ? (bool?)null : true;
+        bool? fallbackOutputTruncated = fallbackTruncated ? true : fallbackWarnings > 0 ? null : false;
+        return new ContentSearchOutcome(fallbackReturned, new ContentSearchCoverage(fallbackReturned.Count, limit, fallbackOutputTruncated, fallbackComplete, false, true, "fallback", fallbackMessages));
+    }
+
+    private static void AddBoundedResult(List<(string Path, int Line, ContentSearchResult Result)> results,
+        (string Path, int Line, ContentSearchResult Result) result, int capacity)
+    {
+        var index = results.BinarySearch(result, ContentSearchResultOrderComparer.Instance);
+        if (index < 0) index = ~index;
+        results.Insert(index, result);
+        if (results.Count > capacity) results.RemoveAt(results.Count - 1);
+    }
+
+    private static string NormalizeContentPath(string path)
+        => OperatingSystem.IsWindows() ? path.Replace('\\', '/') : path;
+
+    private sealed class ContentSearchResultOrderComparer : IComparer<(string Path, int Line, ContentSearchResult Result)>
+    {
+        public static readonly ContentSearchResultOrderComparer Instance = new();
+        public int Compare((string Path, int Line, ContentSearchResult Result) x, (string Path, int Line, ContentSearchResult Result) y)
+        {
+            var path = StringComparer.Ordinal.Compare(x.Path, y.Path);
+            if (path != 0) return path;
+            var line = x.Line.CompareTo(y.Line);
+            return line != 0 ? line : StringComparer.Ordinal.Compare(x.Result.FileId, y.Result.FileId);
+        }
+    }
+
+    private sealed class IndexedFileIdentityComparer : IEqualityComparer<(string Root, string Path)>
+    {
+        private readonly StringComparer _pathComparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        public bool Equals((string Root, string Path) x, (string Root, string Path) y)
+            => _pathComparer.Equals(x.Root, y.Root) && _pathComparer.Equals(x.Path, y.Path);
+        public int GetHashCode((string Root, string Path) value)
+            => HashCode.Combine(_pathComparer.GetHashCode(value.Root), _pathComparer.GetHashCode(value.Path));
+    }
+
+    /// <summary>The 1-based column of a match, for the <c>Column</c> field of a content result.
+    /// The query is a regex whenever ripgrep answered, so the literal is tried first -- a plain
+    /// identifier query is the common case and this keeps its column identical to the
+    /// in-process scan's -- then the regex, then 1.</summary>
+    private static int MatchColumn(string text, string query)
+    {
+        var literal = text.IndexOf(query, StringComparison.OrdinalIgnoreCase);
+        if (literal >= 0)
+        {
+            return literal + 1;
+        }
+
+        try
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(
+                text, query, System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (match.Success)
+            {
+                return match.Index + 1;
+            }
+        }
+        catch (System.Text.RegularExpressions.RegexParseException)
+        {
+            // Not a regex: the pattern was a fixed string ripgrep matched, so 1 is as good as
+            // any and nothing here may throw over a column number.
+        }
+
+        return 1;
+    }
+
+    /// <summary>The innermost indexed symbol whose span contains each point, keyed by
+    /// (file id, line). `devx search text` prints this beside every hit: which function or type
+    /// the matching line sits in is the one thing ripgrep cannot say, and without it the next
+    /// call is always a read.</summary>
+    public async Task<IReadOnlyDictionary<(string FileId, int Line), string>> FindEnclosingSymbolsAsync(
+        IReadOnlyList<(string FileId, int Line)> points,
+        CancellationToken cancellationToken = default)
+    {
+        var enclosing = new Dictionary<(string FileId, int Line), string>();
+        if (points.Count == 0)
+        {
+            return enclosing;
+        }
+
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        var spans = new Dictionary<string, List<(string Name, int Start, int End)>>(StringComparer.Ordinal);
+        foreach (var fileId in points.Select(point => point.FileId).Distinct(StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT qualified_name, start_line, end_line
+                FROM symbols
+                WHERE file_id = $fileId AND start_line IS NOT NULL AND end_line IS NOT NULL;
+                """;
+            command.Parameters.AddWithValue("$fileId", fileId);
+            var list = new List<(string, int, int)>();
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                list.Add((reader.GetString(0), reader.GetInt32(1), reader.GetInt32(2)));
+            }
+
+            spans[fileId] = list;
+        }
+
+        foreach (var (fileId, line) in points)
+        {
+            if (!spans.TryGetValue(fileId, out var candidates))
+            {
+                continue;
+            }
+
+            string? best = null;
+            var bestSpan = int.MaxValue;
+            var bestStart = 0;
+            foreach (var (name, start, end) in candidates)
+            {
+                if (line < start || line > end)
+                {
+                    continue;
+                }
+
+                var span = end - start;
+                if (span < bestSpan || (span == bestSpan && start > bestStart))
+                {
+                    best = name;
+                    bestSpan = span;
+                    bestStart = start;
+                }
+            }
+
+            if (best is not null)
+            {
+                enclosing[(fileId, line)] = best;
+            }
+        }
+
+        return enclosing;
     }
 
     public async Task<FileSnapshot?> GetFileSnapshotAsync(string fileIdOrPath, CancellationToken cancellationToken = default)
@@ -651,21 +1286,25 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
             """, fileId, cancellationToken, row => new FileNamespaceSnapshot(row.GetString(0), row.GetString(1)));
 
         var types = await QueryListAsync(connection, """
-            SELECT t.id, t.name, n.name
+            SELECT t.id, t.name, n.name, s.start_line, s.end_line
             FROM types t
             INNER JOIN namespaces n ON n.id = t.namespace_id
+            LEFT JOIN symbols s ON s.file_id = n.file_id AND s.container_id = n.id AND s.name = t.name
             WHERE n.file_id = $file_id
             ORDER BY n.name, t.name;
-            """, fileId, cancellationToken, row => new FileTypeSnapshot(row.GetString(0), row.GetString(1), row.GetString(2)));
+            """, fileId, cancellationToken, row => new FileTypeSnapshot(row.GetString(0), row.GetString(1), row.GetString(2), row.IsDBNull(3) ? null : row.GetInt32(3), row.IsDBNull(4) ? null : row.GetInt32(4)));
 
         var methods = await QueryListAsync(connection, """
-            SELECT m.id, m.name, t.name, n.name
+            SELECT m.id, m.name, t.name, n.name,
+                   (SELECT s.signature FROM symbols s WHERE s.container_id = t.id AND s.name = m.name ORDER BY s.start_line LIMIT 1),
+                   (SELECT s.start_line FROM symbols s WHERE s.container_id = t.id AND s.name = m.name ORDER BY s.start_line LIMIT 1),
+                   (SELECT s.end_line FROM symbols s WHERE s.container_id = t.id AND s.name = m.name ORDER BY s.start_line LIMIT 1)
             FROM methods m
             INNER JOIN types t ON t.id = m.type_id
             INNER JOIN namespaces n ON n.id = t.namespace_id
             WHERE n.file_id = $file_id
             ORDER BY n.name, t.name, m.name;
-            """, fileId, cancellationToken, row => new FileMethodSnapshot(row.GetString(0), row.GetString(1), row.GetString(2), row.GetString(3)));
+            """, fileId, cancellationToken, row => new FileMethodSnapshot(row.GetString(0), row.GetString(1), row.GetString(2), row.GetString(3), row.IsDBNull(4) ? null : row.GetString(4), row.IsDBNull(5) ? null : row.GetInt32(5), row.IsDBNull(6) ? null : row.GetInt32(6)));
 
         var properties = await QueryListAsync(connection, """
             SELECT p.id, p.name, t.name, n.name
@@ -688,6 +1327,29 @@ public sealed class SqliteStorageInitializer : IRepositoryStore, ISymbolStore, I
         var loc = await CountLinesAsync(rootPath, path, cancellationToken);
         var dependencies = await GetProjectDependenciesAsync(rootPath, projectPath, cancellationToken);
         return new FileSnapshot(fileId, projectName, path, StructuredSymbolReader.LanguageOf(path), loc, namespaces, types, methods, properties, fields, dependencies);
+    }
+
+    public async Task<FileSnapshot?> GetFileSnapshotAsync(RepositoryId repositoryId, string repositoryRoot, string relativePath, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        var rootMatch = OperatingSystem.IsWindows() ? "lower(r.root_path) = lower($root)" : "r.root_path = $root";
+        var pathMatch = OperatingSystem.IsWindows() ? "lower(f.path) = lower($path)" : "f.path = $path";
+        command.CommandText = $"""
+            SELECT f.id
+            FROM files f
+            INNER JOIN projects p ON p.id = f.project_id
+            INNER JOIN repositories r ON r.id = p.repository_id
+            WHERE {rootMatch} AND {pathMatch}
+            ORDER BY CASE WHEN r.id = $repository_id THEN 0 ELSE 1 END, r.id
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$repository_id", repositoryId.Value.ToString());
+        command.Parameters.AddWithValue("$root", Path.GetFullPath(repositoryRoot));
+        command.Parameters.AddWithValue("$path", relativePath.Replace('\\', '/'));
+        var fileId = await command.ExecuteScalarAsync(cancellationToken);
+        return fileId is string id ? await GetFileSnapshotAsync(id, cancellationToken) : null;
     }
 
     public async Task<IReadOnlyList<MethodSummary>> FindMethodSummariesAsync(string query, CancellationToken cancellationToken = default)

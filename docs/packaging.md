@@ -18,6 +18,10 @@ dotnet publish src/DevX.Cli -c Release -r osx-arm64 --self-contained -p:PublishS
 
 This succeeds with a 97.9 MB binary. Warm `devx --version` takes 0.03 s. Warm `mcp serve` initialization takes 0.08–0.09 s; the first cold run takes 0.38 s. Framework-dependent `--version` baseline is 0.03 s.
 
+## Release smoke test
+
+`tools/smoke_single_file.py` checks the published binary's version, indexing and symbol/method/section reads, plus MCP indexing and search over stdio. `release.yml` runs it for every binary target; run it locally with `python3 tools/smoke_single_file.py <publish dir>`.
+
 ## Native AOT
 
 ```sh
