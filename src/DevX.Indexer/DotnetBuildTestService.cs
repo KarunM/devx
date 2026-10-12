@@ -34,6 +34,18 @@ public sealed class DotnetBuildTestService
         {
             if (DevXCommandConfig.TryRead(root, "test") is { } configured)
             {
+                if (!string.IsNullOrWhiteSpace(filter))
+                {
+                    var configuredCommand = configured.BuildCommandLine(null);
+                    if (IsDirectDotnet(configured, configuredCommand.FileName))
+                        return await RunWithTimeoutAsync(configuredCommand.FileName, AddTestFilter(configuredCommand.Arguments, filter), root, timeout, token, "test", configured.WorkingDirectoryFor(root), configured.Environment);
+                    var command = ConfiguredPytestCommand(configured, configuredCommand);
+                    if (command is null)
+                        return UnsupportedPythonFilterRecord(root, filter, "the configured test command is not a direct pytest or python -m pytest command");
+                    if (!TryValidatePytestFilter(filter, out var filterError))
+                        return UnsupportedPythonFilterRecord(root, filter, filterError);
+                    return await RunWithTimeoutAsync(command.Value.FileName, AppendPytestFilter(command.Value.Arguments, filter), root, timeout, token, "test", configured.WorkingDirectoryFor(root), configured.Environment);
+                }
                 return await RunConfiguredAsync(root, configured, null, timeout, token, "test");
             }
 
@@ -43,12 +55,16 @@ public sealed class DotnetBuildTestService
             // "0 failed of 0" and then installing pytest to make the tool agree with it.
             if (DjangoTestScript(root) is { } runtests)
             {
+                if (!string.IsNullOrWhiteSpace(filter))
+                    return UnsupportedPythonFilterRecord(root, filter, "Django test labels are not pytest -k expressions");
                 return await RunWithTimeoutAsync(PythonExecutable(root), $"\"{runtests}\"", root, timeout, token, "test");
             }
 
+            if (!IsDotnetProject(root, null) && !string.IsNullOrWhiteSpace(filter) && !TryValidatePytestFilter(filter, out var automaticFilterError))
+                return UnsupportedPythonFilterRecord(root, filter, automaticFilterError);
             return await RunWithTimeoutAsync(
                 IsDotnetProject(root, null) ? "dotnet" : PythonExecutable(root),
-                IsDotnetProject(root, null) ? AddTestFilter(GetTestArguments(root, null), filter) : "-m pytest",
+                IsDotnetProject(root, null) ? AddTestFilter(GetTestArguments(root, null), filter) : AppendPytestFilter("-m pytest", filter),
                 root, timeout, token, "test");
         }
 
@@ -75,7 +91,30 @@ public sealed class DotnetBuildTestService
             // and the configured runner was never used, which is the defect 1.6.10 fixes.
             if (DevXCommandConfig.TryRead(root, "test") is { } configured)
             {
-                executions.Add(await RunConfiguredAsync(root, configured, selector, remaining, token, "test"));
+                if (!string.IsNullOrWhiteSpace(filter))
+                {
+                    var configuredCommand = configured.BuildCommandLine(selector);
+                    if (IsDirectDotnet(configured, configuredCommand.FileName))
+                    {
+                        executions.Add(await RunWithTimeoutAsync(configuredCommand.FileName, AddTestFilter(configuredCommand.Arguments, filter), root, remaining, token, "test", configured.WorkingDirectoryFor(root), configured.Environment));
+                        if (!executions[^1].Success) break;
+                        continue;
+                    }
+                    var command = ConfiguredPytestCommand(configured, configuredCommand);
+                    if (command is null)
+                        return UnsupportedPythonFilterRecord(root, filter, "the configured test command is not a direct pytest or python -m pytest command");
+                    if (!TryValidatePytestFilter(filter, out var filterError))
+                        return UnsupportedPythonFilterRecord(root, filter, filterError);
+                    executions.Add(await RunWithTimeoutAsync(command.Value.FileName, AppendPytestFilter(command.Value.Arguments, filter), root, remaining, token, "test", configured.WorkingDirectoryFor(root), configured.Environment));
+                }
+                else
+                {
+                    executions.Add(await RunConfiguredAsync(root, configured, selector, remaining, token, "test"));
+                }
+            }
+            else if (!string.IsNullOrWhiteSpace(filter) && label is not null && DjangoTestScript(root) is not null)
+            {
+                return UnsupportedPythonFilterRecord(root, filter, "Django test labels are not pytest -k expressions");
             }
             else if (selectors.Count == 1 && label is not null && DjangoTestScript(root) is { } runtests)
             {
@@ -85,18 +124,26 @@ public sealed class DotnetBuildTestService
             {
                 if (IsStandaloneCheckScript(root, path))
                 {
+                    if (!string.IsNullOrWhiteSpace(filter))
+                        return UnsupportedPythonFilterRecord(root, filter, "standalone Python check scripts do not support pytest -k");
                     var command = BuildPythonScriptTestCommand(root, path);
                     executions.Add(await RunWithTimeoutAsync(command.FileName, command.Arguments, root, remaining, token, "check"));
                 }
                 else if (selectors.Count == 1 && LooksLikePytestTestFile(path))
                 {
+                    if (!string.IsNullOrWhiteSpace(filter) && !TryValidatePytestFilter(filter, out var filterError))
+                        return UnsupportedPythonFilterRecord(root, filter, filterError);
                     var command = BuildPythonFileTestCommand(root, path);
-                    executions.Add(await RunWithTimeoutAsync(command.FileName, command.Arguments, root, remaining, token, "test"));
+                    executions.Add(await RunWithTimeoutAsync(command.FileName, AppendPytestFilter(command.Arguments, filter), root, remaining, token, "test"));
                 }
                 else
                 {
                     var pytest = LooksLikePytest(path);
-                    var arguments = pytest ? $"-m pytest \"{path}\"" : $"\"{path}\"";
+                    if (!pytest && !string.IsNullOrWhiteSpace(filter))
+                        return UnsupportedPythonFilterRecord(root, filter, "the selected Python file is not a pytest test file");
+                    if (pytest && !string.IsNullOrWhiteSpace(filter) && !TryValidatePytestFilter(filter, out var filterError))
+                        return UnsupportedPythonFilterRecord(root, filter, filterError);
+                    var arguments = pytest ? AppendPytestFilter($"-m pytest \"{path}\"", filter) : $"\"{path}\"";
                     executions.Add(await RunWithTimeoutAsync(PythonExecutable(root), arguments, root, remaining, token, pytest ? "test" : "check"));
                 }
             }
@@ -107,7 +154,9 @@ public sealed class DotnetBuildTestService
             }
             else if (Directory.Exists(path) && ContainsPytestTestFiles(path))
             {
-                executions.Add(await RunWithTimeoutAsync(PythonExecutable(root), $"-m pytest \"{path}\"", root, remaining, token, "test"));
+                if (!string.IsNullOrWhiteSpace(filter) && !TryValidatePytestFilter(filter, out var filterError))
+                    return UnsupportedPythonFilterRecord(root, filter, filterError);
+                executions.Add(await RunWithTimeoutAsync(PythonExecutable(root), AppendPytestFilter($"-m pytest \"{path}\"", filter), root, remaining, token, "test"));
             }
             else if (Directory.Exists(path) && BuildCSharpDirectoryTestCommand(root, path) is { } directoryCommand)
             {
@@ -115,6 +164,8 @@ public sealed class DotnetBuildTestService
             }
             else if (Directory.Exists(path) && Directory.EnumerateFiles(path, "*.py", SearchOption.AllDirectories).Any())
             {
+                if (!string.IsNullOrWhiteSpace(filter))
+                    return UnsupportedPythonFilterRecord(root, filter, "the selected Python directory is not a recognized pytest test directory");
                 executions.Add(await RunWithTimeoutAsync(PythonExecutable(root), $"-m pytest \"{path}\"", root, remaining, token, "test"));
             }
             else
@@ -132,6 +183,55 @@ public sealed class DotnetBuildTestService
     }
 
     public static string AddTestFilter(string arguments, string? filter) => string.IsNullOrWhiteSpace(filter) ? arguments : arguments + " --filter \"" + filter.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
+
+    private static (string FileName, string Arguments)? ConfiguredPytestCommand(
+        DevXCommandConfig config,
+        (string FileName, string Arguments) command)
+    {
+        if (config.IsShell) return null;
+
+        var executable = Path.GetFileNameWithoutExtension(command.FileName);
+        var configuredArgs = config.Args.Count > 0
+            ? config.Args
+            : config.Command.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Skip(1).ToArray();
+        var directPytest = executable.Equals("pytest", StringComparison.OrdinalIgnoreCase)
+            || executable.Equals("py.test", StringComparison.OrdinalIgnoreCase);
+        var pythonModule = (executable.Equals("python", StringComparison.OrdinalIgnoreCase)
+                || executable.Equals("python3", StringComparison.OrdinalIgnoreCase))
+            && configuredArgs.Count >= 2
+            && configuredArgs[0] == "-m"
+            && configuredArgs[1] == "pytest";
+        if (!directPytest && !pythonModule) return null;
+        if (configuredArgs.Any(argument => argument == "--" || argument == "-k")) return null;
+        return command;
+    }
+
+    private static bool IsDirectDotnet(DevXCommandConfig config, string fileName)
+        => !config.IsShell && Path.GetFileNameWithoutExtension(fileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase);
+
+    private static string AppendPytestFilter(string arguments, string? filter)
+        => string.IsNullOrWhiteSpace(filter) ? arguments : arguments + " -k \"" + filter + "\"";
+
+    internal static bool TryValidatePytestFilter(string filter, out string error)
+    {
+        if (!PytestFilterExpression.TryParse(filter))
+        {
+            error = "The filter must use pytest -k terms joined by 'and', 'or', or 'not', with optional parentheses; VSTest filters and other syntax are not supported for Python tests.";
+            return false;
+        }
+
+        error = string.Empty;
+        return true;
+    }
+
+    private static ExecutionRecord UnsupportedPythonFilterRecord(string root, string filter, string reason)
+    {
+        var log = SaveFullLog(root, string.Empty);
+        var message = $"Cannot apply Python test filter '{filter}': {reason}. Use a pytest test file/directory or a direct pytest command, and express the filter with pytest -k syntax.";
+        return new ExecutionRecord("pytest -k", false, log,
+            [new DiagnosticRecord("error", "PYTHON_FILTER_UNSUPPORTED", message, null, null, null, log)],
+            $"FAIL tests — {message}");
+    }
 
     public static (string FileName, string Arguments) BuildCSharpFileTestCommand(string root, string path)
     {

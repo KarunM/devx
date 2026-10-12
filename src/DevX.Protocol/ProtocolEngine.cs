@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text;
+using System.Text.RegularExpressions;
 using DevX.Application;
 using DevX.Domain;
 using DevX.Indexer;
@@ -61,6 +62,21 @@ public sealed class ProtocolEngine : IProtocolEngine
         if (session is null)
         {
             return Fail("SessionNotFound", $"Session '{request.SessionId}' was not found.");
+        }
+
+        if (RequiresFreshIndex(request.Operation))
+        {
+            if (_repositoryStore is not IIndexFreshnessStore freshnessStore)
+            {
+                return Fail("IndexFreshnessUnavailable", "The repository store cannot confirm index freshness; indexed operations are blocked.");
+            }
+
+            var dirtyRepositories = await freshnessStore.GetDirtyIndexRepositoriesAsync(cancellationToken);
+            if (dirtyRepositories.Count > 0)
+            {
+                var roots = string.Join(", ", dirtyRepositories.Select(repository => repository.RepositoryRoot));
+                return Fail("IndexDirty", $"Indexed operations are blocked because source changes are not reconciled for: {roots}. Run 'devx index <root>' to reconcile the index.");
+            }
         }
 
         try
@@ -591,10 +607,9 @@ public sealed class ProtocolEngine : IProtocolEngine
             return Fail("RepositoryNotIndexed", "Repository root was not found.");
         }
 
-        var absolutePath = Path.GetFullPath(Path.Combine(root, path));
-        if (!absolutePath.StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
+        if (!RepositoryPathGuard.TryResolve(root, path, out var absolutePath, out var pathError))
         {
-            return Fail("ValidationError", "File path must remain inside the repository root.");
+            return Fail("ValidationError", pathError);
         }
 
         if (!IOFile.Exists(absolutePath)) return Fail("FileMissing", $"file missing: {path}", path);
@@ -646,15 +661,17 @@ public sealed class ProtocolEngine : IProtocolEngine
                 var resolution = await ReadableSymbolResolver.ResolveAsync(_repositoryStore, root, query, cancellationToken);
                 if (resolution.Candidates.Count > 1)
                 {
-                    var candidates = resolution.Candidates;
+                    var candidates = RankCandidates(resolution.Candidates, query);
+                    var total = resolution.Candidates.Count;
                     return new ProtocolResponse(false, null, [], [new ProtocolError("AmbiguousMatch",
-                        $"Symbol '{query}' matched multiple definitions: " + string.Join("; ", candidates.Select(s => $"{s.QualifiedName} ({s.Kind}, {s.FilePath}:{s.StartLine}-{s.EndLine})")),
-                        query, candidates.Select(s => s.QualifiedName).ToList(), candidates)]);
+                        $"Symbol '{query}' matched multiple definitions ({total}); pass a qualified name.",
+                        query, candidates.Select(s => s.QualifiedName).ToList(), candidates, total)]);
                 }
                 if (resolution.Candidates.Count == 1)
                 {
                     var symbol = resolution.Candidates[0];
-                    var absolute = Path.GetFullPath(Path.Combine(root, symbol.FilePath!));
+                    if (!RepositoryPathGuard.TryResolve(root, symbol.FilePath!, out var absolute, out var pathError))
+                        return Fail("ValidationError", pathError, query);
                     if (!IOFile.Exists(absolute)) return Fail("FileMissing", $"file missing: {symbol.FilePath}", query);
                     if (symbol.StartLine is not null && symbol.EndLine is not null)
                     {
@@ -679,9 +696,23 @@ public sealed class ProtocolEngine : IProtocolEngine
                         var message = symbol.Kind is "Method" or "Constructor" ? null : $"{query} is a {symbol.Kind}; returned its definition";
                         var symbolReturnedLines = source.Split('\n').Length;
                         var symbolTotalLines = Math.Max(lines.Length - (lines[^1].Length == 0 ? 1 : 0), symbolReturnedLines);
+                        object symbolMetadata;
+                        if ((kind is "method" or "function") && WantsReadContext(request.Payload))
+                        {
+                            var indexedSymbol = _repositoryStore is ISymbolStore symbolStore
+                                ? (await symbolStore.FindSymbolsByQualifiedNameAsync(symbol.QualifiedName, cancellationToken)).FirstOrDefault(candidate => candidate.Id == symbol.Id)
+                                : null;
+                            var context = indexedSymbol is null
+                                ? new { Complete = false, Basis = "bounded indexed path/name candidates", TestNameMatches = Array.Empty<object>(), SameFileCandidates = Array.Empty<object>(), TestNameMatchesTruncated = false, SameFileCandidatesTruncated = false, SourceNamesTruncated = false, Note = "The resolved symbol has no indexed symbol record for context lookup." }
+                                : await BuildReadContextAsync(indexedSymbol, source, cancellationToken);
+                            symbolMetadata = new { ResolvedVia = resolution.ResolvedVia, SymbolKind = symbol.Kind, Message = message, Context = context };
+                        }
+                        else
+                        {
+                            symbolMetadata = new { ResolvedVia = resolution.ResolvedVia, SymbolKind = kind == "section" ? "Section" : symbol.Kind, Message = message };
+                        }
                         var result = new SourceReadResponse(kind, symbolId, symbol.QualifiedName, symbol.FilePath!, symbol.StartLine.Value,
-                            symbol.EndLine.Value, symbolTotalLines, symbolReturnedLines, symbolReturnedLines < symbolTotalLines, true, source,
-                            new { ResolvedVia = resolution.ResolvedVia, SymbolKind = kind == "section" ? "Section" : symbol.Kind, Message = message });
+                            symbol.EndLine.Value, symbolTotalLines, symbolReturnedLines, symbolReturnedLines < symbol.EndLine.Value - symbol.StartLine.Value + 1, true, source, symbolMetadata);
                         await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, symbolId), cancellationToken);
                         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(result), [], []);
                     }
@@ -716,14 +747,100 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var method = methods[0];
+        var methodRoot = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(methodRoot))
+        {
+            return Fail("RepositoryNotIndexed", "Repository root was not found.");
+        }
+        if (!RepositoryPathGuard.TryResolve(methodRoot, method.FilePath, out _, out var methodPathError))
+        {
+            return Fail("ValidationError", methodPathError, query);
+        }
         var slice = method.Source.Replace("\r\n", "\n");
         var returnedLines = slice.Split('\n').Length;
         var snapshot = await _repositoryStore.GetFileSnapshotAsync(method.FilePath, cancellationToken);
         var totalLines = Math.Max(snapshot?.ApproximateLoc ?? method.EndLine, returnedLines);
-        var response = new SourceReadResponse("method", method.Id, method.QualifiedName, method.FilePath, method.StartLine, method.EndLine, totalLines, returnedLines, returnedLines < totalLines, true, slice, new { ResolvedVia = Guid.TryParse(query, out _) ? "exact" : "short-name" });
+        object metadata;
+        if (WantsReadContext(request.Payload))
+        {
+            var indexedSymbol = _repositoryStore is IReadContextStore contextStore
+                ? await contextStore.FindReadContextTargetAsync(session.RepositoryId, method.FilePath, method.QualifiedName, cancellationToken)
+                : null;
+            var context = indexedSymbol is null
+                ? new { Complete = false, Basis = "bounded indexed path/name candidates", TestNameMatches = Array.Empty<object>(), SameFileCandidates = Array.Empty<object>(), TestNameMatchesTruncated = false, SameFileCandidatesTruncated = false, SourceNamesTruncated = false, Note = _repositoryStore is IReadContextStore ? "The resolved method has no indexed symbol record for context lookup." : "This store does not provide read context candidates." }
+                : await BuildReadContextAsync(indexedSymbol, slice, cancellationToken);
+            metadata = new { ResolvedVia = Guid.TryParse(query, out _) ? "exact" : "short-name", Context = context };
+        }
+        else
+        {
+            metadata = new { ResolvedVia = Guid.TryParse(query, out _) ? "exact" : "short-name" };
+        }
+        var response = new SourceReadResponse("method", method.Id, method.QualifiedName, method.FilePath, method.StartLine, method.EndLine, totalLines, returnedLines, returnedLines < method.EndLine - method.StartLine + 1, true, slice, metadata);
         await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, method.Id), cancellationToken);
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
     }
+
+    private static bool WantsReadContext(JsonElement payload)
+        => payload.ValueKind == JsonValueKind.Object
+            && payload.TryGetProperty("context", out var context)
+            && context.ValueKind == JsonValueKind.True;
+
+    private async Task<object> BuildReadContextAsync(Symbol target, string source, CancellationToken cancellationToken)
+    {
+        const int sourceScanLimit = 32 * 1024;
+        var sourceScan = source.Length > sourceScanLimit ? source[..sourceScanLimit] : source;
+        var sourceNamesTruncated = source.Length > sourceScanLimit;
+        var sourceNames = Regex.Matches(sourceScan, @"([A-Za-z_]\w*)\s*\(")
+            .Select(match => match.Groups[1].Value)
+            .Where(name => name is not ("if" or "for" or "while" or "switch" or "catch" or "def" or "with" or "return" or "assert" or "lambda"))
+            .Distinct(StringComparer.Ordinal)
+            .Take(65)
+            .ToList();
+        if (_repositoryStore is not IReadContextStore contextStore)
+        {
+            return new
+            {
+                Complete = false,
+                Basis = "bounded indexed path/name candidates",
+                TestNameMatches = Array.Empty<object>(),
+                SameFileCandidates = Array.Empty<object>(),
+                TestNameMatchesTruncated = false,
+                SameFileCandidatesTruncated = false,
+                SourceNamesTruncated = sourceNamesTruncated || sourceNames.Count > 64,
+                Note = "This store does not provide read context candidates."
+            };
+        }
+
+        var candidates = await contextStore.FindReadContextCandidatesAsync(target, sourceNames, sourceNamesTruncated, 5, cancellationToken);
+        return new
+        {
+            Complete = false,
+            Basis = "bounded indexed path/name candidates",
+            TestNameMatches = candidates.TestNameMatches.Select(symbol => ContextCandidate(symbol, "test-name-match", "exact test name and same-module test path")).ToList(),
+            SameFileCandidates = candidates.SameFileDefinitions.Select(symbol => ContextCandidate(
+                symbol,
+                candidates.SameFileDefinitionsAreNameMatches ? "source-name-match" : "same-file-definition",
+                candidates.SameFileDefinitionsAreNameMatches ? "lexical source name and indexed definition" : "indexed definition in the same file")).ToList(),
+            TestNameMatchesTruncated = candidates.TestNameMatchesTruncated,
+            SameFileCandidatesTruncated = candidates.SameFileDefinitionsTruncated,
+            SourceNamesTruncated = candidates.SourceNamesTruncated,
+            Note = "Candidates are navigation hints; name and path matches do not establish call or test relations."
+        };
+    }
+
+    private static object ContextCandidate(Symbol symbol, string relation, string evidence)
+        => new
+        {
+            SymbolId = symbol.Id,
+            symbol.Name,
+            symbol.QualifiedName,
+            symbol.Kind,
+            symbol.FilePath,
+            symbol.StartLine,
+            symbol.EndLine,
+            Relation = relation,
+            Evidence = evidence
+        };
 
     private async Task<ProtocolResponse> HandleReadTypeAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
     {
@@ -733,12 +850,23 @@ public sealed class ProtocolEngine : IProtocolEngine
             return Fail("ValidationError", "Read type requests must include either a string 'query' field or an 'id' field.");
         }
 
+        ReadableResolution? typeResolution = null;
         if (_repositoryStore is ISymbolStore)
         {
             var typeRoot = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
             if (typeRoot is not null)
             {
                 var indexed = await ReadableSymbolResolver.ResolveAsync(_repositoryStore, typeRoot, query, cancellationToken);
+                indexed = indexed with { Candidates = indexed.Candidates.Where(candidate => candidate.Kind is "Class" or "Type" or "Record" or "Interface" or "Struct" or "Enum").ToList() };
+                typeResolution = indexed;
+                if (indexed.Candidates.Count > 1)
+                {
+                    var ranked = RankCandidates(indexed.Candidates, query);
+                    var total = indexed.Candidates.Count;
+                    return new ProtocolResponse(false, null, [], [new ProtocolError("AmbiguousMatch", $"Type '{query}' matched multiple definitions ({total}); pass a qualified name.", query, ranked.Select(item => item.QualifiedName).ToList(), ranked, total)]);
+                }
+                if (indexed.Candidates.Count == 1 && indexed.Candidates[0].FileStatus == "unsafe path")
+                    return Fail("ValidationError", $"Indexed path for '{query}' contains a symbolic link or escapes the repository root.", query);
                 if (indexed.Candidates.Count == 1 && indexed.Candidates[0].FileStatus == "file missing")
                     return Fail("FileMissing", $"file missing: {indexed.Candidates[0].FilePath}", query);
             }
@@ -752,13 +880,26 @@ public sealed class ProtocolEngine : IProtocolEngine
                 return Fail("NotFound", $"Type '{id}' was not found.");
             }
 
-            var responseById = new SourceReadResponse("type", typeSummary.Id, typeSummary.QualifiedName, typeSummary.FilePath, typeSummary.StartLine, typeSummary.EndLine, 0, 0, false, false, string.Empty, new { TypeName = typeSummary.Name, Namespace = typeSummary.Namespace, Project = typeSummary.Project, Kind = typeSummary.Kind });
+            var idRoot = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+            if (idRoot is null) return Fail("RepositoryNotIndexed", "Repository root was not found.");
+            if (!RepositoryPathGuard.TryResolve(idRoot, typeSummary.FilePath, out var idAbsolute, out var idPathError)) return Fail("ValidationError", idPathError, id);
+            if (!IOFile.Exists(idAbsolute)) return Fail("FileMissing", $"file missing: {typeSummary.FilePath}", id);
+            var idLines = (await IOFile.ReadAllTextAsync(idAbsolute, cancellationToken)).Replace("\r\n", "\n").Split('\n');
+            var idEndLine = TryGetBoolean(request.Payload, "full") ? typeSummary.EndLine : Math.Min(typeSummary.EndLine, typeSummary.StartLine + 299);
+            var idSource = string.Join('\n', idLines[(typeSummary.StartLine - 1)..idEndLine]);
+            var idReturned = idSource.Split('\n').Length;
+            var responseById = new SourceReadResponse("type", typeSummary.Id, typeSummary.QualifiedName, typeSummary.FilePath, typeSummary.StartLine, idEndLine, typeSummary.EndLine - typeSummary.StartLine + 1, idReturned, idReturned < typeSummary.EndLine - typeSummary.StartLine + 1, true, idSource, new { TypeName = typeSummary.Name, Namespace = typeSummary.Namespace, Project = typeSummary.Project, Kind = typeSummary.Kind, ResolvedVia = "exact" });
             await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, typeSummary.Id), cancellationToken);
             return new ProtocolResponse(true, JsonSerializer.SerializeToElement(responseById), [], []);
         }
 
         var types = await ResolveTypeSummariesAsync(query, request.Payload, cancellationToken);
         types = PreferExact(types, query, type => type.Id, type => type.QualifiedName, type => type.Name);
+        if (types.Count == 0 && typeResolution?.Candidates.Count == 1)
+        {
+            var found = await _repositoryStore.FindTypeSummaryByIdAsync(typeResolution.Candidates[0].Id, cancellationToken);
+            if (found is not null) types = [found];
+        }
         if (types.Count == 0)
         {
             return await NotFoundWithSuggestionsAsync("Type", query, cancellationToken);
@@ -766,11 +907,25 @@ public sealed class ProtocolEngine : IProtocolEngine
 
         if (types.Count > 1)
         {
-            return Fail("AmbiguousMatch", $"Type '{query}' matched multiple implementations.", query, types.Select(type => type.QualifiedName));
+            var ranked = RankCandidates(types.Select(type => new SymbolSearchResult(type.Id, type.Kind, type.Name, type.QualifiedName, type.FilePath, type.StartLine, type.EndLine)).ToList(), query);
+            var total = types.Count;
+            return new ProtocolResponse(false, null, [], [new ProtocolError("AmbiguousMatch", $"Type '{query}' matched multiple definitions ({total}); pass a qualified name.", query, ranked.Select(item => item.QualifiedName).ToList(), ranked, total)]);
         }
 
         var type = types[0];
-        var response = new SourceReadResponse("type", type.Id, type.QualifiedName, type.FilePath, type.StartLine, type.EndLine, 0, 0, false, false, string.Empty, new { TypeName = type.Name, Namespace = type.Namespace, Project = type.Project, Kind = type.Kind });
+        var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
+        if (root is null) return Fail("RepositoryNotIndexed", "Repository root was not found.");
+        if (!RepositoryPathGuard.TryResolve(root, type.FilePath, out var absolute, out var pathError)) return Fail("ValidationError", pathError, query);
+        if (!IOFile.Exists(absolute)) return Fail("FileMissing", $"file missing: {type.FilePath}", query);
+        var fileLines = (await IOFile.ReadAllTextAsync(absolute, cancellationToken)).Replace("\r\n", "\n").Split('\n');
+        if (type.StartLine < 1 || type.EndLine > fileLines.Length) return Fail("StaleIndex", $"Indexed span is stale for {type.FilePath}; run devx index update.", query);
+        var typeFull = TryGetBoolean(request.Payload, "full");
+        var typeEndLine = typeFull ? type.EndLine : Math.Min(type.EndLine, type.StartLine + 299);
+        var classSource = string.Join('\n', fileLines[(type.StartLine - 1)..typeEndLine]);
+        var classLines = classSource.Split('\n').Length;
+        var typeVia = typeResolution?.ResolvedVia ?? "exact";
+        var requestedTypeLines = type.EndLine - type.StartLine + 1;
+        var response = new SourceReadResponse("type", type.Id, type.QualifiedName, type.FilePath, type.StartLine, typeEndLine, requestedTypeLines, classLines, classLines < requestedTypeLines, true, classSource, new { TypeName = type.Name, Namespace = type.Namespace, Project = type.Project, Kind = type.Kind, ResolvedVia = typeVia });
         await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, type.Id), cancellationToken);
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
     }
@@ -797,10 +952,20 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var sectionRoot = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
-        if (sectionRoot is not null && !IOFile.Exists(Path.Combine(sectionRoot, file)))
-            return Fail("FileMissing", $"file missing: {file}", $"{file}#{heading}");
+        if (string.IsNullOrWhiteSpace(sectionRoot))
+        {
+            return Fail("RepositoryNotIndexed", "Repository root was not found.");
+        }
+        if (!RepositoryPathGuard.TryResolve(sectionRoot, file, out var sectionPath, out var sectionPathError))
+            return Fail("ValidationError", sectionPathError, $"{file}#{heading}");
+        if (!IOFile.Exists(sectionPath)) return Fail("FileMissing", $"file missing: {file}", $"{file}#{heading}");
 
-        var snapshot = await _repositoryStore.GetFileSnapshotAsync(file, cancellationToken);
+        if (_repositoryStore is not IRootScopedFileSnapshotStore rootScopedSnapshotStore)
+        {
+            return Fail("UnsupportedStoreCapability", "The repository store cannot scope a file snapshot to this repository.", file);
+        }
+        var relativeSectionPath = Path.GetRelativePath(Path.GetFullPath(sectionRoot), sectionPath).Replace('\\', '/');
+        var snapshot = await rootScopedSnapshotStore.GetFileSnapshotAsync(session.RepositoryId, sectionRoot, relativeSectionPath, cancellationToken);
         if (snapshot is null)
         {
             return Fail("NotFound", $"Markdown file '{file}' was not found.", file);
@@ -832,24 +997,9 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var selectedHeading = candidates[0].Name;
-        var methods = (await _repositoryStore.FindMethodSourcesAsync(selectedHeading, cancellationToken))
-            .Where(method => string.Equals(method.FilePath, snapshot.Path, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        if (methods.Count != 1)
-        {
-            // The legacy name+path lookup re-parses the file and can only find a method it
-            // recognises again; a heading indexed as something else -- or one whose span the
-            // parse cannot re-locate -- ends up here as "could not be read". The resolver
-            // reads the span straight from the index, so try that before giving up.
-            return await ReadSectionTargetAsync(request, session, file, selectedHeading, cancellationToken);
-        }
-
-        var method = methods[0];
-        var source = method.Source.Replace("\r\n", "\n");
-        var returnedLines = source.Split('\n').Length;
-        var response = new SourceReadResponse("section", method.Id, method.QualifiedName, method.FilePath, method.StartLine, method.EndLine, snapshot.ApproximateLoc, returnedLines, returnedLines < snapshot.ApproximateLoc, true, source, new { Heading = selectedHeading, RequestedHeading = heading });
-        await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, method.Id), cancellationToken);
-        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
+        // Resolve through the repository-scoped symbol path. The legacy name+path method
+        // lookup is global and can select another repository's same-relative-path source.
+        return await ReadSectionTargetAsync(request, session, file, selectedHeading, cancellationToken);
     }
 
     // The forgiving half of `read section`. A source file is not a document of headings, so
@@ -864,10 +1014,9 @@ public sealed class ProtocolEngine : IProtocolEngine
             return Fail("RepositoryNotIndexed", "Repository root was not found.");
         }
 
-        var absolute = Path.GetFullPath(Path.Combine(root, file));
-        if (!absolute.StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
+        if (!RepositoryPathGuard.TryResolve(root, file, out var absolute, out var pathError))
         {
-            return Fail("ValidationError", "File path must remain inside the repository root.");
+            return Fail("ValidationError", pathError);
         }
 
         if (string.IsNullOrWhiteSpace(name))
@@ -881,7 +1030,8 @@ public sealed class ProtocolEngine : IProtocolEngine
         var resolution = await ReadableSymbolResolver.ResolveAsync(_repositoryStore, root, name, cancellationToken);
         var inFile = resolution.Candidates
             .Where(candidate => candidate.FilePath is not null
-                && string.Equals(Path.GetFullPath(Path.Combine(root, candidate.FilePath.Replace('\\', '/'))), absolute, StringComparison.OrdinalIgnoreCase))
+            && RepositoryPathGuard.TryResolve(root, candidate.FilePath.Replace('\\', '/'), out var candidatePath, out _)
+            && string.Equals(candidatePath, absolute, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
             .DistinctBy(candidate => candidate.Id)
             .ToList();
 
@@ -1023,14 +1173,40 @@ public sealed class ProtocolEngine : IProtocolEngine
             return Fail("RepositoryNotIndexed", "Repository root was not found.");
         }
 
+        if (_repositoryStore is not IIndexFreshnessStore freshnessStore)
+        {
+            return Fail("IndexFreshnessUnavailable", "The repository store cannot durably track source/index freshness; patch was not applied.");
+        }
+        var affectedFiles = patch.Operations.Select(operation => NormalizePatchDirtyPath(root, operation.Path))
+            .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal).ToArray();
+        if (!await freshnessStore.TryMarkIndexFilesDirtyAsync(root, affectedFiles, cancellationToken))
+        {
+            return Fail("IndexDirty", "Patch was not applied because this repository already has unreconciled source changes. Run 'devx index <root>' first.");
+        }
+
         var (result, error) = _patchLifecycleService.Apply(root, patch);
         if (error is not null)
         {
+            if (error.Code is "PatchCommitOutcomeUncertain" or "PatchRollbackOutcomeUncertain")
+            {
+                await freshnessStore.MarkIndexRepositoryDirtyAsync(root, affectedFiles, cancellationToken);
+            }
+            else
+            {
+                await freshnessStore.ClearDirtyIndexFilesAsync(root, affectedFiles, cancellationToken);
+            }
             return Fail(error.Code, error.Message);
         }
 
-        await RefreshIndexAsync(root, result!.Summary.FilesAffected, cancellationToken);
-        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(result), result.ValidationErrors, []);
+        var appliedResult = result!;
+        var refreshFailure = _refreshIndexAfterEdit ? await RefreshIndexAsync(root, affectedFiles, cancellationToken) : null;
+        if (refreshFailure is not null)
+        {
+            var pending = await freshnessStore.GetDirtyIndexRepositoryAsync(root, cancellationToken);
+            var files = pending is null ? "unknown files" : string.Join(", ", pending.DirtyFiles);
+            return Fail("IndexRefreshFailedDirty", $"Patch source changes are applied, but indexed operations are blocked until reconciliation succeeds for {files}: {refreshFailure}. Run 'devx index <root>'.");
+        }
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(appliedResult), appliedResult.ValidationErrors, []);
     }
 
     private async Task<ProtocolResponse> HandlePatchPreviewAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
@@ -1069,6 +1245,13 @@ public sealed class ProtocolEngine : IProtocolEngine
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
     }
 
+    private static string NormalizePatchDirtyPath(string root, string path)
+    {
+        if (RepositoryPathGuard.TryResolve(root, path, out var absolutePath, out _))
+            return Path.GetRelativePath(root, absolutePath).Replace('\\', '/');
+        return path.Replace('\\', '/');
+    }
+
     private async Task<ProtocolResponse> HandlePatchRollbackAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
     {
         var patch = JsonSerializer.Deserialize<PatchDocument>(request.Payload.GetRawText(), new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -1083,13 +1266,32 @@ public sealed class ProtocolEngine : IProtocolEngine
             return Fail("RepositoryNotIndexed", "Repository root was not found.");
         }
 
+        if (_repositoryStore is not IIndexFreshnessStore freshnessStore)
+        {
+            return Fail("IndexFreshnessUnavailable", "The repository store cannot durably track source/index freshness; rollback was not applied.");
+        }
+        var affectedFiles = patch.Operations.Select(operation => NormalizePatchDirtyPath(root, operation.Path))
+            .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal).ToArray();
+        if (!await freshnessStore.TryMarkIndexFilesDirtyAsync(root, affectedFiles, cancellationToken))
+        {
+            return Fail("IndexDirty", "Rollback was not applied because this repository already has unreconciled source changes. Run 'devx index <root>' first.");
+        }
+
         var (response, error) = _patchLifecycleService.Rollback(root, patch);
         if (error is not null)
         {
+            if (error.Code is "PatchCommitOutcomeUncertain" or "PatchRollbackOutcomeUncertain")
+                await freshnessStore.MarkIndexRepositoryDirtyAsync(root, affectedFiles, cancellationToken);
+            else
+                await freshnessStore.ClearDirtyIndexFilesAsync(root, affectedFiles, cancellationToken);
             return Fail(error.Code, error.Message);
         }
 
-        await RefreshIndexAsync(root, response!.Summary.FilesAffected, cancellationToken);
+        var refreshFailure = _refreshIndexAfterEdit ? await RefreshIndexAsync(root, affectedFiles, cancellationToken) : null;
+        if (refreshFailure is not null)
+        {
+            return Fail("IndexRefreshFailedDirty", $"Patch rollback source changes are applied, but indexed operations are blocked until reconciliation succeeds: {refreshFailure}. Run 'devx index <root>'.");
+        }
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
     }
 
@@ -1097,24 +1299,23 @@ public sealed class ProtocolEngine : IProtocolEngine
     /// Bring the index back in line with the files a write just touched, so the next read of the
     /// new text sees the new text. A file the write created is indexed; a file it deleted is
     /// dropped, because <c>ReindexFilesAsync</c> would only report it missing and leave the index
-    /// pointing at a document that is gone. Best effort by design: the write already happened, and
-    /// a stale index must not turn a successful edit into a failure.
+    /// pointing at a document that is gone. Failed refreshes remain fenced and are reported.
     /// </summary>
-    private async Task RefreshIndexAsync(string root, IReadOnlyList<string> filesAffected, CancellationToken cancellationToken)
+    private async Task<string?> RefreshIndexAsync(string root, IReadOnlyList<string> filesAffected, CancellationToken cancellationToken)
     {
         if (!_refreshIndexAfterEdit || filesAffected is null || filesAffected.Count == 0)
         {
-            return;
+            return "automatic index refresh is disabled or no affected paths were provided";
         }
 
         var present = new List<string>();
         var removed = new List<string>();
-        foreach (var file in filesAffected.Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (var file in filesAffected.Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal))
         {
             var absolute = Path.GetFullPath(Path.Combine(root, file.Replace('\\', '/')));
             if (!absolute.StartsWith(Path.GetFullPath(root), StringComparison.OrdinalIgnoreCase))
             {
-                continue;
+                return $"affected path '{file}' is outside the repository root";
             }
             (System.IO.File.Exists(absolute) ? present : removed).Add(file);
         }
@@ -1126,28 +1327,54 @@ public sealed class ProtocolEngine : IProtocolEngine
         // none of it may fail a write that already succeeded.
         foreach (var file in present)
         {
-            await RefreshOneAsync(() => indexer.ReindexFilesAsync(root, [file], cancellationToken));
+            var failure = await RefreshOneAsync(async () =>
+                {
+                    var result = await indexer.ReindexFilesAsync(root, [file], cancellationToken);
+                    return result.SkippedFiles == 0 ? null : string.Join("; ", result.SkippedFilePaths.Select(item => item.Reason));
+                });
+            if (failure is not null)
+            {
+                return failure;
+            }
         }
         foreach (var file in removed)
         {
-            await RefreshOneAsync(() => indexer.RemoveFileAsync(root, file, cancellationToken));
+            var failure = await RefreshOneAsync(async () =>
+                {
+                    await indexer.RemoveFileAsync(root, file, cancellationToken);
+                    return null;
+                });
+            if (failure is not null)
+            {
+                return failure;
+            }
         }
+
+        if (_repositoryStore is not IIndexFreshnessStore freshnessStore) return "repository store cannot confirm index freshness";
+        var pending = await freshnessStore.GetDirtyIndexRepositoryAsync(root, cancellationToken);
+        return pending is null ? null : $"dirty paths remain: {string.Join(", ", pending.DirtyFiles)}";
     }
 
-    private static async Task RefreshOneAsync(Func<Task> refresh)
+    private static async Task<string?> RefreshOneAsync(Func<Task<string?>> refresh)
     {
         try
         {
-            await refresh();
+            return await refresh();
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or NotSupportedException or Microsoft.Data.Sqlite.SqliteException)
         {
-            // The edit stands; `devx health` reports an index that could not be refreshed.
+            return exception.Message;
         }
     }
 
     private static ProtocolResponse Fail(string code, string message, string? attemptedName = null, IEnumerable<string>? suggestions = null)
         => new(false, null, [], [new ProtocolError(code, message, attemptedName, suggestions?.Distinct(StringComparer.OrdinalIgnoreCase).Take(5).ToList())]);
+
+    private static List<SymbolSearchResult> RankCandidates(IEnumerable<SymbolSearchResult> candidates, string query)
+        => candidates.OrderByDescending(candidate => string.Equals(candidate.Name, query.Split('.').Last(), StringComparison.Ordinal))
+            .ThenBy(candidate => candidate.QualifiedName.Count(character => character == '.') + 1)
+            .ThenBy(candidate => candidate.FilePath, StringComparer.Ordinal)
+            .Take(10).ToList();
 
     private async Task<ProtocolResponse> NotFoundWithSuggestionsAsync(
         string kind,
@@ -1169,6 +1396,13 @@ public sealed class ProtocolEngine : IProtocolEngine
         var suffix = suggestions.Count == 0 ? string.Empty : $" Did you mean: {string.Join(", ", suggestions)}?";
         return Fail("NotFound", (message ?? $"{kind} '{query}' was not found.") + suffix, query, suggestions);
     }
+
+    private static bool RequiresFreshIndex(string operation) => operation is
+        ProtocolOperations.SearchSymbol or ProtocolOperations.SearchText or ProtocolOperations.GetFileSnapshot or
+        ProtocolOperations.GetMethodSummary or ProtocolOperations.GetMethod or ProtocolOperations.GetTypeOperation or
+        ProtocolOperations.GetCallers or ProtocolOperations.GetCallees or ProtocolOperations.GetReferences or
+        ProtocolOperations.Patch or ProtocolOperations.PatchRollback or "PATCH_PREVIEW" or "PATCH_VALIDATE" or
+        "READ_METHOD" or "READ_SECTION" or "READ_TYPE";
 
     private async Task<List<string>> ClosestNamesAsync(string query, CancellationToken cancellationToken)
         => _repositoryStore is ISymbolStore symbols

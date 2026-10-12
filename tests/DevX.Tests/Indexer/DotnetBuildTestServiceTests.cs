@@ -118,4 +118,5 @@ public sealed class DotnetBuildTestServiceTests
             Directory.Delete(root, recursive: true);
         }
     }
+
 }

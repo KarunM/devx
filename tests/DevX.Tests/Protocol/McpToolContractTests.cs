@@ -50,6 +50,43 @@ public sealed class McpToolContractTests
     }
 
     [Fact]
+    public async Task ReadContext_OptInReturnsMetadataAndAgentTextShowsOverflow()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("devx-mcp-read-context").FullName;
+        Directory.CreateDirectory(Path.Combine(repositoryRoot, "tests"));
+        await IOFile.WriteAllTextAsync(Path.Combine(repositoryRoot, "expr.py"), "class Expr:\n    def round(self):\n        return self._mag()\n    def _mag(self):\n        return 0\n");
+        foreach (var index in Enumerable.Range(1, 7))
+        {
+            var testDirectory = Path.Combine(repositoryRoot, "tests", $"group{index}");
+            Directory.CreateDirectory(testDirectory);
+            await IOFile.WriteAllTextAsync(Path.Combine(testDirectory, "test_expr.py"), "def test_round():\n    return Expr().round()\n");
+        }
+        var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"devx-mcp-read-context-{Guid.NewGuid():N}.db") }.ToString();
+        var store = new SqliteStorageInitializer(connectionString);
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(repositoryRoot);
+        var repositoryId = new RepositoryId(Guid.Parse(await GetRepositoryIdAsync(connectionString)));
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+        var server = new McpReferenceServer(new ProtocolEngine(new SearchService(store, store), store, store), store, store, session.Id.Value.ToString());
+        var id = session.Id.Value.ToString();
+
+        var tools = await server.ListToolsAsync();
+        var readSchema = tools.Single(tool => tool.Name == "read").InputSchema;
+        Assert.True(readSchema.GetProperty("properties").TryGetProperty("context", out _));
+        var plain = await server.CallToolAsync("read", JsonSerializer.SerializeToElement(new { sessionId = id, kind = "method", target = "expr.Expr.round", format = "json" }));
+        Assert.False(ContainsProperty(plain.Content, "context"));
+
+        var enriched = await server.CallToolAsync("read", JsonSerializer.SerializeToElement(new { sessionId = id, kind = "method", target = "expr.Expr.round", context = true, format = "json" }));
+        var context = FindProperty(enriched.Content, "context");
+        Assert.Equal(5, FindProperty(context, "testNameMatches").GetArrayLength());
+        Assert.True(FindProperty(context, "testNameMatchesTruncated").GetBoolean());
+
+        var agent = await server.CallToolAsync("read", JsonSerializer.SerializeToElement(new { sessionId = id, kind = "method", target = "expr.Expr.round", context = true }));
+        Assert.Contains("navigation candidates (incomplete; name/path evidence only)", TextOf(agent));
+        Assert.Contains("+more test candidates", TextOf(agent));
+    }
+
+    [Fact]
     public async Task MissingDottedName_ComesBackWithANameThatCanBePasted()
     {
         var (server, session, _) = await CreateServerAsync("devx-mcp-suggest");
@@ -120,6 +157,33 @@ public sealed class McpToolContractTests
         => result.Content.ValueKind == JsonValueKind.Object && result.Content.TryGetProperty("text", out var text)
             ? text.GetString() ?? string.Empty
             : result.Content.GetRawText();
+
+    private static bool ContainsProperty(JsonElement element, string name)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+            return element.EnumerateObject().Any(property => property.Name.Equals(name, StringComparison.OrdinalIgnoreCase) || ContainsProperty(property.Value, name));
+        if (element.ValueKind == JsonValueKind.Array)
+            return element.EnumerateArray().Any(item => ContainsProperty(item, name));
+        return false;
+    }
+
+    private static JsonElement FindProperty(JsonElement element, string name)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (property.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) return property.Value;
+                if (ContainsProperty(property.Value, name)) return FindProperty(property.Value, name);
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+                if (ContainsProperty(item, name)) return FindProperty(item, name);
+        }
+        throw new KeyNotFoundException($"JSON property '{name}' was not found.");
+    }
 
     /// <summary>The agent-format lines are "kind qualifiedName path:start-end".</summary>
     private static List<string> NamesFrom(string agentText)

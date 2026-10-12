@@ -148,6 +148,64 @@ public sealed class CliCommandTests
     }
 
     [Fact]
+    public async Task ReadMethod_ContextFlagPrintsBoundedCandidatesAndKeepsPlainPayloadSmall()
+    {
+        await ProcessStateLock.WaitAsync();
+        var originalDirectory = Environment.CurrentDirectory;
+        var root = Directory.CreateTempSubdirectory("devx-cli-read-context").FullName;
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(root, "tests"));
+            await File.WriteAllTextAsync(Path.Combine(root, "expr.py"), "class Expr:\n    def round(self):\n        return self._mag()\n    def _mag(self):\n        return 0\n");
+            await File.WriteAllTextAsync(Path.Combine(root, "query.py"), "def count(self):\n    return 1\n");
+            await File.WriteAllTextAsync(Path.Combine(root, "tests", "test_other.py"), "def test_count():\n    return 1\n");
+            foreach (var index in Enumerable.Range(1, 7))
+            {
+                var testDirectory = Path.Combine(root, "tests", $"group{index}");
+                Directory.CreateDirectory(testDirectory);
+                await File.WriteAllTextAsync(Path.Combine(testDirectory, "test_expr.py"), "def test_round():\n    return Expr().round()\n");
+            }
+            Environment.CurrentDirectory = root;
+            var (indexCode, _) = await InvokeCliAsync("index", ".");
+            Assert.Equal(0, indexCode);
+            var (sessionCode, sessionOutput) = await InvokeCliAsync("session", "create", "--format", "json");
+            Assert.Equal(0, sessionCode);
+            using var sessionJson = JsonDocument.Parse(sessionOutput);
+            var sessionId = sessionJson.RootElement.GetProperty("Data").GetProperty("sessionId").GetString()!;
+
+            var (plainCode, plainOutput) = await InvokeCliAsync("read", "method", "expr.Expr.round", "--session", sessionId, "--format", "json");
+            Assert.Equal(0, plainCode);
+            using var plainJson = JsonDocument.Parse(plainOutput);
+            Assert.False(plainJson.RootElement.GetProperty("Data").GetProperty("Metadata").TryGetProperty("Context", out _));
+
+            var (contextCode, contextOutput) = await InvokeCliAsync("read", "method", "expr.Expr.round", "--context", "--session", sessionId, "--format", "json");
+            Assert.Equal(0, contextCode);
+            using var contextJson = JsonDocument.Parse(contextOutput);
+            var context = contextJson.RootElement.GetProperty("Data").GetProperty("Metadata").GetProperty("Context");
+            Assert.Equal(5, context.GetProperty("TestNameMatches").GetArrayLength());
+            Assert.True(context.GetProperty("TestNameMatchesTruncated").GetBoolean());
+
+            var (textCode, textOutput) = await InvokeCliAsync("read", "method", "expr.Expr.round", "--context", "--session", sessionId);
+            Assert.Equal(0, textCode);
+            Assert.Contains("navigation candidates (incomplete; name/path evidence only)", textOutput);
+            Assert.Contains("_mag", textOutput);
+            Assert.Contains("test_round", textOutput);
+            Assert.Contains("+more test candidates", textOutput);
+
+            var (countCode, countOutput) = await InvokeCliAsync("read", "method", "query.<module>.count", "--context", "--session", sessionId);
+            Assert.Equal(0, countCode);
+            Assert.Contains("no supported navigation candidates", countOutput);
+            Assert.DoesNotContain("test_count", countOutput);
+        }
+        finally
+        {
+            Environment.CurrentDirectory = originalDirectory;
+            Directory.Delete(root, recursive: true);
+            ProcessStateLock.Release();
+        }
+    }
+
+    [Fact]
     public async Task SearchReadAndSnapshot_AgentFormatPrintCompactText()
     {
         await ProcessStateLock.WaitAsync();
@@ -218,7 +276,7 @@ public sealed class CliCommandTests
     public async Task HelpStartsWithAgentQuickStart()
     {
         var (_, output) = await InvokeCliAsync("--help");
-        Assert.StartsWith("1. devx search <name>   (symbols; falls back to text)\n2. devx read <name> [more names]   (source of a symbol, file, or file#Heading)\n3. devx replace <file> --old <text> --new <text> --verify   (edit, then build + tests in the same call)\n4. devx verify [build|test|both]   (check without editing; build + tests, one summary)\nAdd --format agent for compact output; no session needed.", output);
+        Assert.StartsWith("1. devx search <name>   (symbols; falls back to text)\n2. devx read <name> [more names]   (source of a symbol, file, or file#Heading)\nUse `devx read method <name> --context` for bounded test/name candidates when related code needs discovery.\n3. devx replace <file> --old <text> --new <text> --verify   (edit, then build + tests in the same call)\n4. devx verify [build|test|both]   (check without editing; build + tests, one summary)\nAdd --format agent for compact output; no session needed.", output);
     }
 
     [Fact]
@@ -298,6 +356,49 @@ public sealed class CliCommandTests
             Assert.Contains("=== normalize_name ===", multiOutput);
             Assert.Contains("=== MissingName ===", multiOutput);
             Assert.True(multiOutput.IndexOf("=== normalize_name ===", StringComparison.Ordinal) < multiOutput.IndexOf("=== MissingName ===", StringComparison.Ordinal));
+            var (methodBatchCode, methodBatchOutput) = await InvokeCliAsync("read", "method", "normalize_name", "other", "--format", "json");
+            Assert.Equal(0, methodBatchCode);
+            using (var methodBatchJson = JsonDocument.Parse(methodBatchOutput))
+            {
+                var results = methodBatchJson.RootElement.GetProperty("results");
+                Assert.Equal(2, results.GetArrayLength());
+                Assert.Equal("normalize_name", results[0].GetProperty("target").GetString());
+                Assert.Equal("other", results[1].GetProperty("target").GetString());
+                Assert.All(results.EnumerateArray(), result => Assert.True(result.GetProperty("success").GetBoolean()));
+            }
+            var (lateTargetCode, lateTargetOutput) = await InvokeCliAsync("read", "method", "normalize_name", "--context", "other", "--format", "json");
+            Assert.Equal(0, lateTargetCode);
+            using (var lateTargetJson = JsonDocument.Parse(lateTargetOutput))
+            {
+                var results = lateTargetJson.RootElement.GetProperty("results");
+                Assert.Equal(2, results.GetArrayLength());
+                Assert.Equal("normalize_name", results[0].GetProperty("target").GetString());
+                Assert.Equal("other", results[1].GetProperty("target").GetString());
+            }
+            var (partialBatchCode, partialBatchOutput) = await InvokeCliAsync("read", "method", "normalize_name", "MissingName", "run", "other", "--format", "json");
+            Assert.Equal(2, partialBatchCode);
+            using (var partialBatchJson = JsonDocument.Parse(partialBatchOutput))
+            {
+                var results = partialBatchJson.RootElement.GetProperty("results");
+                Assert.Equal(4, results.GetArrayLength());
+                Assert.Equal("normalize_name", results[0].GetProperty("target").GetString());
+                Assert.Equal("MissingName", results[1].GetProperty("target").GetString());
+                Assert.False(results[1].GetProperty("success").GetBoolean());
+                Assert.NotEmpty(results[1].GetProperty("errors").EnumerateArray());
+                Assert.Equal("run", results[2].GetProperty("target").GetString());
+                Assert.False(results[2].GetProperty("success").GetBoolean());
+                Assert.Contains("multiple definitions", results[2].GetProperty("errors")[0].GetProperty("Message").GetString());
+                Assert.Equal("other", results[3].GetProperty("target").GetString());
+                Assert.True(results[3].GetProperty("success").GetBoolean());
+            }
+            var (textBatchCode, textBatchOutput) = await InvokeCliAsync("read", "method", "normalize_name", "MissingName", "other", "--format", "agent");
+            Assert.Equal(2, textBatchCode);
+            Assert.Contains("error [MissingName]", textBatchOutput);
+            Assert.True(textBatchOutput.IndexOf("=== MissingName ===", StringComparison.Ordinal) < textBatchOutput.IndexOf("=== other ===", StringComparison.Ordinal));
+            var tooManyTargets = new[] { "read", "method" }.Concat(Enumerable.Repeat("normalize_name", 11)).Concat(new[] { "--format", "json" }).ToArray();
+            var (tooManyCode, tooManyOutput) = await InvokeCliAsync(tooManyTargets);
+            Assert.Equal(2, tooManyCode);
+            Assert.Contains("at most 10 targets are allowed", tooManyOutput);
             var (ambiguousCode, ambiguousOutput) = await InvokeCliAsync("read", "run");
             Assert.Equal(2, ambiguousCode);
             Assert.Contains("ambiguous: run matches 2 symbols", ambiguousOutput);

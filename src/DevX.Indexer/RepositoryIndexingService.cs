@@ -35,9 +35,32 @@ public sealed class RepositoryIndexingService
         var repository = new Repository(new RepositoryId(StableId(rootPath)), Path.GetFileName(rootPath), rootPath);
         await _repositoryStore.InitializeAsync(cancellationToken);
         await _repositoryStore.UpsertRepositoryAsync(repository, cancellationToken);
+        var freshnessStore = _repositoryStore as IIndexFreshnessStore;
+        var dirtyState = freshnessStore is null
+            ? null
+            : await freshnessStore.GetDirtyIndexRepositoryAsync(rootPath, cancellationToken);
+        if (freshnessStore is not null)
+        {
+            await freshnessStore.MarkIndexRepositoryDirtyAsync(rootPath, dirtyState?.DirtyFiles ?? [], cancellationToken);
+            if (dirtyState is not null)
+            {
+                // Reconcile previously fenced files from a clean slate so symbols removed by a
+                // source edit cannot survive a successful full-index recovery.
+                foreach (var dirtyFile in dirtyState.DirtyFiles)
+                {
+                    var dirtyPath = Path.GetFullPath(Path.Combine(rootPath, dirtyFile.Replace('\\', '/')));
+                    if (!dirtyPath.StartsWith(rootPath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+                        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                    {
+                        throw new ArgumentException($"Dirty index path '{dirtyFile}' is outside the repository root.", nameof(repositoryPath));
+                    }
+                    await _repositoryStore.DeleteFileAsync(new FileId(StableId(dirtyPath)), cancellationToken);
+                }
+            }
+        }
 
-        var projects = Directory.EnumerateFiles(rootPath, "*.csproj", SearchOption.AllDirectories).Where(path => IsNotIgnored(rootPath, path)).ToList();
-        var allFiles = Directory.EnumerateFiles(rootPath, "*", SearchOption.AllDirectories).ToList();
+        var projects = RepositoryPathGuard.EnumerateFiles(rootPath, "*.csproj").Where(path => IsNotIgnored(rootPath, path)).ToList();
+        var allFiles = RepositoryPathGuard.EnumerateFiles(rootPath).ToList();
         var considered = allFiles.Where(path => IsIndexable(path)
             && (!path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) || projects.Count == 0
                 || projects.Any(project => path.StartsWith(Path.GetDirectoryName(project) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))).ToList();
@@ -49,7 +72,7 @@ public sealed class RepositoryIndexingService
             var project = new Project(new ProjectId(StableId(projectPath)), repository.Id, Path.GetFileNameWithoutExtension(projectPath), RelativePath(rootPath, projectPath));
             await _repositoryStore.UpsertProjectAsync(project, cancellationToken);
 
-            foreach (var filePath in Directory.EnumerateFiles(projectDirectory, "*.cs", SearchOption.AllDirectories).Where(path => IsNotIgnored(rootPath, path)))
+            foreach (var filePath in RepositoryPathGuard.EnumerateFiles(projectDirectory, "*.cs").Where(path => IsNotIgnored(rootPath, path)))
             {
                 var file = new DomainFile(new FileId(StableId(filePath)), project.Id, RelativePath(rootPath, filePath));
                 await _repositoryStore.UpsertFileAsync(file, cancellationToken);
@@ -130,7 +153,7 @@ public sealed class RepositoryIndexingService
 
         if (projects.Count == 0)
         {
-            var looseCSharpFiles = Directory.EnumerateFiles(rootPath, "*.cs", SearchOption.AllDirectories).Where(path => IsNotIgnored(rootPath, path)).ToList();
+            var looseCSharpFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.cs").Where(path => IsNotIgnored(rootPath, path)).ToList();
             if (looseCSharpFiles.Count > 0)
             {
                 var projectPath = Path.Combine(rootPath, "<csharp>");
@@ -174,6 +197,19 @@ public sealed class RepositoryIndexingService
         await IndexJavaScriptFilesAsync(rootPath, repository, cancellationToken);
         await IndexJsonFilesAsync(rootPath, repository, cancellationToken);
         await IndexHtmlFilesAsync(rootPath, repository, cancellationToken);
+        if (freshnessStore is not null)
+        {
+            if (dirtyState is not null)
+            {
+                var indexedPaths = indexable.Select(path => RelativePath(rootPath, path).Replace('\\', '/'))
+                    .ToHashSet(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+                foreach (var dirtyFile in dirtyState.DirtyFiles.Where(path => !indexedPaths.Contains(path)))
+                {
+                    await RemoveFileAsync(rootPath, dirtyFile, cancellationToken);
+                }
+            }
+            await freshnessStore.ClearDirtyIndexRepositoryAsync(rootPath, cancellationToken);
+        }
         return new RepositoryIndexResult(indexable.Count, indexable.Count == 0
             ? considered.Count == 0 ? "no files with an indexable extension found" : "all files ignored"
             : null);
@@ -187,7 +223,7 @@ public sealed class RepositoryIndexingService
     /// </summary>
     private async Task IndexPythonFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
     {
-        var pythonFiles = Directory.EnumerateFiles(rootPath, "*.py", SearchOption.AllDirectories).Where(path => IsNotIgnored(rootPath, path)).ToList();
+        var pythonFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.py").Where(path => IsNotIgnored(rootPath, path)).ToList();
         if (pythonFiles.Count == 0)
         {
             return;
@@ -212,7 +248,7 @@ public sealed class RepositoryIndexingService
     /// </summary>
     private async Task IndexMarkdownFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
     {
-        var markdownFiles = Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories)
+        var markdownFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.*")
             .Where(path => MarkdownSymbolReader.CanParse(path))
             .Where(path => IsNotIgnored(rootPath, path))
             .OrderBy(path => path, StringComparer.Ordinal)
@@ -239,7 +275,7 @@ public sealed class RepositoryIndexingService
     /// </summary>
     private async Task IndexJavaScriptFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
     {
-        var javaScriptFiles = Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories)
+        var javaScriptFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.*")
             .Where(path => JavaScriptSymbolReader.CanParse(path))
             .Where(path => !path.EndsWith(".min.js", StringComparison.OrdinalIgnoreCase))
             .Where(path => IsNotIgnored(rootPath, path))
@@ -263,7 +299,7 @@ public sealed class RepositoryIndexingService
 
     private async Task IndexJsonFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
     {
-        var jsonFiles = Directory.EnumerateFiles(rootPath, "*.json", SearchOption.AllDirectories)
+        var jsonFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.json")
             .Where(path => IsNotIgnored(rootPath, path))
             .OrderBy(path => path, StringComparer.Ordinal)
             .ToList();
@@ -285,7 +321,7 @@ public sealed class RepositoryIndexingService
 
     private async Task IndexHtmlFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
     {
-        var htmlFiles = Directory.EnumerateFiles(rootPath, "*.*", SearchOption.AllDirectories)
+        var htmlFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.*")
             .Where(HtmlSymbolReader.CanParse)
             .Where(path => IsNotIgnored(rootPath, path))
             .OrderBy(path => path, StringComparer.Ordinal)
@@ -374,13 +410,9 @@ public sealed class RepositoryIndexingService
     public async Task ReindexFileAsync(string repositoryPath, string filePath, CancellationToken cancellationToken = default)
     {
         var rootPath = Path.GetFullPath(repositoryPath);
-        var relativePath = filePath.Replace('\\', '/');
-        var absolutePath = Path.GetFullPath(Path.Combine(rootPath, relativePath));
-
-        if (!absolutePath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException("File path must be inside the repository root.", nameof(filePath));
-        }
+        if (!RepositoryPathGuard.TryResolve(rootPath, filePath, out var absolutePath, out var pathError))
+            throw new ArgumentException(pathError, nameof(filePath));
+        var relativePath = Path.GetRelativePath(rootPath, absolutePath).Replace('\\', '/');
 
         if (!System.IO.File.Exists(absolutePath))
         {
@@ -391,7 +423,19 @@ public sealed class RepositoryIndexingService
         var fileId = new FileId(StableId(absolutePath));
         await _repositoryStore.DeleteFileAsync(fileId, cancellationToken);
 
-        var projectPath = Directory.EnumerateFiles(rootPath, "*.csproj", SearchOption.AllDirectories)
+        if (!absolutePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) && !StructuredSymbolReader.CanParse(absolutePath))
+        {
+            // Unsupported extensions have no indexed source representation. DeleteFileAsync
+            // above removes any stale entry with this stable file id; only then is this one
+            // path safe to clear (a repository-wide dirty fence remains set).
+            if (_repositoryStore is IIndexFreshnessStore fileFreshnessStore)
+            {
+                await fileFreshnessStore.ClearDirtyIndexFilesAsync(rootPath, [relativePath], cancellationToken);
+            }
+            return;
+        }
+
+        var projectPath = RepositoryPathGuard.EnumerateFiles(rootPath, "*.csproj")
             .FirstOrDefault(p => absolutePath.StartsWith(Path.GetDirectoryName(p)!, StringComparison.OrdinalIgnoreCase));
 
         ProjectId projectId;
@@ -417,10 +461,14 @@ public sealed class RepositoryIndexingService
             project = new Project(projectId, repositoryId, Path.GetFileName(rootPath), RelativePath(rootPath, rootPath));
             await _repositoryStore.UpsertProjectAsync(project, cancellationToken);
         }
-        else
+        else if (absolutePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
         {
+            // Loose C# files are supported by a full repository index, but they have no
+            // incrementally resolvable project here. Keep their freshness marker until
+            // that full reconciliation runs.
             throw new InvalidOperationException("Could not determine project for file.");
         }
+        else throw new InvalidOperationException("Could not determine project for file.");
 
         var file = new DomainFile(fileId, project.Id, RelativePath(rootPath, absolutePath));
         await _repositoryStore.UpsertFileAsync(file, cancellationToken);
@@ -496,6 +544,10 @@ public sealed class RepositoryIndexingService
                 }
             }
         }
+        if (_repositoryStore is IIndexFreshnessStore freshnessStore)
+        {
+            await freshnessStore.ClearDirtyIndexFilesAsync(rootPath, [relativePath], cancellationToken);
+        }
     }
 
     public async Task<IndexRefreshResult> ReindexFilesAsync(string repositoryPath, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default)
@@ -506,6 +558,11 @@ public sealed class RepositoryIndexingService
             .Select(path => path.Replace('\\', '/'))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
+
+        if (_repositoryStore is IIndexFreshnessStore freshnessStore)
+        {
+            await freshnessStore.MarkIndexFilesDirtyAsync(repositoryPath, normalized, cancellationToken);
+        }
 
         if (normalized.Length == 0)
         {
@@ -537,7 +594,18 @@ public sealed class RepositoryIndexingService
             }
             if (!SupportsIncrementalFile(path))
             {
-                skippedFiles.Add(new SkippedFile(path, $"Unsupported file type for incremental indexing: '{Path.GetExtension(path)}'. Run 'devx index .' for a full reindex."));
+                try
+                {
+                    // ReindexFileAsync first deletes any stale indexed row. For truly
+                    // unsupported extensions it then clears this path's fence; supported
+                    // loose C# still throws and remains fenced for full-index recovery.
+                    await ReindexFileAsync(repositoryPath, path, cancellationToken);
+                    skippedFiles.Add(new SkippedFile(path, $"Unsupported file type for incremental indexing: '{Path.GetExtension(path)}'. No indexed entry was retained."));
+                }
+                catch (Exception error) when (error is IOException or ArgumentException or InvalidOperationException or NotSupportedException or Microsoft.Data.Sqlite.SqliteException)
+                {
+                    skippedFiles.Add(new SkippedFile(path, $"ERROR: {error.Message}"));
+                }
                 continue;
             }
 
@@ -546,7 +614,7 @@ public sealed class RepositoryIndexingService
                 await ReindexFileAsync(repositoryPath, path, cancellationToken);
                 updated++;
             }
-            catch (Exception error) when (error is IOException or ArgumentException)
+            catch (Exception error) when (error is IOException or ArgumentException or InvalidOperationException or NotSupportedException or Microsoft.Data.Sqlite.SqliteException)
             {
                 skippedFiles.Add(new SkippedFile(path, $"ERROR: {error.Message}"));
             }
@@ -571,6 +639,10 @@ public sealed class RepositoryIndexingService
         }
 
         await _repositoryStore.DeleteFileAsync(new FileId(StableId(absolutePath)), cancellationToken);
+        if (_repositoryStore is IIndexFreshnessStore freshnessStore)
+        {
+            await freshnessStore.ClearDirtyIndexFilesAsync(rootPath, [filePath.Replace('\\', '/')], cancellationToken);
+        }
     }
 
     /// <summary>

@@ -35,15 +35,15 @@ public sealed class McpReferenceServerIntegrationTests
     public async Task StdioServer_InitializeIndexAndReplace_UpdatesFileAndReportsAmbiguity()
     {
         var (server, session, root) = await CreateServerAsync("devx-mcp-replace", indexRepository: false, plainFolder: true);
-        var file = Path.Combine(root, "replace.txt");
+        var file = Path.Combine(root, "replace.md");
         await IOFile.WriteAllTextAsync(file, "first old\nsecond old\n");
         var id = session.Id.Value.ToString();
         var requests = string.Join("\n", [
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}",
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}",
             $"{{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{{\"name\":\"index\",\"arguments\":{{\"sessionId\":\"{id}\"}}}}}}",
-            $"{{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{{\"name\":\"edit.replace\",\"arguments\":{{\"sessionId\":\"{id}\",\"file\":\"replace.txt\",\"old\":\"first\",\"new\":\"updated\"}}}}}}",
-            $"{{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{{\"name\":\"edit.replace\",\"arguments\":{{\"sessionId\":\"{id}\",\"file\":\"replace.txt\",\"old\":\"old\",\"new\":\"new\"}}}}}}"
+            $"{{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{{\"name\":\"edit.replace\",\"arguments\":{{\"sessionId\":\"{id}\",\"file\":\"replace.md\",\"old\":\"first\",\"new\":\"updated\"}}}}}}",
+            $"{{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{{\"name\":\"edit.replace\",\"arguments\":{{\"sessionId\":\"{id}\",\"file\":\"replace.md\",\"old\":\"old\",\"new\":\"new\"}}}}}}"
         ]) + "\n";
         var output = new StringWriter(); await new McpStdioServer(server).RunAsync(new StringReader(requests), output);
         var responses = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => JsonDocument.Parse(line)).ToArray();
@@ -189,8 +189,26 @@ public sealed class McpReferenceServerIntegrationTests
             query = "UniquePreview"
         }));
 
-        Assert.Equal("notes.md:1: UniquePreview phrase for text search.", textSearch.Content.GetProperty("text").GetString());
-        Assert.Equal("notes.md:1: UniquePreview phrase for text search.", fallback.Content.GetProperty("text").GetString());
+        AssertAgentSearchText(textSearch);
+        AssertAgentSearchText(fallback);
+
+        void AssertAgentSearchText(McpToolCallResult result)
+        {
+            var text = result.Content.GetProperty("text").GetString()!;
+            Assert.StartsWith("notes.md:1: UniquePreview phrase for text search.", text);
+            // Engine-independent coverage line: ripgrep cannot prove indexed-path coverage, the
+            // built-in scan can (complete=true, so no notice is rendered at all).
+            var lines = text.Split('\n');
+            if (RipgrepLocator.Locate(repositoryRoot).Executable is null)
+            {
+                Assert.Single(lines);
+            }
+            else
+            {
+                Assert.Equal(2, lines.Length);
+                Assert.Equal("Search coverage unknown; results may be incomplete. Ripgrep honors ignore and hidden-file rules, so indexed-path coverage is unknown.", lines[1]);
+            }
+        }
     }
 
     [Fact]

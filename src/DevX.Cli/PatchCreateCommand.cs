@@ -240,7 +240,10 @@ public static class PatchCreateCommand
                 return null;
             }
 
-            var fullPath = Path.GetFullPath(Path.Combine(repositoryRoot, operationPath));
+            if (!RepositoryPathGuard.TryResolve(repositoryRoot, operationPath, out var fullPath, out _))
+            {
+                return null;
+            }
             return IOFile.Exists(fullPath) ? await IOFile.ReadAllTextAsync(fullPath) : null;
         }
         catch

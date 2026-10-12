@@ -168,7 +168,7 @@ public sealed class CapabilitiesComposerTests
         var caps = CapabilitiesComposer.Compose();
         var read = caps.Commands.Single(c => c.Name == "read");
 
-        Assert.Equal(new[] { "--session", "--range", "--full", "--id", "--query" }, read.Options);
+        Assert.Equal(new[] { "--session", "--range", "--full", "--id", "--query", "--context" }, read.Options);
     }
 
     [Fact]

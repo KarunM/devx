@@ -115,7 +115,8 @@ static async Task<int> RunAsync(string[] args)
                 // Re-indexes the edited file by default; `--no-index` opts out (brief OSS12 item 2).
                 args.Contains("--no-index", StringComparer.Ordinal)
                     ? null
-                    : async file => { await replaceIndexer.ReindexFilesAsync(Environment.CurrentDirectory, [file]); });
+                    : async file => { await replaceIndexer.ReindexFilesAsync(Environment.CurrentDirectory, [file]); },
+                replaceStore);
             }
 
         case "health":
@@ -486,7 +487,11 @@ static async Task<int> IndexUpdateAsync(string connectionString, string[] args, 
     var indexer = new RepositoryIndexingService(store);
     var started = DateTimeOffset.UtcNow;
     var result = await indexer.ReindexFilesAsync(repositoryRoot, filePaths.ToArray());
-    var updateSucceeded = result.UpdatedFiles > 0 || !result.SkippedFilePaths.Any(file => file.Reason.StartsWith("ERROR:", StringComparison.Ordinal));
+    var errorSkips = result.SkippedFilePaths.Where(file => file.Reason.StartsWith("ERROR:", StringComparison.Ordinal)).ToArray();
+    var hasNonMissingError = errorSkips.Any(file => file.Reason != "ERROR: file missing");
+    // Preserve partial success when at least one requested file refreshed and another is
+    // missing; the missing path remains fenced, so this does not claim the whole index is fresh.
+    var updateSucceeded = !hasNonMissingError && (result.UpdatedFiles > 0 || errorSkips.Length == 0);
     await store.AddOperationMetricAsync(new OperationMetric("index update", started, DateTimeOffset.UtcNow - started, updateSucceeded, sessionId,
         JsonSerializer.Serialize(new { UnsupportedFilesSkipped = result.SkippedFilePaths.Count(f => f.Reason.StartsWith("Unsupported file type", StringComparison.Ordinal)) }), GetAgentLabel(args)));
 
@@ -1399,10 +1404,97 @@ static async Task<int> ReferencesAsync(string connectionString, string[] args, s
     return response.Success ? 0 : 1;
 }
 
-static async Task<int> ReadAsync(string connectionString, string[] args, string format)
+static async Task<int> ReadAsync(string connectionString, string[] args, string format,
+    List<(string Target, ProtocolResponse Response)>? batchResponses = null)
 {
     var positional = args.Skip(1).TakeWhile(argument => !argument.StartsWith("--", StringComparison.Ordinal)).ToArray();
     var inferredKind = positional.Length == 1;
+    if (args.Length > 1 && args[1] == "method")
+    {
+        if (!TryParseExplicitMethodRead(args, out var methodTargets, out var methodOptions, out var parseError))
+        {
+            Console.Error.WriteLine($"invalid read method request: {parseError}");
+            return 2;
+        }
+
+        var hasId = GetOption(args, "--id") is not null;
+        var hasQuery = GetOption(args, "--query") is not null;
+        if (hasId && hasQuery)
+        {
+            Console.Error.WriteLine("invalid read method request: use either --id or --query, not both");
+            return 2;
+        }
+
+        if ((hasId || hasQuery) && methodTargets.Length > 0)
+        {
+            Console.Error.WriteLine("invalid read method request: --id/--query cannot be combined with positional targets");
+            return 2;
+        }
+
+        if (methodTargets.Length == 0 && !hasId && !hasQuery)
+        {
+            Console.Error.WriteLine("invalid read method request: provide a target or use --id/--query");
+            return 2;
+        }
+
+        if (methodTargets.Length > 10)
+        {
+            Console.Error.WriteLine("invalid read method request: at most 10 targets are allowed");
+            return 2;
+        }
+
+        if (methodTargets.Length > 1)
+        {
+            if (string.IsNullOrWhiteSpace(GetOption(args, "--session")))
+            {
+                Console.Error.WriteLine("invalid read method batch: --session is required");
+                return 2;
+            }
+
+            var results = new List<(string Target, ProtocolResponse Response)>();
+            foreach (var target in methodTargets)
+            {
+                var singleArgs = new[] { "read", "method", target }.Concat(methodOptions).ToArray();
+                await ReadAsync(connectionString, singleArgs, format, results);
+            }
+
+            if (format == "json")
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new
+                {
+                    results = results.Select(item => new
+                    {
+                        target = item.Target,
+                        success = item.Response.Success,
+                        data = item.Response.Data,
+                        errors = item.Response.Errors
+                    })
+                }));
+            }
+            else
+            {
+                foreach (var item in results)
+                {
+                    Console.WriteLine($"=== {item.Target} ===");
+                    if (!item.Response.Success)
+                    {
+                        Console.WriteLine($"error [{item.Target}]: {string.Join("; ", item.Response.Errors.Select(error => error.Message))}");
+                    }
+                    else if (format == "agent")
+                    {
+                        WriteResponse(item.Response, format);
+                    }
+                    else
+                    {
+                        WriteSourceResponse(item.Response, HasFlag(methodOptions, "--context"));
+                    }
+                }
+            }
+
+            return results.Any(item => !item.Response.Success) ? 2 : 0;
+        }
+    }
+
     if (positional.Length > 1 && positional[0] is not ("file" or "method" or "type" or "section"))
     {
         var failed = false;
@@ -1450,20 +1542,6 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
         if (lookup.Data is { ValueKind: JsonValueKind.Object } result && TryGetPropertyIgnoreCase(result, "Symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array)
         {
             var exact = symbols.EnumerateArray().Where(symbol => TryGetPropertyIgnoreCase(symbol, "Name", out var name) && name.GetString() == readTarget).ToArray();
-            if (exact.Length > 1)
-            {
-                Console.WriteLine($"ambiguous: {readTarget} matches {exact.Length} symbols");
-                foreach (var candidate in exact)
-                {
-                    var qname = JsonPropertyText(candidate, "QualifiedName");
-                    var path = JsonPropertyText(candidate, "FilePath");
-                    var startLine = JsonPropertyText(candidate, "StartLine");
-                    var endLine = JsonPropertyText(candidate, "EndLine");
-                    var kind = JsonPropertyText(candidate, "Kind");
-                    Console.WriteLine($"{qname}  {path}:{startLine}-{endLine}  {kind}");
-                }
-                return 2;
-            }
             if (exact.Length == 1)
             {
                 var symbolKind = JsonPropertyText(exact[0], "Kind");
@@ -1493,9 +1571,11 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
             query = readTarget;
         }
 
-        request = id is not null
-            ? new ProtocolRequest("1.0", "READ_METHOD", sessionId, JsonSerializer.SerializeToElement(new { id }), GetAgentLabel(args))
-            : new ProtocolRequest("1.0", "READ_METHOD", sessionId, JsonSerializer.SerializeToElement(new { query }), GetAgentLabel(args));
+        var methodPayload = new Dictionary<string, object?>();
+        if (id is not null) methodPayload["id"] = id;
+        else methodPayload["query"] = query;
+        if (HasFlag(args, "--context")) methodPayload["context"] = true;
+        request = new ProtocolRequest("1.0", "READ_METHOD", sessionId, JsonSerializer.SerializeToElement(methodPayload), GetAgentLabel(args));
     }
     else if (action == "type")
     {
@@ -1508,7 +1588,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
 
         request = id is not null
             ? new ProtocolRequest("1.0", "READ_TYPE", sessionId, JsonSerializer.SerializeToElement(new { id }), GetAgentLabel(args))
-            : new ProtocolRequest("1.0", "READ_TYPE", sessionId, JsonSerializer.SerializeToElement(new { query }), GetAgentLabel(args));
+            : new ProtocolRequest("1.0", "READ_TYPE", sessionId, JsonSerializer.SerializeToElement(new { query, full = HasFlag(args, "--full") }), GetAgentLabel(args));
     }
     else if (action == "section")
     {
@@ -1553,15 +1633,88 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
 
     var response = await engine.ExecuteAsync(request);
     await store.AddOperationMetricAsync(new OperationMetric($"read {action}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
+    if (batchResponses is not null)
+    {
+        batchResponses.Add((args[2], response));
+        return response.Success ? 0 : 1;
+    }
+    var ambiguousError = response.Success || format == "json" ? null : response.Errors.FirstOrDefault(error => error.Code == "AmbiguousMatch" && error.Candidates is { Count: > 0 });
+    if (ambiguousError is not null)
+    {
+        Console.WriteLine(FormatAmbiguousCandidates(ambiguousError, args[2]));
+        return 2;
+    }
     if (format is "json" or "agent" || action == "type")
     {
         WriteResponse(response, format);
     }
     else
     {
-        WriteSourceResponse(response);
+        WriteSourceResponse(response, HasFlag(args, "--context"));
     }
     return response.Success ? 0 : 1;
+}
+
+static string FormatAmbiguousCandidates(ProtocolError error, string target)
+{
+    var total = error.TotalCandidates ?? error.Candidates!.Count;
+    var lines = new List<string> { $"ambiguous: {target} matches {total} symbols" };
+    foreach (var candidate in error.Candidates!.Take(10))
+        lines.Add($"{candidate.QualifiedName}  {RelativeAgentPath(candidate.FilePath ?? string.Empty)}:{candidate.StartLine}-{candidate.EndLine}  {candidate.Kind}");
+    lines.Add($"TotalCandidates: {total}" + (total > 10 ? " (showing 10)" : string.Empty));
+    lines.Add("Symbol matched multiple definitions; pass a qualified name from the list above.");
+    return string.Join("\n", lines);
+}
+
+static bool TryParseExplicitMethodRead(string[] args, out string[] targets, out string[] options, out string? error)
+{
+    var parsedTargets = new List<string>();
+    var parsedOptions = new List<string>();
+    var valueOptions = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "--id", "--query", "--session", "--agent", "--format", "--task", "--range"
+    };
+    var flagOptions = new HashSet<string>(StringComparer.Ordinal) { "--context", "--full" };
+
+    for (var index = 2; index < args.Length; index++)
+    {
+        var argument = args[index];
+        if (!argument.StartsWith("--", StringComparison.Ordinal))
+        {
+            parsedTargets.Add(argument);
+            continue;
+        }
+
+        if (flagOptions.Contains(argument))
+        {
+            parsedOptions.Add(argument);
+            continue;
+        }
+
+        if (!valueOptions.Contains(argument))
+        {
+            targets = [];
+            options = [];
+            error = $"unrecognized option or extra argument '{argument}'";
+            return false;
+        }
+
+        if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal))
+        {
+            targets = [];
+            options = [];
+            error = $"option '{argument}' requires a value";
+            return false;
+        }
+
+        parsedOptions.Add(argument);
+        parsedOptions.Add(args[++index]);
+    }
+
+    targets = parsedTargets.ToArray();
+    options = parsedOptions.ToArray();
+    error = null;
+    return true;
 }
 
 static bool HasFlag(string[] args, string name)
@@ -2523,6 +2676,9 @@ static string FormatAgentResponse(ProtocolResponse response,
                      + "alternation (a|b), or several queries in one call, e.g. devx search text \"a\" \"b\"");
         }
 
+        var coverageNote = ContentSearchCoverageFormatter.Format(data);
+        if (coverageNote is not null) hits.Add(coverageNote);
+
         return string.Join("\n", hits);
     }
     foreach (var collection in new[] { "Callers", "Callees", "References" })
@@ -2556,7 +2712,10 @@ static string FormatAgentResponse(ProtocolResponse response,
             var note = JsonPropertyText(metadata, "Message");
             if (note.Length > 0) resolved = note + "\n";
         }
-        return $"{resolved}{p}:{start}-{end}{(string.IsNullOrEmpty(name) ? "" : $" {name}")}{(string.IsNullOrEmpty(kind) ? "" : $" [{kind}]")}\n{source.GetString()}";
+        var context = TryGetPropertyIgnoreCase(data, "Metadata", out metadata) ? FormatReadContext(metadata) : string.Empty;
+        var cappedNote = !string.IsNullOrEmpty(kind) && TryGetPropertyIgnoreCase(data, "Truncated", out var truncatedFlag) && truncatedFlag.ValueKind == JsonValueKind.True
+            ? $" (truncated: {JsonPropertyText(data, "ReturnedLines")} of {end - start + 1} lines shown; pass --full for the rest)" : string.Empty;
+        return $"{resolved}{p}:{start}-{end}{(string.IsNullOrEmpty(name) ? "" : $" {name}")}{(string.IsNullOrEmpty(kind) ? "" : $" [{kind}]")}{cappedNote}\n{source.GetString()}{context}";
     }
     return data.GetRawText();
 }
@@ -2587,7 +2746,7 @@ static string AgentSignature(string signature)
     return start >= 0 && end > start ? signature[(start + 1)..end] : signature;
 }
 
-static void WriteSourceResponse(ProtocolResponse response)
+static void WriteSourceResponse(ProtocolResponse response, bool showContext = false)
 {
     if (!response.Success || response.Data is null)
     {
@@ -2615,6 +2774,38 @@ static void WriteSourceResponse(ProtocolResponse response)
         : $"{source.Path}:{source.StartLine}-{source.EndLine}";
     Console.WriteLine(location);
     if (source.SourceReturned && source.Source.Length > 0) Console.WriteLine(source.Source);
+    if (showContext && source.Metadata is System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.Object } contextMetadata)
+    {
+        Console.Write(FormatReadContext(contextMetadata));
+    }
+}
+
+static string FormatReadContext(JsonElement metadata)
+{
+    if (!TryGetPropertyIgnoreCase(metadata, "Context", out var context)) return string.Empty;
+    var candidatesFound = false;
+    var lines = new List<string>();
+    foreach (var groupName in new[] { "TestNameMatches", "SameFileCandidates" })
+    {
+        if (!TryGetPropertyIgnoreCase(context, groupName, out var candidates) || candidates.ValueKind != JsonValueKind.Array) continue;
+        foreach (var candidate in candidates.EnumerateArray())
+        {
+            if (!candidatesFound) lines.Add("navigation candidates (incomplete; name/path evidence only):");
+            candidatesFound = true;
+            var relation = TryGetPropertyIgnoreCase(candidate, "Relation", out var relationValue) ? relationValue.GetString() : "candidate";
+            var qualifiedName = TryGetPropertyIgnoreCase(candidate, "QualifiedName", out var nameValue) ? nameValue.GetString() : "";
+            var path = TryGetPropertyIgnoreCase(candidate, "FilePath", out var pathValue) ? pathValue.GetString() : "";
+            var line = TryGetPropertyIgnoreCase(candidate, "StartLine", out var lineValue) && lineValue.ValueKind == JsonValueKind.Number
+                ? $":{lineValue.GetInt32()}" : "";
+            var symbolId = TryGetPropertyIgnoreCase(candidate, "SymbolId", out var idValue) ? idValue.GetString() : "";
+            lines.Add($"  {relation}: {qualifiedName}  {path}{line}  id={symbolId}");
+        }
+    }
+    if (!candidatesFound) lines.Add("no supported navigation candidates");
+    if (TryGetPropertyIgnoreCase(context, "TestNameMatchesTruncated", out var testsTruncated) && testsTruncated.ValueKind == JsonValueKind.True) lines.Add("  +more test candidates");
+    if (TryGetPropertyIgnoreCase(context, "SameFileCandidatesTruncated", out var definitionsTruncated) && definitionsTruncated.ValueKind == JsonValueKind.True) lines.Add("  +more same-file candidates");
+    if (TryGetPropertyIgnoreCase(context, "SourceNamesTruncated", out var sourceNamesTruncated) && sourceNamesTruncated.ValueKind == JsonValueKind.True) lines.Add("  source name scan truncated");
+    return "\n" + string.Join("\n", lines);
 }
 
 static void PrintVersion(string format)
@@ -2640,6 +2831,7 @@ static void PrintHelp()
     Console.WriteLine("""
 1. devx search <name>   (symbols; falls back to text)
 2. devx read <name> [more names]   (source of a symbol, file, or file#Heading)
+Use `devx read method <name> --context` for bounded test/name candidates when related code needs discovery.
 3. devx replace <file> --old <text> --new <text> --verify   (edit, then build + tests in the same call)
 4. devx verify [build|test|both]   (check without editing; build + tests, one summary)
 Add --format agent for compact output; no session needed.

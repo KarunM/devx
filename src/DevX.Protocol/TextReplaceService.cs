@@ -1,4 +1,6 @@
 using System.Text;
+using DevX.Domain;
+using IOFile = System.IO.File;
 
 namespace DevX.Protocol;
 
@@ -8,12 +10,10 @@ public sealed class TextReplaceService
 {
     public TextReplaceResult Apply(string repositoryRoot, string relativePath, string oldText, string replacement, bool replaceAll = false, int? occurrence = null)
     {
-        var root = Path.GetFullPath(repositoryRoot);
-        var path = Path.GetFullPath(Path.Combine(root, relativePath));
-        if (!path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal) && path != root)
-            return new(false, 0, 0, $"replace failed: path '{relativePath}' is outside the repository root", "");
-        if (!File.Exists(path)) return new(false, 0, 0, $"replace failed: file not found: {relativePath}", "");
-        var before = File.ReadAllText(path);
+        if (!RepositoryPathGuard.TryResolve(repositoryRoot, relativePath, out var path, out var pathError))
+            return new(false, 0, 0, $"replace failed: {pathError}", "");
+        if (!IOFile.Exists(path)) return new(false, 0, 0, $"replace failed: file not found: {relativePath}", "");
+        var before = IOFile.ReadAllText(path);
         var starts = new List<int>();
         for (var i = 0; (i = before.IndexOf(oldText, i, StringComparison.Ordinal)) >= 0; i += oldText.Length) starts.Add(i);
         if (starts.Count == 0) return new(false, 0, 0, $"replace failed: old text not found in {relativePath}", "");
@@ -27,8 +27,8 @@ public sealed class TextReplaceService
         var after = before;
         foreach (var index in chosen.Reverse()) after = after.Remove(index, oldText.Length).Insert(index, replacement);
         var temp = path + ".devx-tmp-" + Guid.NewGuid().ToString("N");
-        try { File.WriteAllText(temp, after, new UTF8Encoding(false)); File.Move(temp, path, true); }
-        catch { if (File.Exists(temp)) File.Delete(temp); return new(false, starts.Count, 0, $"replace failed: could not write {relativePath}", ""); }
+        try { IOFile.WriteAllText(temp, after, new UTF8Encoding(false)); IOFile.Move(temp, path, true); }
+        catch { if (IOFile.Exists(temp)) IOFile.Delete(temp); return new(false, starts.Count, 0, $"replace failed: could not write {relativePath}", ""); }
         var diff = $"--- {relativePath}\n+++ {relativePath}\n@@\n-{oldText}\n+{replacement}";
         return new(true, starts.Count, chosen.Length, $"replaced {chosen.Length} occurrence(s) in {relativePath}", diff);
     }

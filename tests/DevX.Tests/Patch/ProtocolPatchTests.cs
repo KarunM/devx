@@ -193,6 +193,7 @@ public sealed class ProtocolPatchTests
         var repositoryRoot = Directory.CreateTempSubdirectory("devx-patch-rollback-method-test").FullName;
         var projectDirectory = Path.Combine(repositoryRoot, "src", "Sample");
         Directory.CreateDirectory(projectDirectory);
+        await System.IO.File.WriteAllTextAsync(Path.Combine(projectDirectory, "Sample.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>");
 
         var filePath = Path.Combine(projectDirectory, "Sample.cs");
         await System.IO.File.WriteAllTextAsync(filePath, """

@@ -12,7 +12,8 @@ public sealed record ProtocolError(
     string Message,
     string? AttemptedName = null,
     IReadOnlyList<string>? Suggestions = null,
-    IReadOnlyList<SymbolSearchResult>? Candidates = null);
+    IReadOnlyList<SymbolSearchResult>? Candidates = null,
+    int? TotalCandidates = null);
 public sealed record ValidationTargetRequest(string? Runtime, string? Target);
 public sealed record ValidationExecutionResponse(string CapabilityId, RuntimeContext Context, RuntimeTargetDescriptor Target, ExecutionRecord Execution);
 

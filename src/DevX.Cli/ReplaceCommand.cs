@@ -10,7 +10,7 @@ public static class ReplaceCommand
     public static int Run(string[] args, string root)
         => RunAsync(args, root).GetAwaiter().GetResult();
 
-    public static async Task<int> RunAsync(string[] args, string root, Func<string, VerifyAfterEdit>? verifierFactory = null, Func<string, Task>? reindexFile = null)
+    public static async Task<int> RunAsync(string[] args, string root, Func<string, VerifyAfterEdit>? verifierFactory = null, Func<string, Task>? reindexFile = null, IIndexFreshnessStore? freshnessStore = null)
     {
         string? Option(string key) { var i = Array.IndexOf(args, key); return i >= 0 && i + 1 < args.Length ? args[i + 1] : null; }
         if (args.Length < 2 || Option("--old") is null || Option("--new") is null)
@@ -18,9 +18,49 @@ public static class ReplaceCommand
         int? occurrence = int.TryParse(Option("--occurrence"), out var n) ? n : null;
         // Opt-in, with a mode: a bare --verify is build+tests, --verify=build is the build alone.
         var verifyMode = VerifyAfterEdit.ParseVerifyFlag(args);
+        if (freshnessStore is null)
+        {
+            Console.Error.WriteLine("replace failed: durable index freshness tracking is unavailable; no source was changed");
+            return 1;
+        }
+        var repositoryRoot = Path.GetFullPath(root);
+        var relativePath = args[1].Replace('\\', '/');
+        if (!await freshnessStore.TryMarkIndexFilesDirtyAsync(repositoryRoot, [relativePath]))
+        {
+            Console.Error.WriteLine("replace failed: this repository already has unreconciled source changes; run 'devx index <root>' first");
+            return 1;
+        }
         var result = new TextReplaceService().Apply(root, args[1], Option("--old")!, Option("--new")!, args.Contains("--all"), occurrence);
-        if (!result.Success) { Console.WriteLine(result.Message); return 1; }
-        if (reindexFile is not null) await reindexFile(args[1]);
+        if (!result.Success)
+        {
+            await freshnessStore.ClearDirtyIndexFilesAsync(repositoryRoot, [relativePath]);
+            Console.WriteLine(result.Message);
+            return 1;
+        }
+        if (args.Contains("--no-index", StringComparer.Ordinal))
+        {
+            Console.WriteLine($"{result.Message}; index remains fenced until 'devx index {repositoryRoot}' succeeds");
+            return 0;
+        }
+        if (reindexFile is null)
+        {
+            Console.Error.WriteLine("replace applied, but index refresh is unavailable; indexed operations are blocked until reconciliation");
+            return 1;
+        }
+        try { await reindexFile(args[1]); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or NotSupportedException or Microsoft.Data.Sqlite.SqliteException)
+        {
+            // A callback can fail after partially completing refresh work. Reassert this
+            // path's fence before reporting an unsuccessful refresh.
+            await freshnessStore.MarkIndexFilesDirtyAsync(repositoryRoot, [relativePath]);
+            Console.Error.WriteLine($"replace applied, but index refresh failed; indexed operations are blocked until reconciliation: {error.Message}");
+            return 1;
+        }
+        if (await freshnessStore.GetDirtyIndexRepositoryAsync(repositoryRoot) is not null)
+        {
+            Console.Error.WriteLine("replace applied, but index refresh was incomplete; indexed operations are blocked until reconciliation");
+            return 1;
+        }
         if (verifyMode is null)
         {
             Console.WriteLine(result.Message);

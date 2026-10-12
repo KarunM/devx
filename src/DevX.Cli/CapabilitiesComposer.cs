@@ -246,7 +246,7 @@ public static class CapabilitiesComposer
                         new CapabilitySubcommand("type", "Read type source", new[] { "<type>" })
                     },
                     new[] { "<kind>", "<target>" },
-                    new[] { "--session", "--range", "--full", "--id", "--query" },
+                    new[] { "--session", "--range", "--full", "--id", "--query", "--context" },
                     true
                 ),
                 new CapabilityCommand(

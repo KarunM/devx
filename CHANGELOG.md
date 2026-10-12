@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Read class bodies for bare and explicit type reads, resolve unique segment suffixes, cap and
+  rank ambiguous candidates, and report truncation only when the requested source span is clipped.
+- Fix an absolute in-root path in `devx patch apply` / `rollback` leaving a root-prefixed dirty marker
+  that never matched the indexed file: dirty paths are now stored root-relative, so a refresh or full
+  index clears them and no stale symbol survives.
+- Fix `devx search text` hanging with ripgrep when stdin is a pipe (as under MCP): ripgrep now gets an
+  explicit `.` search root and a closed stdin, and `./` is stripped from hit paths so they still match
+  the index.
+- Fix the MCP `test` tool ignoring `testFiles`: they are now forwarded as `targets`, so Python test
+  files select pytest exactly as `devx verify test <file>` does.
+
 ## 1.6.14
 
 A release about closing the loop after an edit. In 1.6.13 an agent that changed a file had to make a

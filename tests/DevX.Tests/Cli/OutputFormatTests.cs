@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Text.Json;
 using DevX.Cli;
 using Xunit;
 
@@ -66,5 +67,19 @@ public sealed class OutputFormatTests
     {
         Assert.True(OutputFormat.LooksLikeAnAgent(new Hashtable(), outputRedirected: true));
         Assert.False(OutputFormat.LooksLikeAnAgent(new Hashtable(), outputRedirected: false));
+    }
+
+    [Fact]
+    public void ContentSearchCoverageIsShownOnlyWhenIncompleteOrUnknown()
+    {
+        using var unknown = JsonDocument.Parse("""{"contentCoverage":{"returnedCount":0,"outputTruncated":null,"complete":null,"scanCapped":false,"warnings":["indexed coverage unknown"]}}""");
+        using var truncated = JsonDocument.Parse("""{"contentCoverage":{"returnedCount":100,"outputTruncated":true,"complete":false,"scanCapped":false,"warnings":["ripgrep ignore/hidden coverage unknown"]}}""");
+        using var complete = JsonDocument.Parse("""{"contentCoverage":{"returnedCount":1,"outputTruncated":false,"complete":true,"scanCapped":false,"warnings":[]}}""");
+
+        Assert.Contains("Search coverage unknown", ContentSearchCoverageFormatter.Format(unknown.RootElement));
+        var truncationNote = ContentSearchCoverageFormatter.Format(truncated.RootElement);
+        Assert.Contains("More matches exist", truncationNote);
+        Assert.Contains("ripgrep ignore/hidden coverage unknown", truncationNote);
+        Assert.Null(ContentSearchCoverageFormatter.Format(complete.RootElement));
     }
 }

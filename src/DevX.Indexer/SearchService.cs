@@ -28,7 +28,18 @@ public sealed class SearchService : ISearchService
         foreach (var symbol in hydrated)
         {
             var root = await _repositoryStore.GetRepositoryRootPathAsync(new RepositoryId(Guid.Parse(symbol.RepositoryId)), cancellationToken);
-            statuses[symbol.Id] = root is not null && symbol.FilePath is not null && !System.IO.File.Exists(Path.Combine(root, symbol.FilePath)) ? "file missing" : null;
+            if (root is null || symbol.FilePath is null)
+            {
+                statuses[symbol.Id] = null;
+            }
+            else if (!RepositoryPathGuard.TryResolve(root, symbol.FilePath, out var safePath, out _))
+            {
+                statuses[symbol.Id] = "unsafe path";
+            }
+            else
+            {
+                statuses[symbol.Id] = !System.IO.File.Exists(safePath) ? "file missing" : null;
+            }
         }
         var hydratedById = hydrated.ToDictionary(symbol => symbol.Id, StringComparer.Ordinal);
 
@@ -56,13 +67,26 @@ public sealed class SearchService : ISearchService
 
     public async Task<SearchResult> SearchTextAsync(SearchTextRequest request, CancellationToken cancellationToken = default)
     {
-        var contentMatches = await _repositoryStore.SearchFileContentsAsync(request.Query, cancellationToken: cancellationToken);
+        IReadOnlyList<ContentSearchResult> contentMatches;
+        ContentSearchCoverage coverage;
+        if (_repositoryStore is IContentSearchCoverageStore coverageStore)
+        {
+            var outcome = await coverageStore.SearchFileContentsWithCoverageAsync(request.Query, cancellationToken: cancellationToken);
+            contentMatches = outcome.Matches;
+            coverage = outcome.Coverage;
+        }
+        else
+        {
+            contentMatches = await _repositoryStore.SearchFileContentsAsync(request.Query, cancellationToken: cancellationToken);
+            coverage = new ContentSearchCoverage(contentMatches.Count, 100, null, null, false, false, "unknown", ["The configured store does not report search coverage."]);
+        }
         var files = await _repositoryStore.SearchFilesAsync(request.Query, cancellationToken);
 
         return new SearchResult(
             [],
             files.OrderBy(file => file.Path, StringComparer.Ordinal).ToList(),
-            contentMatches);
+            contentMatches,
+            coverage);
     }
 
     private static SymbolSearchResult MapSymbol(Symbol symbol, int _)

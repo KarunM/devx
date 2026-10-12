@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using System.Text.Json;
 using DevX.Domain;
 using IOFile = System.IO.File;
 
@@ -6,6 +7,19 @@ namespace DevX.Protocol;
 
 public sealed class PatchLifecycleService
 {
+    private readonly Action<string, int>? _applyFaultHook;
+
+    public PatchLifecycleService()
+    {
+    }
+
+    // Kept internal so tests can exercise commit and rollback failures without exposing
+    // a production fault-injection API.
+    internal PatchLifecycleService(Action<string, int> applyFaultHook)
+    {
+        _applyFaultHook = applyFaultHook;
+    }
+
     public PatchPreviewResponse Preview(string repositoryRoot, PatchDocument patch)
     {
         var validation = Validate(repositoryRoot, patch);
@@ -23,27 +37,419 @@ public sealed class PatchLifecycleService
 
     public (PatchApplyResponse? Response, ProtocolError? Error) Apply(string repositoryRoot, PatchDocument patch)
     {
-        var validation = Validate(repositoryRoot, patch);
+        var normalizedRoot = Path.GetFullPath(repositoryRoot);
+        var normalizedOperations = new List<PatchOperation>(patch.Operations.Count);
+        foreach (var operation in patch.Operations)
+        {
+            if (!TryNormalizeApplyPath(normalizedRoot, operation.Path, out var relativePath, out var pathError))
+            {
+                return (null, new ProtocolError("ValidationError", pathError ?? "Patch target path is invalid."));
+            }
+
+            if (ContainsReparsePoint(normalizedRoot, relativePath, out var linkError))
+            {
+                return (null, new ProtocolError("ValidationError", linkError ?? "Patch target path could not be checked safely."));
+            }
+
+            normalizedOperations.Add(operation with { Path = relativePath });
+        }
+
+        // Keep the existing response summary paths exactly as supplied by the caller.
+        // The normalized copies are used only for private staging and commit paths.
+        var validation = Validate(normalizedRoot, patch);
         if (validation.Errors.Count > 0)
         {
             var first = validation.Errors[0];
             return (null, new ProtocolError(first.Code, first.Message));
         }
 
-        foreach (var operation in patch.Operations)
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var relativePaths = normalizedOperations.Select(operation => operation.Path).Distinct(comparer).ToArray();
+        var stagingRoot = Path.Combine(Path.GetTempPath(), $"devx-patch-stage-{Guid.NewGuid():N}");
+        var workRoot = Path.Combine(stagingRoot, "work");
+        var backupRoot = Path.Combine(stagingRoot, "before");
+        var snapshots = new Dictionary<string, FileSnapshot>(comparer);
+        var preserveStaging = false;
+        try
         {
-            var result = ApplyOperation(repositoryRoot, operation);
-            if (!result.Success)
+            Directory.CreateDirectory(stagingRoot);
+            foreach (var relativePath in relativePaths)
             {
-                return (null, new ProtocolError(result.Code, result.Message));
+                var sourcePath = Path.Combine(normalizedRoot, relativePath);
+                var stagedPath = Path.Combine(stagingRoot, relativePath);
+                if (IOFile.Exists(sourcePath))
+                {
+                    var bytes = IOFile.ReadAllBytes(sourcePath);
+                    var workingPath = Path.Combine(workRoot, relativePath);
+                    var backupPath = Path.Combine(backupRoot, relativePath);
+                    Directory.CreateDirectory(Path.GetDirectoryName(workingPath)!);
+                    Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
+                    IOFile.WriteAllBytes(workingPath, bytes);
+                    IOFile.WriteAllBytes(backupPath, bytes);
+                    RestrictRecoveryFile(backupPath);
+                    snapshots.Add(relativePath, CaptureSnapshot(sourcePath, bytes));
+                }
+                else
+                {
+                    snapshots.Add(relativePath, new FileSnapshot(false, [], FileAttributes.Normal, null));
+                }
+            }
+
+            // Apply in document order against staged copies. A later operation can thus
+            // observe an earlier operation's result without touching live source files.
+            foreach (var operation in normalizedOperations)
+            {
+                var result = ApplyOperation(workRoot, operation);
+                if (!result.Success)
+                {
+                    return (null, new ProtocolError(result.Code, result.Message));
+                }
+            }
+
+            foreach (var relativePath in relativePaths)
+            {
+                if (!TryNormalizeApplyPath(normalizedRoot, relativePath, out _, out var pathError))
+                {
+                    return (null, new ProtocolError("PatchCommitFailedRestored", pathError ?? "Target path could not be resolved safely."));
+                }
+                if (ContainsReparsePoint(normalizedRoot, relativePath, out var linkError))
+                {
+                    return (null, new ProtocolError("PatchCommitFailedRestored", linkError ?? "Target path could not be checked safely."));
+                }
+
+                var livePath = Path.Combine(normalizedRoot, relativePath);
+                if (!SnapshotStillMatches(livePath, snapshots[relativePath]))
+                {
+                    return (null, new ProtocolError("PatchCommitFailedRestored", $"Target '{relativePath}' changed while the patch was being prepared; no patch files were committed."));
+                }
+            }
+
+            var createdDirectories = new List<string>();
+            var attempted = new List<string>();
+            try
+            {
+                var commitIndex = 0;
+                foreach (var relativePath in relativePaths)
+                {
+                    _applyFaultHook?.Invoke("commit", commitIndex++);
+                    attempted.Add(relativePath);
+                    var livePath = Path.Combine(normalizedRoot, relativePath);
+                    var stagedPath = Path.Combine(workRoot, relativePath);
+                    if (IOFile.Exists(stagedPath))
+                    {
+                        EnsureParentDirectories(Path.GetDirectoryName(livePath)!, normalizedRoot, createdDirectories);
+                        CommitStagedFile(stagedPath, livePath, snapshots[relativePath]);
+                    }
+                    else if (IOFile.Exists(livePath))
+                    {
+                        IOFile.Delete(livePath);
+                    }
+                }
+            }
+            catch (Exception commitException)
+            {
+                var restored = true;
+                var restoreIndex = 0;
+                var restoreFailures = new List<string>();
+                foreach (var relativePath in attempted.AsEnumerable().Reverse())
+                {
+                    try
+                    {
+                        _applyFaultHook?.Invoke("restore", restoreIndex++);
+                        RestoreSnapshot(Path.Combine(normalizedRoot, relativePath), snapshots[relativePath]);
+                    }
+                    catch (Exception restoreException)
+                    {
+                        restored = false;
+                        restoreFailures.Add($"{relativePath}: {restoreException.Message}");
+                    }
+                }
+
+                if (restored)
+                {
+                    RemoveCreatedDirectories(createdDirectories);
+                }
+
+                if (restored)
+                {
+                    return (null, new ProtocolError("PatchCommitFailedRestored", $"Patch commit failed and all affected files were restored: {commitException.Message}"));
+                }
+
+                preserveStaging = true;
+                var recovery = TryWriteRecoveryBundle(stagingRoot, "uncertain-commit", snapshots, relativePaths, attempted, restoreFailures, commitException.Message, null);
+                return (null, new ProtocolError("PatchCommitOutcomeUncertain", $"Patch commit failed and rollback was incomplete; repository state may have changed. Recovery data is at '{recovery.Location}'. {recovery.Error ?? commitException.Message}"));
+            }
+        }
+        catch (Exception ex)
+        {
+            // All work before the live commit is confined to the temporary stage tree.
+            return (null, new ProtocolError("PatchCommitFailedRestored", $"Patch could not be prepared; no repository files were changed: {ex.Message}"));
+        }
+        finally
+        {
+            if (!preserveStaging)
+            {
+                try { Directory.Delete(stagingRoot, recursive: true); }
+                catch { /* best-effort cleanup of private staging data */ }
             }
         }
 
         return (new PatchApplyResponse(true, validation.Summary with { LifecycleStage = "apply" }, validation.Errors), null);
     }
 
+    private static bool TryNormalizeApplyPath(string root, string inputPath, out string relativePath, out string? error)
+    {
+        relativePath = string.Empty;
+        if (!RepositoryPathGuard.TryResolve(root, inputPath, out var absolutePath, out var pathError))
+        {
+            error = pathError;
+            return false;
+        }
+        error = null;
+        relativePath = Path.GetRelativePath(Path.GetFullPath(root), absolutePath);
+        return true;
+    }
+
+    private static bool ContainsReparsePoint(string root, string relativePath, out string? error)
+    {
+        error = null;
+        var current = Path.GetFullPath(root);
+        var components = relativePath.Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+        foreach (var component in components)
+        {
+            current = Path.Combine(current, component);
+            try
+            {
+                var attributes = IOFile.GetAttributes(current);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    error = $"Patch path '{relativePath}' contains a symbolic link or reparse point and cannot be staged safely.";
+                    return true;
+                }
+            }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                error = $"Patch path '{relativePath}' could not be checked safely: {ex.Message}";
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static FileSnapshot CaptureSnapshot(string path, byte[] bytes)
+    {
+        var attributes = IOFile.GetAttributes(path);
+        UnixFileMode? unixMode = null;
+        if (!OperatingSystem.IsWindows())
+        {
+            try { unixMode = IOFile.GetUnixFileMode(path); }
+            catch (PlatformNotSupportedException) { }
+            catch (IOException) { }
+        }
+
+        return new FileSnapshot(true, bytes, attributes, unixMode);
+    }
+
+    private static bool SnapshotStillMatches(string path, FileSnapshot snapshot)
+    {
+        if (!IOFile.Exists(path)) return !snapshot.Exists;
+        if (!snapshot.Exists) return false;
+        return IOFile.ReadAllBytes(path).AsSpan().SequenceEqual(snapshot.Bytes);
+    }
+
+    private static void EnsureParentDirectories(string parent, string root, List<string> createdDirectories)
+    {
+        var missing = new Stack<string>();
+        var current = parent;
+        while (!Directory.Exists(current))
+        {
+            var full = Path.GetFullPath(current);
+            var relative = Path.GetRelativePath(root, full);
+            if (relative == ".." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) || Path.IsPathRooted(relative))
+                throw new IOException("Patch target parent is outside the repository root.");
+            missing.Push(full);
+            current = Path.GetDirectoryName(full) ?? throw new IOException("Patch target parent could not be resolved.");
+        }
+
+        while (missing.Count > 0)
+        {
+            var directory = missing.Pop();
+            Directory.CreateDirectory(directory);
+            createdDirectories.Add(directory);
+        }
+    }
+
+    private static void CommitStagedFile(string stagedPath, string targetPath, FileSnapshot snapshot)
+    {
+        var parent = Path.GetDirectoryName(targetPath)!;
+        var tempPath = Path.Combine(parent, $".devx-patch-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            IOFile.Copy(stagedPath, tempPath, overwrite: false);
+            if (snapshot.Exists)
+            {
+                if (snapshot.UnixMode is UnixFileMode mode && !OperatingSystem.IsWindows())
+                    IOFile.SetUnixFileMode(tempPath, mode);
+                IOFile.SetAttributes(tempPath, snapshot.Attributes & ~FileAttributes.ReparsePoint);
+                if ((snapshot.Attributes & FileAttributes.ReadOnly) != 0 && IOFile.Exists(targetPath))
+                    IOFile.SetAttributes(targetPath, snapshot.Attributes & ~FileAttributes.ReadOnly);
+            }
+
+            IOFile.Move(tempPath, targetPath, overwrite: true);
+        }
+        finally
+        {
+            if (IOFile.Exists(tempPath)) IOFile.Delete(tempPath);
+        }
+    }
+
+    private static void RestoreSnapshot(string path, FileSnapshot snapshot)
+    {
+        if (!snapshot.Exists)
+        {
+            if (IOFile.Exists(path)) IOFile.Delete(path);
+            return;
+        }
+
+        var parent = Path.GetDirectoryName(path)!;
+        Directory.CreateDirectory(parent);
+        var tempPath = Path.Combine(parent, $".devx-restore-{Guid.NewGuid():N}.tmp");
+        try
+        {
+            IOFile.WriteAllBytes(tempPath, snapshot.Bytes);
+            if (snapshot.UnixMode is UnixFileMode mode && !OperatingSystem.IsWindows())
+                IOFile.SetUnixFileMode(tempPath, mode);
+            if (IOFile.Exists(path) && (IOFile.GetAttributes(path) & FileAttributes.ReadOnly) != 0)
+                IOFile.SetAttributes(path, IOFile.GetAttributes(path) & ~FileAttributes.ReadOnly);
+            IOFile.Move(tempPath, path, overwrite: true);
+            IOFile.SetAttributes(path, snapshot.Attributes & ~FileAttributes.ReparsePoint);
+        }
+        finally
+        {
+            if (IOFile.Exists(tempPath)) IOFile.Delete(tempPath);
+        }
+    }
+
+    private static void RemoveCreatedDirectories(IEnumerable<string> directories)
+    {
+        foreach (var directory in directories.Reverse())
+        {
+            try { if (Directory.Exists(directory) && !Directory.EnumerateFileSystemEntries(directory).Any()) Directory.Delete(directory); }
+            catch { }
+        }
+    }
+
+    private static RecoveryBundleResult TryWriteRecoveryBundle(
+        string recoveryRoot,
+        string outcome,
+        IReadOnlyDictionary<string, FileSnapshot> snapshots,
+        IReadOnlyList<string> affectedPaths,
+        IReadOnlyList<string> attemptedPaths,
+        IReadOnlyList<string> failures,
+        string failure,
+        IReadOnlyDictionary<string, string?>? requestedBeforeStates,
+        IReadOnlyDictionary<string, string>? pathKinds = null)
+    {
+        try
+        {
+            Directory.CreateDirectory(recoveryRoot);
+            RestrictRecoveryDirectory(recoveryRoot);
+            var beforeRoot = Path.Combine(recoveryRoot, "before");
+            Directory.CreateDirectory(beforeRoot);
+            RestrictRecoveryDirectory(beforeRoot);
+            var files = new List<object>();
+            foreach (var path in affectedPaths)
+            {
+                snapshots.TryGetValue(path, out var snapshot);
+                var kind = pathKinds is not null && pathKinds.TryGetValue(path, out var suppliedKind)
+                    ? suppliedKind
+                    : snapshot?.Exists == true ? "file" : "missing";
+                string? backup = null;
+                if (snapshot?.Exists == true)
+                {
+                    // Numbered filenames keep even malformed or formerly absolute paths
+                    // from escaping the private recovery directory.
+                    var backupPath = Path.Combine(beforeRoot, $"{files.Count:D4}.bin");
+                    Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
+                    IOFile.WriteAllBytes(backupPath, snapshot.Bytes);
+                    RestrictRecoveryFile(backupPath);
+                    backup = Path.GetRelativePath(recoveryRoot, backupPath);
+                }
+
+                var requestedBefore = requestedBeforeStates is not null && requestedBeforeStates.TryGetValue(path, out var requested)
+                    ? requested
+                    : null;
+                files.Add(new
+                {
+                    path,
+                    kind,
+                    backup,
+                    attributes = snapshot?.Attributes.ToString(),
+                    unixMode = snapshot?.UnixMode?.ToString(),
+                    requestedBeforeState = requestedBefore
+                });
+            }
+
+            var manifest = new
+            {
+                format = "devx-patch-recovery-v1",
+                createdUtc = DateTimeOffset.UtcNow,
+                outcome,
+                failure,
+                affectedPaths,
+                attemptedPaths,
+                failures,
+                files
+            };
+            IOFile.WriteAllText(Path.Combine(recoveryRoot, "manifest.json"), JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }));
+            RestrictRecoveryFile(Path.Combine(recoveryRoot, "manifest.json"));
+            return new RecoveryBundleResult(recoveryRoot, null);
+        }
+        catch (Exception ex)
+        {
+            // Keep the directory and any backups already written. The caller still reports
+            // this location so a failed manifest write does not silently discard evidence.
+            return new RecoveryBundleResult(recoveryRoot, $"Recovery manifest could not be completed: {ex.Message}");
+        }
+    }
+
+    private static void RestrictRecoveryDirectory(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            try { IOFile.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); }
+            catch (PlatformNotSupportedException) { }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    private static void RestrictRecoveryFile(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            try { IOFile.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite); }
+            catch (PlatformNotSupportedException) { }
+            catch (IOException) { }
+        }
+    }
+
+    private sealed record FileSnapshot(bool Exists, byte[] Bytes, FileAttributes Attributes, UnixFileMode? UnixMode);
+    private sealed record RecoveryBundleResult(string Location, string? Error);
+
     public (PatchRollbackResponse? Response, ProtocolError? Error) Rollback(string repositoryRoot, PatchDocument patch)
     {
+        var rollbackTargets = new Dictionary<string, string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        foreach (var operation in patch.Operations)
+        {
+            if (!RepositoryPathGuard.TryResolve(repositoryRoot, operation.Path, out var target, out var pathError))
+                return (null, new ProtocolError("ValidationError", pathError));
+            rollbackTargets[operation.Path] = target;
+        }
+
         var validation = Validate(repositoryRoot, patch);
         var unsupported = validation.Summary.Contracts.Where(contract => !contract.RollbackSupported).ToArray();
         if (unsupported.Length > 0)
@@ -54,36 +460,79 @@ public sealed class PatchLifecycleService
 
         var restoredFiles = 0;
         var revertedOperations = 0;
-
-        foreach (var operation in patch.Operations.Reverse())
+        var mutationAttempted = false;
+        var rollbackSnapshots = new Dictionary<string, FileSnapshot>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        var rollbackPathKinds = new Dictionary<string, string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        var rollbackPaths = patch.Operations.Select(operation => operation.Path).Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal).ToArray();
+        foreach (var path in rollbackPaths)
         {
-            var absolutePath = Path.GetFullPath(Path.Combine(repositoryRoot, operation.Path));
-            if (!absolutePath.StartsWith(Path.GetFullPath(repositoryRoot), StringComparison.OrdinalIgnoreCase))
+            var absolutePath = rollbackTargets[path];
+            if (IOFile.Exists(absolutePath))
             {
-                return (null, new ProtocolError("ValidationError", $"Path '{operation.Path}' is outside the repository root."));
+                var bytes = IOFile.ReadAllBytes(absolutePath);
+                rollbackSnapshots[path] = CaptureSnapshot(absolutePath, bytes);
+                rollbackPathKinds[path] = "file";
             }
-
-            if (operation.Operation.Equals("CreateFile", StringComparison.OrdinalIgnoreCase))
+            else if (Directory.Exists(absolutePath))
             {
-                if (!IOFile.Exists(absolutePath))
+                rollbackSnapshots[path] = new FileSnapshot(false, [], FileAttributes.Directory, null);
+                rollbackPathKinds[path] = "directory";
+            }
+            else
+            {
+                rollbackSnapshots[path] = new FileSnapshot(false, [], FileAttributes.Normal, null);
+                rollbackPathKinds[path] = "missing";
+            }
+        }
+        var rollbackAttempted = new List<string>();
+
+        ProtocolError Failure(string code, string message)
+        {
+            if (!mutationAttempted) return new ProtocolError(code, message);
+            var beforeStates = new Dictionary<string, string?>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            foreach (var operation in patch.Operations) beforeStates[operation.Path] = operation.BeforeState;
+            var recovery = TryWriteRecoveryBundle(
+                Path.Combine(Path.GetTempPath(), $"devx-patch-stage-{Guid.NewGuid():N}"),
+                "uncertain-rollback", rollbackSnapshots, rollbackPaths, rollbackAttempted, [message], message, beforeStates, rollbackPathKinds);
+            return new ProtocolError("PatchRollbackOutcomeUncertain", $"Rollback stopped after source mutation may have begun; repository state may have changed. Recovery data is at '{recovery.Location}'. {recovery.Error ?? message}");
+        }
+
+        try
+        {
+            foreach (var operation in patch.Operations.Reverse())
+            {
+                var absolutePath = rollbackTargets[operation.Path];
+
+                if (operation.Operation.Equals("CreateFile", StringComparison.OrdinalIgnoreCase))
                 {
-                    return (null, new ProtocolError("NotFound", $"File '{operation.Path}' was not found for rollback."));
+                    if (!IOFile.Exists(absolutePath))
+                    {
+                        return (null, Failure("NotFound", $"File '{operation.Path}' was not found for rollback."));
+                    }
+
+                    mutationAttempted = true;
+                    rollbackAttempted.Add(operation.Path);
+                    IOFile.Delete(absolutePath);
+                    restoredFiles++;
+                    revertedOperations++;
+                    continue;
                 }
 
-                IOFile.Delete(absolutePath);
+                if (string.IsNullOrWhiteSpace(operation.BeforeState))
+                {
+                    return (null, Failure("ValidationError", $"Rollback requires before-state metadata for operation '{operation.Operation}'."));
+                }
+
+                mutationAttempted = true;
+                rollbackAttempted.Add(operation.Path);
+                IOFile.WriteAllText(absolutePath, operation.BeforeState);
                 restoredFiles++;
                 revertedOperations++;
-                continue;
             }
-
-            if (string.IsNullOrWhiteSpace(operation.BeforeState))
-            {
-                return (null, new ProtocolError("ValidationError", $"Rollback requires before-state metadata for operation '{operation.Operation}'."));
-            }
-
-            IOFile.WriteAllText(absolutePath, operation.BeforeState);
-            restoredFiles++;
-            revertedOperations++;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return (null, Failure("RollbackFailed", exception.Message));
         }
 
         return (new PatchRollbackResponse(true, validation.Summary with { LifecycleStage = "rollback" }, restoredFiles, revertedOperations, [], []), null);

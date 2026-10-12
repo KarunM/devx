@@ -83,6 +83,12 @@ If output exceeds the limit:
 }
 ```
 
+`Truncated` is true only when the returned source is shorter than the requested span. For an
+element read, compare against the indexed element span; for a ranged file read, compare against
+the requested range after clipping it to the file. `TotalLines` continues to describe the whole
+file. A fully returned method or type therefore has `Truncated: false` even when its file has
+additional lines.
+
 Optional later flag:
 
 ```bash

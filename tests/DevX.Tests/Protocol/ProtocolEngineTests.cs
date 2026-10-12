@@ -10,6 +10,54 @@ namespace DevX.Tests.Protocol;
 
 public sealed class ProtocolEngineTests
 {
+    [Theory]
+    [InlineData("test")]
+    [InlineData("both")]
+    public async Task ExecuteAsync_RunVerify_ForwardsPythonFilterAfterBuildPolicy(string mode)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var repositoryRoot = Directory.CreateTempSubdirectory("devx-verify-pytest-filter").FullName;
+        var capture = Path.Combine(repositoryRoot, "captured-argv.txt");
+        var database = Path.Combine(Path.GetTempPath(), $"devx-verify-filter-{Guid.NewGuid():N}.db");
+        try
+        {
+            var pythonDirectory = Directory.CreateDirectory(Path.Combine(repositoryRoot, ".venv", "bin"));
+            var python = Path.Combine(pythonDirectory.FullName, "python");
+            var quotedCapture = "'" + capture.Replace("'", "'\\''", StringComparison.Ordinal) + "'";
+            await System.IO.File.WriteAllTextAsync(python,
+                $"#!/bin/sh\nprintf '%s\\n' \"$@\" > {quotedCapture}\nprintf '1 passed in 0.01s\\n'\n");
+            if (!OperatingSystem.IsWindows())
+                System.IO.File.SetUnixFileMode(python, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            var devxDirectory = Directory.CreateDirectory(Path.Combine(repositoryRoot, ".devx"));
+            await System.IO.File.WriteAllTextAsync(Path.Combine(devxDirectory.FullName, "config.json"),
+                JsonSerializer.Serialize(new
+                {
+                    build = new { command = "true" },
+                    test = new { command = python, args = new[] { "-m", "pytest" } }
+                }));
+
+            var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = database }.ToString());
+            await store.InitializeAsync();
+            var repositoryId = new RepositoryId(Guid.NewGuid());
+            await store.UpsertRepositoryAsync(new Repository(repositoryId, "filter-test", repositoryRoot));
+            var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+            var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+            var response = await engine.ExecuteAsync(new ProtocolRequest(
+                "1.0", ProtocolOperations.RunVerify, session.Id.Value.ToString(),
+                JsonSerializer.SerializeToElement(new { mode, filter = "smoke and fast" })));
+
+            Assert.True(response.Success, response.Errors.FirstOrDefault()?.Message);
+            Assert.Equal(new[] { "-m", "pytest", "-k", "smoke and fast" }, await System.IO.File.ReadAllLinesAsync(capture));
+        }
+        finally
+        {
+            Directory.Delete(repositoryRoot, recursive: true);
+            if (System.IO.File.Exists(database)) System.IO.File.Delete(database);
+            if (System.IO.File.Exists(database + "-shm")) System.IO.File.Delete(database + "-shm");
+            if (System.IO.File.Exists(database + "-wal")) System.IO.File.Delete(database + "-wal");
+        }
+    }
+
     [Fact]
     public async Task ExecuteAsync_SearchSymbol_UpdatesSessionAndReturnsMetadataOnly()
     {
@@ -296,9 +344,8 @@ public sealed class ProtocolEngineTests
         var store = new SqliteStorageInitializer(connectionString);
         await new RepositoryIndexingService(store).IndexAsync(repositoryRoot);
 
-        var repositoryId = new RepositoryId(Guid.NewGuid());
-        await store.UpsertRepositoryAsync(new Repository(repositoryId, "sample", repositoryRoot));
-        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+        var repository = (await store.GetRepositoryByRootPathAsync(repositoryRoot))!;
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
         var engine = new ProtocolEngine(new SearchService(store, store), store, store);
 
         var response = await engine.ExecuteAsync(new ProtocolRequest(
@@ -312,7 +359,8 @@ public sealed class ProtocolEngineTests
         Assert.NotNull(payload);
         Assert.Equal(payload!.ReturnedLines, payload.Source.Split('\n').Length);
         Assert.True(payload.ReturnedLines < payload.TotalLines);
-        Assert.True(payload.Truncated);
+        // SPEC-009A (amended, OSS20 R-D): Truncated is true only when the returned source is shorter than the requested element span; the whole method was returned.
+        Assert.False(payload.Truncated);
         Assert.DoesNotContain("Stop()", payload.Source, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -571,9 +619,8 @@ public sealed class ProtocolEngineTests
         var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"devx-safe-read-{Guid.NewGuid():N}.db") }.ToString());
         await new RepositoryIndexingService(store).IndexAsync(repositoryRoot);
         Assert.Equal(2, (await store.FindSymbolsByNameAsync("set_state_field")).Count);
-        var repositoryId = new RepositoryId(Guid.NewGuid());
-        await store.UpsertRepositoryAsync(new Repository(repositoryId, "sample", repositoryRoot));
-        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+        var repository = (await store.GetRepositoryByRootPathAsync(repositoryRoot))!;
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
         var engine = new ProtocolEngine(new SearchService(store, store), store, store);
 
         var response = await engine.ExecuteAsync(new ProtocolRequest(
@@ -586,6 +633,80 @@ public sealed class ProtocolEngineTests
         Assert.Equal("db.py", payload!.Path);
         Assert.Contains("real", payload.Source);
         Assert.DoesNotContain("fake", payload.Source);
+    }
+
+    [Fact]
+    public async Task ExecuteAsync_ReadMethod_ContextReturnsBoundedHonestCandidatesAndStableSymbolIds()
+    {
+        var repositoryRoot = Directory.CreateTempSubdirectory("devx-read-context").FullName;
+        Directory.CreateDirectory(Path.Combine(repositoryRoot, "tests"));
+        await System.IO.File.WriteAllTextAsync(Path.Combine(repositoryRoot, "expr.py"), """
+            class Expr:
+                def round(self):
+                    return self._mag()
+
+                def _mag(self):
+                    return 0
+
+                def _other(self):
+                    return 1
+            """);
+        foreach (var index in Enumerable.Range(1, 7))
+        {
+            var testDirectory = Path.Combine(repositoryRoot, "tests", $"group{index}");
+            Directory.CreateDirectory(testDirectory);
+            await System.IO.File.WriteAllTextAsync(Path.Combine(testDirectory, "test_expr.py"), """
+                def test_round():
+                    return Expr().round()
+                """);
+        }
+        var otherRoot = Directory.CreateTempSubdirectory("devx-read-context-other").FullName;
+        Directory.CreateDirectory(Path.Combine(otherRoot, "tests"));
+        await System.IO.File.WriteAllTextAsync(Path.Combine(otherRoot, "expr.py"), "def round():\n    return 0\n");
+        await System.IO.File.WriteAllTextAsync(Path.Combine(otherRoot, "tests", "test_expr.py"), "def test_round():\n    return round()\n");
+
+        var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"devx-read-context-{Guid.NewGuid():N}.db") }.ToString());
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(repositoryRoot);
+        await indexer.IndexAsync(otherRoot);
+        var indexedTarget = Assert.Single(await store.FindSymbolsByQualifiedNameAsync("expr.Expr.round"));
+        var repositoryId = new RepositoryId(Guid.Parse(indexedTarget.RepositoryId));
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+        var engine = new ProtocolEngine(new SearchService(store, store), store, store);
+
+        var plain = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0", "READ_METHOD", session.Id.Value.ToString(), JsonSerializer.SerializeToElement(new { query = "expr.Expr.round" })));
+        var enriched = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0", "READ_METHOD", session.Id.Value.ToString(), JsonSerializer.SerializeToElement(new { query = "expr.Expr.round", context = true })));
+
+        Assert.True(plain.Success, JsonSerializer.Serialize(plain.Errors));
+        Assert.True(enriched.Success, JsonSerializer.Serialize(enriched.Errors));
+        var plainData = Assert.IsType<JsonElement>(plain.Data);
+        var plainPayload = plainData.Deserialize<SourceReadResponse>()!;
+        Assert.False(((JsonElement)plainPayload.Metadata).TryGetProperty("Context", out _));
+        var enrichedData = Assert.IsType<JsonElement>(enriched.Data);
+        var payload = enrichedData.Deserialize<SourceReadResponse>()!;
+        var metadata = (JsonElement)payload.Metadata;
+        Assert.True(metadata.TryGetProperty("Context", out var context), metadata.GetRawText());
+        Assert.False(context.GetProperty("Complete").GetBoolean());
+        Assert.True(context.GetProperty("TestNameMatches").EnumerateArray().Any(candidate =>
+            candidate.GetProperty("Name").GetString() == "test_round"
+            && candidate.GetProperty("Relation").GetString() == "test-name-match"
+            && candidate.GetProperty("Evidence").GetString()!.Contains("exact test name and same-module test path", StringComparison.Ordinal)), context.GetRawText());
+        Assert.Equal(5, context.GetProperty("TestNameMatches").GetArrayLength());
+        Assert.True(context.GetProperty("TestNameMatchesTruncated").GetBoolean());
+        Assert.Contains(context.GetProperty("SameFileCandidates").EnumerateArray(), candidate =>
+            candidate.GetProperty("Name").GetString() == "_mag"
+            && candidate.GetProperty("Relation").GetString() == "source-name-match");
+        Assert.DoesNotContain(context.GetProperty("TestNameMatches").EnumerateArray(), candidate => candidate.GetProperty("FilePath").GetString()!.StartsWith("../", StringComparison.Ordinal));
+
+        var helperId = context.GetProperty("SameFileCandidates").EnumerateArray()
+            .Single(candidate => candidate.GetProperty("Name").GetString() == "_mag")
+            .GetProperty("SymbolId").GetString();
+        var helperRead = await engine.ExecuteAsync(new ProtocolRequest(
+            "1.0", "READ_METHOD", session.Id.Value.ToString(), JsonSerializer.SerializeToElement(new { id = helperId })));
+        Assert.True(helperRead.Success, JsonSerializer.Serialize(helperRead.Errors));
+        Assert.Contains("def _mag", helperRead.Data!.Value.GetProperty("Source").GetString());
     }
 
     [Fact]
@@ -618,9 +739,8 @@ public sealed class ProtocolEngineTests
         await System.IO.File.WriteAllTextAsync(Path.Combine(repositoryRoot, "CHECKLIST.md"), "# Checklist\n\n## Block 119 — Deploy API\nDo the work.\n\n## Block 120 — Verify API\nCheck it.\n");
         var store = new SqliteStorageInitializer(new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"devx-section-{Guid.NewGuid():N}.db") }.ToString());
         await new RepositoryIndexingService(store).IndexAsync(repositoryRoot);
-        var repositoryId = new RepositoryId(Guid.NewGuid());
-        await store.UpsertRepositoryAsync(new Repository(repositoryId, "sample", repositoryRoot));
-        var session = await store.CreateSessionAsync(new CreateSessionRequest(repositoryId));
+        var repository = (await store.GetRepositoryByRootPathAsync(repositoryRoot))!;
+        var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
         var engine = new ProtocolEngine(new SearchService(store, store), store, store);
 
         var response = await engine.ExecuteAsync(new ProtocolRequest(

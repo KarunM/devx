@@ -179,4 +179,22 @@ public sealed class ReadResolutionRegressionTests
         Assert.Equal(0, result.ExitCode); Assert.Equal("", result.Error);
         Assert.Contains("SKIPPED: notes.txt", result.Output);
     }
+
+    [Fact]
+    public async Task CliMixedIndexUpdateFailsWhenLooseCSharpCannotBeIncrementallyIndexed()
+    {
+        var f = await Create();
+        await System.IO.File.WriteAllTextAsync(Path.Combine(f.Root, "Loose.cs"), "namespace Sample; public class Loose { public void Run() { } }");
+        var result = await Cli(f, "index", "update", "notes.md", "Loose.cs", "--session", f.Session.Id.Value.ToString(), "--format", "json");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Equal("", result.Error);
+        using var document = JsonDocument.Parse(result.Output);
+        Assert.Equal(1, document.RootElement.GetProperty("UpdatedFiles").GetInt32());
+        Assert.Equal(1, document.RootElement.GetProperty("SkippedFiles").GetInt32());
+        Assert.Contains("ERROR:", document.RootElement.GetProperty("SkippedFilePaths")[0].GetProperty("Reason").GetString());
+        var dirty = await f.Store.GetDirtyIndexRepositoryAsync(f.Root);
+        Assert.NotNull(dirty);
+        Assert.Equal(["Loose.cs"], dirty!.DirtyFiles);
+    }
 }

@@ -196,7 +196,10 @@ public sealed class McpReferenceServer
                 : null;
             if (!string.IsNullOrWhiteSpace(execution?.Summary)) return execution.Summary;
         }
-        if (!response.Success) return string.Join("\n", response.Errors.Select(error => $"error: {error.Message}"));
+        if (!response.Success) return string.Join("\n", response.Errors.Select(error =>
+            error.Candidates is { Count: > 0 }
+                ? $"error: {error.Message}\n" + string.Join("\n", error.Candidates.Take(10).Select(candidate => $"{candidate.QualifiedName}  {RelativePath(candidate.FilePath ?? string.Empty)}:{candidate.StartLine}-{candidate.EndLine}  {candidate.Kind}"))
+                : $"error: {error.Message}"));
         if (response.Data is not { } data) return string.Empty;
         if (TryGetPropertyIgnoreCase(data, "symbols", out var symbols) && symbols.ValueKind == JsonValueKind.Array && symbols.GetArrayLength() > 0)
         {
@@ -208,6 +211,37 @@ public sealed class McpReferenceServer
         {
             var hits = matches.EnumerateArray().Take(10).Select(item => { var preview = Text(item, "preview").Trim(); return $"{RelativePath(Text(item, "path"))}:{Text(item, "line")}: {preview[..Math.Min(120, preview.Length)]}"; }).ToList();
             if (matches.GetArrayLength() > hits.Count) hits.Add($"... {matches.GetArrayLength() - hits.Count} more");
+            if (!TryGetPropertyIgnoreCase(data, "contentCoverage", out var coverage) || coverage.ValueKind != JsonValueKind.Object)
+            {
+                hits.Add("Search coverage unknown.");
+            }
+            else
+            {
+                var complete = TryGetPropertyIgnoreCase(coverage, "complete", out var completeValue)
+                    ? completeValue.ValueKind == JsonValueKind.True ? true : completeValue.ValueKind == JsonValueKind.False ? false : (bool?)null
+                    : null;
+                var truncated = TryGetPropertyIgnoreCase(coverage, "outputTruncated", out var truncatedValue) && truncatedValue.ValueKind == JsonValueKind.True;
+                var capped = TryGetPropertyIgnoreCase(coverage, "scanCapped", out var cappedValue) && cappedValue.ValueKind == JsonValueKind.True;
+                if (truncated)
+                {
+                    var note = $"More matches exist; showing {Text(coverage, "returnedCount")} results. Narrow the search.";
+                    var warningText = TryGetPropertyIgnoreCase(coverage, "warnings", out var truncationWarnings) && truncationWarnings.ValueKind == JsonValueKind.Array
+                        ? string.Join(" ", truncationWarnings.EnumerateArray().Select(item => item.GetString()).Where(item => !string.IsNullOrWhiteSpace(item)))
+                        : string.Empty;
+                    if (warningText.Length > 0) note += $" Search coverage note: {warningText}";
+                    else if (complete is null || capped) note += " Search coverage beyond these matches is unknown.";
+                    hits.Add(note);
+                }
+                if (!truncated && (complete is null || capped))
+                {
+                    var warningsText = TryGetPropertyIgnoreCase(coverage, "warnings", out var warnings) && warnings.ValueKind == JsonValueKind.Array
+                        ? string.Join(" ", warnings.EnumerateArray().Select(item => item.GetString()).Where(item => !string.IsNullOrWhiteSpace(item)))
+                        : string.Empty;
+                    hits.Add(warningsText.Length == 0
+                        ? "Search coverage unknown; results may be incomplete."
+                        : $"Search coverage unknown; results may be incomplete. {warningsText}");
+                }
+            }
             return string.Join("\n", hits);
         }
         foreach (var collection in new[] { "callers", "callees", "references" })
@@ -230,7 +264,27 @@ public sealed class McpReferenceServer
         {
             var name = Text(data, "qualifiedName");
             var kind = Text(data, "kind");
-            return $"{RelativePath(path.GetString() ?? "")}:{Text(data, "startLine")}-{Text(data, "endLine")}{(name.Length == 0 ? "" : $" {name}")}{(kind.Length == 0 ? "" : $" [{kind}]")}\n{source.GetString()}";
+            var cappedNote = kind.Length > 0 && TryGetPropertyIgnoreCase(data, "truncated", out var truncatedFlag) && truncatedFlag.ValueKind == JsonValueKind.True
+                ? $" (truncated: {Text(data, "returnedLines")} of {(int.TryParse(Text(data, "endLine"), out var e) && int.TryParse(Text(data, "startLine"), out var st) ? e - st + 1 : 0)} lines shown; pass full:true for the rest)" : string.Empty;
+            var rendered = $"{RelativePath(path.GetString() ?? "")}:{Text(data, "startLine")}-{Text(data, "endLine")}{(name.Length == 0 ? "" : $" {name}")}{(kind.Length == 0 ? "" : $" [{kind}]")}{cappedNote}\n{source.GetString()}";
+            if (!TryGetPropertyIgnoreCase(data, "metadata", out var metadata) || !TryGetPropertyIgnoreCase(metadata, "context", out var context)) return rendered;
+            var candidatesFound = false;
+            var navigation = new List<string>();
+            foreach (var groupName in new[] { "testNameMatches", "sameFileCandidates" })
+            {
+                if (!TryGetPropertyIgnoreCase(context, groupName, out var candidates) || candidates.ValueKind != JsonValueKind.Array) continue;
+                foreach (var candidate in candidates.EnumerateArray())
+                {
+                    if (!candidatesFound) navigation.Add("navigation candidates (incomplete; name/path evidence only):");
+                    candidatesFound = true;
+                    navigation.Add($"  {Text(candidate, "relation")}: {Text(candidate, "qualifiedName")} {RelativePath(Text(candidate, "filePath"))}:{Text(candidate, "startLine")} id={Text(candidate, "symbolId")}");
+                }
+            }
+            if (!candidatesFound) navigation.Add("no supported navigation candidates");
+            if (TryGetPropertyIgnoreCase(context, "testNameMatchesTruncated", out var testsTruncated) && testsTruncated.ValueKind == JsonValueKind.True) navigation.Add("  +more test candidates");
+            if (TryGetPropertyIgnoreCase(context, "sameFileCandidatesTruncated", out var definitionsTruncated) && definitionsTruncated.ValueKind == JsonValueKind.True) navigation.Add("  +more same-file candidates");
+            if (TryGetPropertyIgnoreCase(context, "sourceNamesTruncated", out var sourceNamesTruncated) && sourceNamesTruncated.ValueKind == JsonValueKind.True) navigation.Add("  source name scan truncated");
+            return rendered + "\n" + string.Join("\n", navigation);
         }
         return data.GetRawText();
     }
@@ -384,6 +438,10 @@ public sealed class McpReferenceServer
             // MCP file reads default to the full file unless the caller asks for a slice.
             payload["full"] = true;
         }
+        if (readKind == "method" && TryGetBoolean(arguments, "context", out var context) && context)
+        {
+            payload["context"] = true;
+        }
 
         return JsonSerializer.SerializeToElement(payload, JsonOptions);
     }
@@ -488,8 +546,26 @@ public sealed class McpReferenceServer
         if (session is null) return new(true, JsonSerializer.SerializeToElement(new { error = "Session not found." }, JsonOptions));
         var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
         if (string.IsNullOrEmpty(root)) return new(true, JsonSerializer.SerializeToElement(new { error = "Repository not found." }, JsonOptions));
-        var result = _textReplaceService.Apply(root, RequiredString(arguments, "file"), RequiredString(arguments, "old"), RequiredString(arguments, "new"), TryGetBoolean(arguments, "all", out var all) && all, arguments.TryGetProperty("occurrence", out var occurrence) && occurrence.TryGetInt32(out var n) ? n : null);
-        if (result.Success && _reindexFilesAsync is not null) await _reindexFilesAsync([RequiredString(arguments, "file")], cancellationToken);
+        if (_repositoryStore is not IIndexFreshnessStore freshnessStore)
+            return new(true, JsonSerializer.SerializeToElement(new { error = "Durable index freshness tracking is unavailable; no source was changed." }, JsonOptions));
+        var relativePath = RequiredString(arguments, "file").Replace('\\', '/');
+        if (!await freshnessStore.TryMarkIndexFilesDirtyAsync(root, [relativePath], cancellationToken))
+            return new(true, JsonSerializer.SerializeToElement(new { error = "This repository already has unreconciled source changes; run devx index before editing." }, JsonOptions));
+        var result = _textReplaceService.Apply(root, relativePath, RequiredString(arguments, "old"), RequiredString(arguments, "new"), TryGetBoolean(arguments, "all", out var all) && all, arguments.TryGetProperty("occurrence", out var occurrence) && occurrence.TryGetInt32(out var n) ? n : null);
+        if (!result.Success)
+            await freshnessStore.ClearDirtyIndexFilesAsync(root, [relativePath], cancellationToken);
+        if (result.Success)
+        {
+            if (_reindexFilesAsync is null)
+                return new(true, JsonSerializer.SerializeToElement(new { error = "Edit applied, but index refresh is unavailable; indexed operations are blocked until reconciliation." }, JsonOptions));
+            try { await _reindexFilesAsync([relativePath], cancellationToken); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or NotSupportedException or Microsoft.Data.Sqlite.SqliteException)
+            {
+                return new(true, JsonSerializer.SerializeToElement(new { error = $"Edit applied, but index refresh failed; indexed operations are blocked until reconciliation: {error.Message}" }, JsonOptions));
+            }
+            if (await freshnessStore.GetDirtyIndexRepositoryAsync(root, cancellationToken) is not null)
+                return new(true, JsonSerializer.SerializeToElement(new { error = "Edit applied, but index refresh was incomplete; indexed operations are blocked until reconciliation." }, JsonOptions));
+        }
         if (!result.Success) return new(true, JsonSerializer.SerializeToElement(new { text = result.Message }, JsonOptions));
         // Behaviour change in 1.6.14 (brief OSS14 adjustment, 2026-10-09): edit.replace no longer
         // verifies by default. Verifying is opt-in on every edit, so an edit costs one call unless
@@ -571,7 +647,11 @@ public sealed class McpReferenceServer
     {
         var payload = new Dictionary<string, object?> { ["timeoutSeconds"] = 300 };
         if (TryGetString(arguments, "target", out var target)) payload["target"] = target;
-        if (arguments.TryGetProperty("testFiles", out var files)) payload["testFiles"] = files.Clone();
+        if (arguments.TryGetProperty("testFiles", out var files))
+        {
+            payload["testFiles"] = files.Clone();
+            payload["targets"] = files.Clone();
+        }
         if (arguments.TryGetProperty("timeoutSeconds", out var timeout)) payload["timeoutSeconds"] = timeout.GetInt32();
         return JsonSerializer.SerializeToElement(payload, JsonOptions);
     }
@@ -787,7 +867,7 @@ public sealed class McpReferenceServer
                 },
                 required = new[] { "query" }
             }),
-            CreateTool("read", "Read", "Step 2: Use read to inspect a symbol, file, or section before editing.", "read", new
+            CreateTool("read", "Read", "Step 2: Use read to inspect a symbol, file, or section before editing. Optional context:true adds bounded test-name and same-file name candidates as navigation hints.", "read", new
             {
                 type = "object",
                 properties = new
@@ -797,7 +877,8 @@ public sealed class McpReferenceServer
                     target = new { type = "string" },
                     targets = new { type = "array", items = new { type = "string" } },
                     range = new { type = "string" },
-                    full = new { type = "boolean" }
+                    full = new { type = "boolean" },
+                    context = new { type = "boolean" }
                 },
                 required = Array.Empty<string>()
             }),
