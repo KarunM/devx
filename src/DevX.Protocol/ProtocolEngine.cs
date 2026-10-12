@@ -310,7 +310,31 @@ public sealed class ProtocolEngine : IProtocolEngine
             return textBacked;
         }
 
-        var callers = await _repositoryStore.FindCallersAsync(query, cancellationToken);
+        var resolved = await ResolveCallTargetAsync(query, session, cancellationToken);
+        if (resolved.Ambiguous is not null)
+        {
+            return resolved.Ambiguous;
+        }
+
+        if (resolved.Overloads.Count > 1 && _repositoryStore is DevX.Infrastructure.Storage.SQLite.SqliteStorageInitializer sqlite)
+        {
+            var overloads = await OverloadSymbolsAsync(resolved, cancellationToken);
+            var groups = CallOverloads.Callers(overloads, await sqlite.ListMethodCandidatesAsync(overloads[0].RepositoryId, cancellationToken));
+            var distinct = groups.SelectMany(group => group.Callers).DistinctBy(caller => caller.CallerMethodId).ToList();
+            foreach (var caller in distinct)
+            {
+                await RecordHistoryAsync(() => _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, caller.CallerMethodId), cancellationToken));
+            }
+
+            return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new CallersResponse(new CallerSummaryResponse(query, "Exact", null, distinct, null, groups))), [], []);
+        }
+
+        if (resolved.Query != query)
+        {
+            methods = await _repositoryStore.FindMethodSummariesAsync(resolved.Query, cancellationToken);
+        }
+
+        var callers = await _repositoryStore.FindCallersAsync(resolved.Query, cancellationToken);
         if (callers.Count == 0)
         {
             return Fail("NotFound", $"Method '{query}' was not found.");
@@ -327,7 +351,7 @@ public sealed class ProtocolEngine : IProtocolEngine
             await RecordHistoryAsync(() => _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, caller.CallerMethodId), cancellationToken));
         }
 
-        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new CallersResponse(new CallerSummaryResponse(query, target is null ? "Unknown" : "Exact", target, callers))), [], []);
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new CallersResponse(new CallerSummaryResponse(query, target is null ? "Unknown" : "Exact", target, callers, await TargetSignatureAsync(target, cancellationToken)))), [], []);
     }
 
     private async Task<ProtocolResponse> HandleGetReferencesAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
@@ -345,6 +369,22 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var references = await _repositoryStore.FindReferencesAsync(query, cancellationToken);
+        if (references.Count == 0)
+        {
+            // A suffix such as `Type.Member` finds nothing by name; resolve it the way `read` does and retry.
+            var resolved = await ResolveCallTargetAsync(query, session, cancellationToken);
+            if (resolved.Ambiguous is not null)
+            {
+                return resolved.Ambiguous;
+            }
+
+            if (resolved.Query != query)
+            {
+                methodMatches = await _repositoryStore.FindMethodSummariesAsync(resolved.Query, cancellationToken);
+                references = await _repositoryStore.FindReferencesAsync(resolved.Query, cancellationToken);
+            }
+        }
+
         if (references.Count == 0)
         {
             return Fail("NotFound", $"Symbol '{query}' was not found.");
@@ -374,7 +414,31 @@ public sealed class ProtocolEngine : IProtocolEngine
             return unsupported;
         }
 
-        var callees = await _repositoryStore.FindCalleesAsync(query, cancellationToken);
+        var resolved = await ResolveCallTargetAsync(query, session, cancellationToken);
+        if (resolved.Ambiguous is not null)
+        {
+            return resolved.Ambiguous;
+        }
+
+        if (resolved.Overloads.Count > 1 && _repositoryStore is DevX.Infrastructure.Storage.SQLite.SqliteStorageInitializer sqlite)
+        {
+            var overloads = await OverloadSymbolsAsync(resolved, cancellationToken);
+            var groups = CallOverloads.Callees(overloads, await sqlite.ListMethodCandidatesAsync(overloads[0].RepositoryId, cancellationToken));
+            var distinct = groups.SelectMany(group => group.Callees).DistinctBy(callee => callee.CalleeMethodId).ToList();
+            foreach (var callee in distinct)
+            {
+                await RecordHistoryAsync(() => _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, callee.CalleeMethodId), cancellationToken));
+            }
+
+            return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new CalleesResponse(new CalleeSummaryResponse(query, "Exact", null, distinct, null, groups))), [], []);
+        }
+
+        if (resolved.Query != query)
+        {
+            methods = await _repositoryStore.FindMethodSummariesAsync(resolved.Query, cancellationToken);
+        }
+
+        var callees = await _repositoryStore.FindCalleesAsync(resolved.Query, cancellationToken);
         if (callees.Count == 0)
         {
             return Fail("NotFound", $"Method '{query}' was not found.");
@@ -391,7 +455,57 @@ public sealed class ProtocolEngine : IProtocolEngine
             await RecordHistoryAsync(() => _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, callee.CalleeMethodId), cancellationToken));
         }
 
-        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new CalleesResponse(new CalleeSummaryResponse(query, target is null ? "Unknown" : "Exact", target, callees))), [], []);
+        return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new CalleesResponse(new CalleeSummaryResponse(query, target is null ? "Unknown" : "Exact", target, callees, await TargetSignatureAsync(target, cancellationToken)))), [], []);
+    }
+
+    private sealed record CallTarget(string Query, IReadOnlyList<SymbolSearchResult> Overloads, ProtocolResponse? Ambiguous);
+
+    /// <summary>
+    /// Resolves the target of callers/callees/references the way `read method` does (exact, module, suffix, bare name).
+    /// Several definitions with one qualified name are overloads of one method; several qualified names are an
+    /// ambiguity and answer with the same capped candidate list `read` gives. No candidate keeps the query as typed.
+    /// </summary>
+    private async Task<CallTarget> ResolveCallTargetAsync(string query, SessionState session, CancellationToken cancellationToken)
+    {
+        if (_repositoryStore is not ISymbolStore || await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken) is not { } root)
+        {
+            return new CallTarget(query, [], null);
+        }
+
+        var candidates = (await ReadableSymbolResolver.ResolveAsync(_repositoryStore, root, query, cancellationToken)).Candidates
+            .Where(candidate => candidate.Kind is "Method" or "Constructor").DistinctBy(candidate => candidate.Id).ToList();
+        if (candidates.Count == 0)
+        {
+            return new CallTarget(query, [], null);
+        }
+
+        if (candidates.Select(candidate => candidate.QualifiedName).Distinct(StringComparer.Ordinal).Count() > 1)
+        {
+            var ranked = RankCandidates(candidates, query);
+            return new CallTarget(query, candidates, new ProtocolResponse(false, null, [], [new ProtocolError("AmbiguousMatch",
+                $"Symbol '{query}' matched multiple definitions ({candidates.Count}); pass a qualified name.",
+                query, ranked.Select(s => s.QualifiedName).ToList(), ranked, candidates.Count)]));
+        }
+
+        return new CallTarget(candidates[0].QualifiedName, candidates, null);
+    }
+
+    private async Task<IReadOnlyList<Symbol>> OverloadSymbolsAsync(CallTarget target, CancellationToken cancellationToken)
+    {
+        var ids = target.Overloads.Select(candidate => candidate.Id).ToHashSet(StringComparer.Ordinal);
+        return (await ((ISymbolStore)_repositoryStore).FindSymbolsByQualifiedNameAsync(target.Query, cancellationToken))
+            .Where(symbol => ids.Contains(symbol.Id)).OrderBy(symbol => symbol.FilePath, StringComparer.Ordinal).ThenBy(symbol => symbol.StartLine).ToList();
+    }
+
+    private async Task<string?> TargetSignatureAsync(MethodSummary? target, CancellationToken cancellationToken)
+    {
+        if (target is null || _repositoryStore is not ISymbolStore symbols)
+        {
+            return null;
+        }
+
+        var symbol = (await symbols.FindSymbolsByQualifiedNameAsync(target.QualifiedName, cancellationToken)).FirstOrDefault(candidate => candidate.Id == target.Id);
+        return symbol is null ? null : CallOverloads.SignatureOf(symbol);
     }
 
     private static ProtocolResponse? UnsupportedPythonCalleesResponse(string query, IReadOnlyList<MethodSummary> methods)

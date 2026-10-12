@@ -1767,7 +1767,7 @@ static async Task<int> CallersAsync(string connectionString, string[] args, stri
 {
     if (args.Length < 2)
     {
-        Console.Error.WriteLine("Usage: devx callers <method> [--full] --session <id>");
+        Console.Error.WriteLine("Usage: devx callers <method> [--full] --session <id>. Overloads of one method are answered grouped per overload.");
         return 1;
     }
 
@@ -1800,7 +1800,7 @@ static async Task<int> CalleesAsync(string connectionString, string[] args, stri
 {
     if (args.Length < 2)
     {
-        Console.Error.WriteLine("Usage: devx callees <method> --session <id>");
+        Console.Error.WriteLine("Usage: devx callees <method> --session <id>. Overloads of one method are answered grouped per overload.");
         return 1;
     }
 

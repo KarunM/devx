@@ -550,7 +550,10 @@ public sealed class ProtocolEngineTests
         var payload = response.Data!.Value.Deserialize<CallersResponse>();
         Assert.NotNull(payload);
         Assert.NotEmpty(payload!.Callers.Callers);
-        Assert.DoesNotContain("Target()", response.Data!.Value.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        // Metadata only: no method source. (`TargetSignature` legitimately names `Sample.Alpha.Target()`.)
+        Assert.DoesNotContain("Target() { }", response.Data!.Value.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("{ Target(); }", response.Data!.Value.GetRawText(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("Sample.Alpha.Target()", payload.Callers.TargetSignature);
 
         var resumed = await store.GetSessionAsync(new GetSessionRequest(session.Id));
         Assert.NotNull(resumed);
