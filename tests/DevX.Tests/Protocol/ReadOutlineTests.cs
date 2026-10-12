@@ -120,6 +120,7 @@ public sealed class ReadOutlineTests
 
     private static async Task WithReadOnlyDb(Fixture f, Func<Task> act)
     {
+        if (OperatingSystem.IsWindows()) return; // chmod-based read-only test; no Windows equivalent
         var mode = IOFile.GetUnixFileMode(f.Db);
         IOFile.SetUnixFileMode(f.Db, UnixFileMode.UserRead | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
         try { await act(); }
