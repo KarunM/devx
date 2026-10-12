@@ -1537,7 +1537,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     }
     if (args.Length < 3)
     {
-        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies; read type (outline) answers 'which methods/fields does X have' -- use --full only when you need bodies. callers/references work for Python too (text-backed); callees does not -- read the body instead. Bare or Class.member names resolve when unique: do not search first when you know the name.");
+        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies; read type (outline) also shows a bases: line with each base's path -- follow a hierarchy one read type per level, no search between; it answers 'which methods/fields does X have' -- use --full only when you need bodies. callers/references work for Python too (text-backed); callees does not -- read the body instead. Bare or Class.member names resolve when unique: do not search first when you know the name.");
         return 1;
     }
 
@@ -1646,7 +1646,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     }
     else
     {
-        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies; read type (outline) answers 'which methods/fields does X have' -- use --full only when you need bodies. callers/references work for Python too (text-backed); callees does not -- read the body instead. Bare or Class.member names resolve when unique: do not search first when you know the name.");
+        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies; read type (outline) also shows a bases: line with each base's path -- follow a hierarchy one read type per level, no search between; it answers 'which methods/fields does X have' -- use --full only when you need bodies. callers/references work for Python too (text-backed); callees does not -- read the body instead. Bare or Class.member names resolve when unique: do not search first when you know the name.");
         return 1;
     }
 
@@ -1767,7 +1767,7 @@ static async Task<int> CallersAsync(string connectionString, string[] args, stri
 {
     if (args.Length < 2)
     {
-        Console.Error.WriteLine("Usage: devx callers <method> --session <id>");
+        Console.Error.WriteLine("Usage: devx callers <method> [--full] --session <id>");
         return 1;
     }
 
@@ -1781,7 +1781,7 @@ static async Task<int> CallersAsync(string connectionString, string[] args, stri
     var store = new SqliteStorageInitializer(connectionString);
     await store.InitializeAsync();
     var engine = new ProtocolEngine(new SearchService(store, store), store, store);
-    var request = new ProtocolRequest("1.0", ProtocolOperations.GetCallers, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
+    var request = new ProtocolRequest("1.0", ProtocolOperations.GetCallers, sessionId, JsonSerializer.SerializeToElement(new { query = args[1], full = HasFlag(args, "--full") }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
     await RecordMetricAsync(store, new OperationMetric("get callers", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
@@ -2862,7 +2862,7 @@ Use `devx read method <name> --context` for bounded test/name candidates when re
 3. devx replace <file> --old <text> --new <text> --verify   (edit, then build + tests in the same call)
 4. devx verify [build|test|both]   (check without editing; build + tests, one summary)
 Add --format agent for compact output; no session needed.
-`devx read type <Class>` shows the declaration with bases and a member outline (--full for the body); bare or Class.member names resolve when unique, so skip the search when you know the name.
+`devx read type <Class>` shows the declaration, a `bases:` line with each base's path (follow a hierarchy one read type per level, no search in between) and a member outline (--full for the body); bare or Class.member names resolve when unique, so skip the search when you know the name.
 For "who calls / what does it call / where is it used" use `devx callers|callees <method>` and `devx references <symbol>` before `search text`; `devx snapshot <file>` outlines a file.
 
 Usage:
@@ -2877,6 +2877,7 @@ Usage:
   devx search <symbol|text> <query> [--session <id>] [--agent <label>]
   devx snapshot <file> --session <id> [--agent <label>]
   devx callers <method> | devx callees <method> | devx references <symbol> --session <id>   (cross-references; use instead of text search)
+  devx callers <method> --full   (many call sites are grouped by function; --full lists every site)
   devx read <name|file#Heading|file> [<name> ...] [--session <id>]
   devx read <file|method|type|section> <target> [--range start:end|--full] [--session <id>]
   devx artifact create <name> --content <text>|--content-file <path>|--content-json <json-string>|--content-stdin

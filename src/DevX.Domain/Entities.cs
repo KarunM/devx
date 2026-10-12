@@ -299,6 +299,9 @@ public sealed record TextReference(string Path, int Line, string Enclosing, stri
 
 public sealed record TextReferenceMetadata(string? Note);
 
+/// <summary>Call sites of one enclosing symbol, for the grouped `callers` view.</summary>
+public sealed record TextReferenceGroup(string Enclosing, int Count, string Path, IReadOnlyList<int> Lines);
+
 /// <summary>`references` / `callers` for languages without a resolved call graph (Python): a whole-word
 /// usage search over indexed files, attributed to the enclosing indexed symbol. `Mode` is "text"; the
 /// symbol-table (C#) responses are unchanged and carry no Mode.</summary>
@@ -316,7 +319,9 @@ public sealed record TextReferencesResponse(
     int Imports,
     ContentSearchCoverage? Coverage,
     IReadOnlyList<TextReference> References,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] TextReferenceMetadata? Metadata = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] TextReferenceMetadata? Metadata = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? Grouped = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<TextReferenceGroup>? Groups = null);
 
 public sealed record IndexStatusResponse(
     bool RepositoryIndexed,

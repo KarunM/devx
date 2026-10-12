@@ -14,6 +14,11 @@ namespace DevX.Protocol;
 public static class TextReferences
 {
     public const int Cap = 50;
+    /// <summary>`callers` with more call sites than this lists one line per enclosing symbol unless `--full` is passed.</summary>
+    public const int GroupThreshold = 10;
+    private const int GroupLineNumbers = 5;
+    /// <summary>The agent view lists at most this many functions (the busiest first); the JSON carries all of them.</summary>
+    private const int GroupsShown = 10;
     public const string CallersNote = "text-backed: call sites by name, not a resolved call graph";
 
     public sealed record Hit(string FileId, string Path, int Line, string Text, string Kind);
@@ -57,14 +62,30 @@ public static class TextReferences
     {
         if (data.ValueKind != JsonValueKind.Object || !Prop(data, "mode", out var mode) || mode.GetString() != "text") return null;
         var lines = new List<string>();
-        if (Prop(data, "references", out var references) && references.ValueKind == JsonValueKind.Array)
+        var grouped = Prop(data, "grouped", out var groupedFlag) && groupedFlag.ValueKind == JsonValueKind.True
+            && Prop(data, "groups", out var groups) && groups.ValueKind == JsonValueKind.Array;
+        if (grouped)
+        {
+            Prop(data, "groups", out var groupItems);
+            foreach (var group in groupItems.EnumerateArray().Take(GroupsShown))
+            {
+                var count = int.TryParse(Str(group, "count"), out var n) ? n : 0;
+                var numbers = Prop(group, "lines", out var lineArray) && lineArray.ValueKind == JsonValueKind.Array ? lineArray.EnumerateArray().Select(line => line.ToString()).ToList() : [];
+                var shown = string.Join(",", numbers.Take(GroupLineNumbers)) + (numbers.Count > GroupLineNumbers ? ",…" : "");
+                lines.Add($"{Str(group, "enclosing")}  {count} {(count == 1 ? "call" : "calls")}  {Str(group, "path")}:{shown}");
+            }
+        }
+        else if (Prop(data, "references", out var references) && references.ValueKind == JsonValueKind.Array)
         {
             foreach (var item in references.EnumerateArray())
                 lines.Add($"{Str(item, "path")}:{Str(item, "line")} {Str(item, "enclosing")}  {Str(item, "text")}");
         }
         var isCallers = Prop(data, "metadata", out var metadata) && metadata.ValueKind == JsonValueKind.Object && Str(metadata, "note").Length > 0;
         var total = Str(data, "total");
-        var footer = isCallers
+        var groupCount = grouped && Prop(data, "groups", out var groupList) ? groupList.GetArrayLength() : 0;
+        var footer = grouped
+            ? $"{total} call sites in {groupCount} {(groupCount == 1 ? "function" : "functions")}{(groupCount > GroupsShown ? $" (top {GroupsShown} shown)" : "")}; target {Str(data, "targetPath")}:{Str(data, "targetLine")}; {CallersNote}; pass --full for every site"
+            : isCallers
             ? $"{total} call sites ({Str(data, "calls")} calls); target {Str(data, "targetPath")}:{Str(data, "targetLine")}; {CallersNote}"
             : $"{total} references (calls {Str(data, "calls")}, usages {Str(data, "usages")}, imports {Str(data, "imports")}); target {Str(data, "targetPath")}:{Str(data, "targetLine")}";
         if (Prop(data, "truncated", out var truncated) && truncated.ValueKind == JsonValueKind.True)

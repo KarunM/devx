@@ -464,7 +464,8 @@ public sealed class McpReferenceServer
 
     private Task<McpToolCallResult> ExecuteQueryToolAsync(string operation, JsonElement arguments, CancellationToken cancellationToken, string format = "json")
     {
-        var payload = new Dictionary<string, string> { ["query"] = RequiredAliasString(arguments, "target", "query") };
+        var payload = new Dictionary<string, object> { ["query"] = RequiredAliasString(arguments, "target", "query") };
+        if (operation == ProtocolOperations.GetCallers && arguments.TryGetProperty("full", out var fullFlag) && fullFlag.ValueKind == JsonValueKind.True) payload["full"] = true;
         if (operation == ProtocolOperations.GetFileSnapshot && format == "agent") payload["format"] = "agent";
         return ExecuteProtocolAsync(operation, RequiredSessionId(arguments), JsonSerializer.SerializeToElement(payload, JsonOptions), cancellationToken, format);
     }
@@ -868,7 +869,7 @@ public sealed class McpReferenceServer
                 },
                 required = new[] { "query" }
             }),
-            CreateTool("read", "Read", "Step 2: read a symbol, file or section. target: qualified name (e.g. pkg.mod.Name) or repo path for kind=file. Bare or Class.member names resolve when unique. read type (outline) answers 'which methods/fields does X have'; --full only for bodies. callers/references work for Python (text-backed); callees does not.", "read", new
+            CreateTool("read", "Read", "Step 2: read. target: qualified name (e.g. pkg.mod.Name) or repo path for kind=file. Bare or Class.member names resolve when unique. read type (outline) answers 'which methods/fields does X have'; --full only for bodies. callers/references work for Python (text-backed); callees does not. read type bases: carry paths.", "read", new
             {
                 type = "object",
                 properties = new
@@ -906,7 +907,7 @@ public sealed class McpReferenceServer
             CreateTool("patch.preview", "Patch Preview", "For structured or multi-file edits only. Simple text edits should use edit.replace.", "patch.validate", new { type = "object", properties = new { sessionId = new { type = "string" }, patch = new { type = "object" } }, required = new[] { "patch" } }),
             CreateQueryTool("snapshot", "Snapshot", "Get a source file snapshot: use it for a file's outline (classes, functions) instead of reading the whole file.", "sessionId", "target"),
             CreateTool("index", "Index files", "Rarely needed: the server refreshes stale files on start and after every edit, and a whole-repository index that is already current answers 'already current'. Pass `files` only to force a re-index of paths you know changed.", "index", new { type = "object", properties = new { files = new { type = "array", items = new { type = "string" } }, sessionId = new { type = "string" } }, required = Array.Empty<string>() }),
-            CreateQueryTool("callers", "Callers", "Find callers of a method: use it for 'who calls this' before any text search.", "sessionId", "target"),
+            CreateQueryTool("callers", "Callers", "Find callers of a method: use it for 'who calls this' before any text search. Many call sites are grouped by function; full:true lists every site.", "sessionId", "target", optionalFull: true),
             CreateQueryTool("callees", "Callees", "Find callees of a method: use it for 'what does this call' instead of reading and scanning the body.", "sessionId", "target"),
             CreateQueryTool("references", "References", "Find references to a symbol: use it for 'where is this used' before any text search.", "sessionId", "target"),
             CreateTool("build", "Build", "Run a configured build target.", "build", new { type = "object", properties = new { sessionId = new { type = "string" }, runtime = new { type = "string" }, target = new { type = "string" } }, required = Array.Empty<string>() }),
@@ -933,7 +934,7 @@ public sealed class McpReferenceServer
         return new(name, title, description, capabilityId, JsonSerializer.SerializeToElement(node, JsonOptions));
     }
 
-    private static McpToolDescriptor CreateQueryTool(string name, string title, string description, string sessionProperty, string queryProperty)
+    private static McpToolDescriptor CreateQueryTool(string name, string title, string description, string sessionProperty, string queryProperty, bool optionalFull = false)
         => CreateTool(name, title, description, name, new
         {
             type = "object",
@@ -941,7 +942,7 @@ public sealed class McpReferenceServer
             {
                 [sessionProperty] = new { type = "string" },
                 [queryProperty] = new { type = "string" }
-            },
+            }.Concat(optionalFull ? new[] { new KeyValuePair<string, object>("full", new { type = "boolean" }) } : []).ToDictionary(pair => pair.Key, pair => pair.Value),
             required = new[] { queryProperty }
         });
 

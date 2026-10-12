@@ -72,6 +72,11 @@ carries `Mode: "text"`, totals, the content-search coverage and, for `callers`, 
 are found by name. `callees` stays unsupported for Python and says to read the body. Content-search
 coverage reports hits in files the index does not cover as `UnindexedHits`, not as unsafe paths.
 
+The `read type` outline adds one `bases:` line after the declaration, resolving each declared base (Python
+or C#) to `path:start-end` when exactly one indexed type answers to it and `-` otherwise (`Metadata.Bases` in
+JSON), so a hierarchy is followed one `read type` per level; text-backed `callers` with more than 10 call
+sites lists one line per enclosing function (top 10 by count) unless `--full` is passed (`Grouped`, `Groups` in JSON).
+
 ## Rules
 
 -   Prefer DevX search/read APIs over opening source files.

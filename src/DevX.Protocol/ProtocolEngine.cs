@@ -304,7 +304,7 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var methods = await _repositoryStore.FindMethodSummariesAsync(query, cancellationToken);
-        var textBacked = await TryTextReferencesAsync(query, session, callersOnly: true, methods, cancellationToken);
+        var textBacked = await TryTextReferencesAsync(query, session, callersOnly: true, methods, TryGetBoolean(request.Payload, "full"), cancellationToken);
         if (textBacked is not null)
         {
             return textBacked;
@@ -338,7 +338,7 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var methodMatches = await _repositoryStore.FindMethodSummariesAsync(query, cancellationToken);
-        var textBacked = await TryTextReferencesAsync(query, session, callersOnly: false, methodMatches, cancellationToken);
+        var textBacked = await TryTextReferencesAsync(query, session, callersOnly: false, methodMatches, false, cancellationToken);
         if (textBacked is not null)
         {
             return textBacked;
@@ -405,7 +405,7 @@ public sealed class ProtocolEngine : IProtocolEngine
     /// containing its line. Returns null when the target is not a Python symbol, so the symbol-table (C#)
     /// path runs unchanged.
     /// </summary>
-    private async Task<ProtocolResponse?> TryTextReferencesAsync(string query, SessionState session, bool callersOnly, IReadOnlyList<MethodSummary> methodMatches, CancellationToken cancellationToken)
+    private async Task<ProtocolResponse?> TryTextReferencesAsync(string query, SessionState session, bool callersOnly, IReadOnlyList<MethodSummary> methodMatches, bool full, CancellationToken cancellationToken)
     {
         static bool IsPython(string? path) => path?.EndsWith(".py", StringComparison.OrdinalIgnoreCase) == true;
         IReadOnlyList<SymbolSearchResult> candidates = [];
@@ -459,12 +459,23 @@ public sealed class ProtocolEngine : IProtocolEngine
             .ToList();
         var ranked2 = TextReferences.Rank(hits, targetPath);
         var kept = ranked2.Take(TextReferences.Cap).ToList();
+        const int MaxGroupedSites = 2000;
+        var grouped = callersOnly && !full && ranked2.Count > TextReferences.GroupThreshold;
 
         IReadOnlyDictionary<(string FileId, int Line), string> enclosing = new Dictionary<(string FileId, int Line), string>();
         if (_repositoryStore is DevX.Infrastructure.Storage.SQLite.SqliteStorageInitializer sqlite)
         {
-            enclosing = await sqlite.FindEnclosingSymbolsAsync(kept.Select(hit => (hit.FileId, hit.Line)).Distinct().ToList(), cancellationToken);
+            // Grouping needs the enclosing symbol of every call site, not only of the 50 that are listed.
+            var enclosingScope = grouped ? ranked2.Take(MaxGroupedSites) : kept;
+            enclosing = await sqlite.FindEnclosingSymbolsAsync(enclosingScope.Select(hit => (hit.FileId, hit.Line)).Distinct().ToList(), cancellationToken);
         }
+        var groups = grouped
+            ? ranked2.Take(MaxGroupedSites)
+                .GroupBy(hit => (Enclosing: enclosing.GetValueOrDefault((hit.FileId, hit.Line), "<module>"), hit.Path))
+                .Select(group => new TextReferenceGroup(group.Key.Enclosing, group.Count(), group.Key.Path, group.Select(hit => hit.Line).OrderBy(line => line).ToList()))
+                .OrderByDescending(group => group.Count).ThenBy(group => group.Path, StringComparer.Ordinal).ThenBy(group => group.Enclosing, StringComparer.Ordinal)
+                .ToList()
+            : null;
 
         var references = kept.Select(hit => new TextReference(hit.Path, hit.Line, enclosing.GetValueOrDefault((hit.FileId, hit.Line), "<module>"), hit.Text, hit.Kind)).ToList();
         var response = new TextReferencesResponse(
@@ -472,7 +483,8 @@ public sealed class ProtocolEngine : IProtocolEngine
             ranked2.Count, references.Count, ranked2.Count > references.Count,
             ranked2.Count(hit => hit.Kind == "call"), ranked2.Count(hit => hit.Kind == "usage"), ranked2.Count(hit => hit.Kind == "import"),
             outcome.Coverage, references,
-            callersOnly ? new TextReferenceMetadata(TextReferences.CallersNote) : null);
+            callersOnly ? new TextReferenceMetadata(TextReferences.CallersNote) : null,
+            callersOnly ? grouped : null, groups);
         await RecordHistoryAsync(() => _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, target.Id), cancellationToken));
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
     }
@@ -936,7 +948,7 @@ public sealed class ProtocolEngine : IProtocolEngine
         return first.Length == 0 ? "" : " " + first;
     }
 
-    private async Task<(string Text, int Count)> BuildTypeOutlineAsync(string qualifiedName, string filePath, int startLine, int endLine, string[] fileLines, CancellationToken cancellationToken)
+    private async Task<(string Text, int Count, IReadOnlyList<TypeBase> Bases)> BuildTypeOutlineAsync(string qualifiedName, string filePath, int startLine, int endLine, string[] fileLines, string? root, CancellationToken cancellationToken)
     {
         // Signature: the declaration line, extended while parentheses are open (multi-line Python bases)
         // or until a line ends with ':' (Python). C#-style declarations stop after the first line.
@@ -955,13 +967,46 @@ public sealed class ProtocolEngine : IProtocolEngine
                 .OrderBy(symbol => symbol.StartLine).ToList()
             : [];
         var lines = new List<string>(signature);
+        var bases = await ResolveTypeBasesAsync(qualifiedName, filePath, signature, root, cancellationToken);
+        if (bases.Count > 0) lines.Add(TypeBases.FormatLine(bases));
         foreach (var member in members)
         {
             var memberName = member.QualifiedName[(qualifiedName.Length + 1)..];
             if (memberName.Contains('.')) continue;
             lines.Add($"{member.Kind.ToLowerInvariant()} {memberName} {member.StartLine}-{member.EndLine}" + OutlineSignature(member.Signature));
         }
-        return (string.Join('\n', lines), members.Count(member => !member.QualifiedName[(qualifiedName.Length + 1)..].Contains('.')));
+        return (string.Join('\n', lines), members.Count(member => !member.QualifiedName[(qualifiedName.Length + 1)..].Contains('.')), bases);
+    }
+
+    private static readonly string[] BaseKinds = ["Class", "Type", "Record", "Interface", "Struct"];
+
+    // Each declared base is resolved like `read` resolves a name (exact, module, suffix, short name); a base is
+    // shown with its location only when exactly one indexed type answers to it. A dotted base that finds nothing
+    // is retried by its last segment. Everything else stays unresolved ("-"): never a guess.
+    private async Task<IReadOnlyList<TypeBase>> ResolveTypeBasesAsync(string qualifiedName, string filePath, List<string> declaration, string? root, CancellationToken cancellationToken)
+    {
+        var names = TypeBases.Parse(filePath, declaration);
+        if (names.Count == 0) return [];
+        var result = new List<TypeBase>();
+        foreach (var name in names)
+        {
+            SymbolSearchResult? found = null;
+            if (root is not null && _repositoryStore is ISymbolStore)
+            {
+                foreach (var attempt in name.Contains('.') ? new[] { name, name[(name.LastIndexOf('.') + 1)..] } : new[] { name })
+                {
+                    var resolution = await ReadableSymbolResolver.ResolveAsync(_repositoryStore, root, attempt, cancellationToken);
+                    var types = resolution.Candidates
+                        .Where(candidate => BaseKinds.Contains(candidate.Kind) && candidate.FilePath is not null && candidate.StartLine is not null && candidate.EndLine is not null
+                            && !string.Equals(candidate.QualifiedName, qualifiedName, StringComparison.Ordinal))
+                        .ToList();
+                    if (types.Count == 1) { found = types[0]; break; }
+                    if (types.Count > 1) break;
+                }
+            }
+            result.Add(found is null ? new TypeBase(name) : new TypeBase(name, found.QualifiedName, found.FilePath, found.StartLine, found.EndLine));
+        }
+        return result;
     }
 
     private async Task<ProtocolResponse> HandleReadTypeAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
@@ -1010,8 +1055,8 @@ public sealed class ProtocolEngine : IProtocolEngine
             var idEndLine = typeSummary.EndLine;
             var idSource = string.Join('\n', idLines[(typeSummary.StartLine - 1)..idEndLine]);
             var idReturned = idSource.Split('\n').Length;
-            var (idOutline, idCount) = TryGetBoolean(request.Payload, "full") ? (idSource, 0) : await BuildTypeOutlineAsync(typeSummary.QualifiedName, typeSummary.FilePath, typeSummary.StartLine, typeSummary.EndLine, idLines, cancellationToken);
-            var idMetadata = TryGetBoolean(request.Payload, "full") ? (object)new { TypeName = typeSummary.Name, Namespace = typeSummary.Namespace, Project = typeSummary.Project, Kind = typeSummary.Kind, ResolvedVia = "exact" } : new { TypeName = typeSummary.Name, Namespace = typeSummary.Namespace, Project = typeSummary.Project, Kind = typeSummary.Kind, ResolvedVia = "exact", Outline = true, MemberCount = idCount, BodyLines = typeSummary.EndLine - typeSummary.StartLine + 1, Hint = "pass --full for the body" };
+            var (idOutline, idCount, idBases) = TryGetBoolean(request.Payload, "full") ? (idSource, 0, (IReadOnlyList<TypeBase>)[]) : await BuildTypeOutlineAsync(typeSummary.QualifiedName, typeSummary.FilePath, typeSummary.StartLine, typeSummary.EndLine, idLines, idRoot, cancellationToken);
+            var idMetadata = TryGetBoolean(request.Payload, "full") ? (object)new { TypeName = typeSummary.Name, Namespace = typeSummary.Namespace, Project = typeSummary.Project, Kind = typeSummary.Kind, ResolvedVia = "exact" } : new { TypeName = typeSummary.Name, Namespace = typeSummary.Namespace, Project = typeSummary.Project, Kind = typeSummary.Kind, ResolvedVia = "exact", Outline = true, MemberCount = idCount, Bases = idBases, BodyLines = typeSummary.EndLine - typeSummary.StartLine + 1, Hint = "pass --full for the body" };
             var responseById = new SourceReadResponse("type", typeSummary.Id, typeSummary.QualifiedName, typeSummary.FilePath, typeSummary.StartLine, typeSummary.EndLine, typeSummary.EndLine - typeSummary.StartLine + 1, idOutline.Split('\n').Length, false, true, idOutline, idMetadata);
             await RecordHistoryAsync(() => _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, typeSummary.Id), cancellationToken));
             return new ProtocolResponse(true, JsonSerializer.SerializeToElement(responseById), [], []);
@@ -1046,11 +1091,11 @@ public sealed class ProtocolEngine : IProtocolEngine
         var typeFull = TryGetBoolean(request.Payload, "full");
         var typeEndLine = type.EndLine;
         var bodySource = string.Join('\n', fileLines[(type.StartLine - 1)..typeEndLine]);
-        var (classSource, memberCount) = typeFull ? (bodySource, 0) : await BuildTypeOutlineAsync(type.QualifiedName, type.FilePath, type.StartLine, type.EndLine, fileLines, cancellationToken);
+        var (classSource, memberCount, typeBases) = typeFull ? (bodySource, 0, (IReadOnlyList<TypeBase>)[]) : await BuildTypeOutlineAsync(type.QualifiedName, type.FilePath, type.StartLine, type.EndLine, fileLines, root, cancellationToken);
         var classLines = classSource.Split('\n').Length;
         var typeVia = typeResolution?.ResolvedVia ?? "exact";
         var requestedTypeLines = type.EndLine - type.StartLine + 1;
-        var metadata = typeFull ? (object)new { TypeName = type.Name, Namespace = type.Namespace, Project = type.Project, Kind = type.Kind, ResolvedVia = typeVia } : new { TypeName = type.Name, Namespace = type.Namespace, Project = type.Project, Kind = type.Kind, ResolvedVia = typeVia, Outline = true, MemberCount = memberCount, BodyLines = requestedTypeLines, Hint = "pass --full for the body" };
+        var metadata = typeFull ? (object)new { TypeName = type.Name, Namespace = type.Namespace, Project = type.Project, Kind = type.Kind, ResolvedVia = typeVia } : new { TypeName = type.Name, Namespace = type.Namespace, Project = type.Project, Kind = type.Kind, ResolvedVia = typeVia, Outline = true, MemberCount = memberCount, Bases = typeBases, BodyLines = requestedTypeLines, Hint = "pass --full for the body" };
         var response = new SourceReadResponse("type", type.Id, type.QualifiedName, type.FilePath, type.StartLine, type.EndLine, requestedTypeLines, classLines, false, true, classSource, metadata);
         await RecordHistoryAsync(() => _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, type.Id), cancellationToken));
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);

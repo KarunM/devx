@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `devx read type` outline gains one `bases:` line after the declaration: each declared base of a Python or
+  C# type with `path:start-end` when it resolves to exactly one indexed type, `-` otherwise
+  (`Metadata.Bases` in JSON), so a hierarchy is followed one `read type` per level (OSS26 B-1).
+- Text-backed `callers` (Python) with more than 10 call sites groups them by enclosing function, busiest first
+  (top 10 shown, all in JSON `Groups`); `--full` (MCP `full: true`) lists every site. `references` and
+  C# `callers` are unchanged (OSS26 B-2).
 - `devx references` and `devx callers` now work for Python symbols, text-backed: a whole-word search for
   the name over indexed files, each hit attributed to the enclosing indexed symbol and classified call,
   usage or import (50 hits max, calls first; `Mode: "text"` in JSON). `callees` still reports Python as

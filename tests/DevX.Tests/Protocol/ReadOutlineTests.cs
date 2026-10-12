@@ -72,8 +72,9 @@ public sealed class ReadOutlineTests
         var lines = data.Source.Split('\n');
         Assert.Equal("class Alpha(", lines[0]);
         Assert.Equal("    Other):", lines[2]);
-        Assert.Equal(4, lines.Length);
-        Assert.Contains("run", lines[3]);
+        Assert.Equal("bases: Base -  Other -", lines[3]);   // OSS26 B-1: the added line; unresolved bases are marked
+        Assert.Equal(5, lines.Length);
+        Assert.Contains("run", lines[4]);
         Assert.DoesNotContain("inner", data.Source);
     }
 

@@ -54,7 +54,7 @@ public sealed class ReadFamilyFixesTests
         Assert.Contains("class Alpha(Base):", data.Source);
         Assert.Contains("run", data.Source);
         Assert.DoesNotContain("return 1", data.Source);
-        Assert.Equal(2, data.ReturnedLines);
+        Assert.Equal(3, data.ReturnedLines);   // signature + OSS26 `bases: Base -` + the one member
         Assert.Contains("\"Outline\":true", JsonSerializer.Serialize(data.Metadata));
     }
 
