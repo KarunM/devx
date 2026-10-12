@@ -122,7 +122,8 @@ public sealed class CorrectnessFixesTests
         var dir = Directory.CreateTempSubdirectory("devx-oss21-rg").FullName;
         var exe = Path.Combine(dir, "rg");
         IOFile.WriteAllText(exe, "#!/bin/sh\n" + body);
-        IOFile.SetUnixFileMode(exe, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        if (!OperatingSystem.IsWindows()) // chmod-based fake rg; no Windows equivalent
+            IOFile.SetUnixFileMode(exe, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return exe;
     }
 
@@ -214,8 +215,8 @@ public sealed class CorrectnessFixesTests
 
         Assert.Equal(ProtocolOperations.RunTests, engine.Last!.Operation);
         var payload = engine.Last.Payload;
-        Assert.Equal(["tests/test_target.py"], payload.GetProperty("targets").EnumerateArray().Select(x => x.GetString()).ToArray());
-        Assert.Equal(["tests/test_target.py"], payload.GetProperty("testFiles").EnumerateArray().Select(x => x.GetString()).ToArray());
+        Assert.Equal(["tests/test_target.py"], payload.GetProperty("targets").EnumerateArray().Select(x => x.GetString()!).ToArray());
+        Assert.Equal(["tests/test_target.py"], payload.GetProperty("testFiles").EnumerateArray().Select(x => x.GetString()!).ToArray());
 
         await server.CallToolAsync("test", JsonSerializer.SerializeToElement(new { sessionId = f.Session.Id.Value.ToString() }));
         Assert.False(engine.Last.Payload.TryGetProperty("targets", out _));
