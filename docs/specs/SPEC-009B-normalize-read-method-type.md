@@ -49,8 +49,8 @@ Command:
 
 Default behavior:
 
-- return type metadata only
-- do not return full type source unless `--source` is provided later
+- return an outline: the type signature line(s) plus one line per direct member, no bodies (see SPEC-009A)
+- return the whole class body only with `--full`
 
 For now, normalize the response envelope.
 

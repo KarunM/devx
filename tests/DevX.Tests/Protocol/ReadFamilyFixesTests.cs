@@ -34,14 +34,28 @@ public sealed class ReadFamilyFixesTests
     }
 
     [Fact]
-    public async Task RA_TypeReadReturnsClassBody()
+    public async Task RA_TypeReadFullReturnsClassBody()
     {
         var f = await Create("class Alpha:\n    def run(self):\n        return 1\n");
-        var response = await Read(f, "READ_TYPE", "Alpha");
+        var response = await Read(f, "READ_TYPE", "Alpha", new { full = true });
         Assert.True(response.Success);
         var data = response.Data!.Value.Deserialize<SourceReadResponse>()!;
         Assert.Contains("class Alpha:", data.Source);
         Assert.Equal(3, data.ReturnedLines);
+    }
+
+    [Fact]
+    public async Task O1_TypeReadReturnsOutlineByDefault()
+    {
+        var f = await Create("class Alpha(Base):\n    def run(self):\n        return 1\n");
+        var response = await Read(f, "READ_TYPE", "Alpha");
+        Assert.True(response.Success);
+        var data = response.Data!.Value.Deserialize<SourceReadResponse>()!;
+        Assert.Contains("class Alpha(Base):", data.Source);
+        Assert.Contains("run", data.Source);
+        Assert.DoesNotContain("return 1", data.Source);
+        Assert.Equal(2, data.ReturnedLines);
+        Assert.Contains("\"Outline\":true", JsonSerializer.Serialize(data.Metadata));
     }
 
     [Fact]

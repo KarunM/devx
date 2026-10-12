@@ -89,6 +89,13 @@ the requested range after clipping it to the file. `TotalLines` continues to des
 file. A fully returned method or type therefore has `Truncated: false` even when its file has
 additional lines.
 
+A type read (`read type`, bare `read <Class>`, MCP `read` kind=type) without `--full` returns an
+outline, not the body: the type's signature line(s) followed by one line per direct member
+(`kind name path:start-end signature`). `Source` holds the outline, `Truncated` is false,
+`Metadata.Outline` is true and `Metadata.MemberCount`, `Metadata.BodyLines` and
+`Metadata.Hint` ("pass --full for the body") are set. With `--full` the whole class body is
+returned exactly as before. `read method <ClassQN>` still returns the body.
+
 Optional later flag:
 
 ```bash

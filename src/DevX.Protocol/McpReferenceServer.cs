@@ -867,7 +867,7 @@ public sealed class McpReferenceServer
                 },
                 required = new[] { "query" }
             }),
-            CreateTool("read", "Read", "Step 2: Use read to inspect a symbol, file, or section before editing. Optional context:true adds bounded test-name and same-file name candidates as navigation hints.", "read", new
+            CreateTool("read", "Read", "Step 2: Use read to inspect a symbol, file, or section before editing. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies, read type for a member outline, --full/full:true for a whole class. Optional context:true adds bounded test-name and same-file name candidates as navigation hints.", "read", new
             {
                 type = "object",
                 properties = new

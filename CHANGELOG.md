@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `read type` (and bare `read <Class>` / MCP `read` kind=type) now returns an outline by default:
+  the class signature with its bases and one line per direct member with its span; `--full` /
+  `full:true` returns the whole body as before. The MCP `read` description and CLI usage now say
+  that target is a qualified name, not a path, and point to the outline (O-1, O-2).
+- History is best-effort: when the session database is read-only (for example a sandboxed agent),
+  searches and reads succeed and report a "history not recorded" diagnostic instead of crashing
+  with a SQLite error. Session creation and source/index writes still fail loudly (O-3).
 - Read class bodies for bare and explicit type reads, resolve unique segment suffixes, cap and
   rank ambiguous candidates, and report truncation only when the requested source span is clipped.
 - Fix an absolute in-root path in `devx patch apply` / `rollback` leaving a root-prefixed dirty marker

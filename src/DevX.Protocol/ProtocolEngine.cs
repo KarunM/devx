@@ -50,8 +50,20 @@ public sealed class ProtocolEngine : IProtocolEngine
         _runtimeContextResolver = new RuntimeContextResolver();
     }
 
+    private readonly AsyncLocal<System.Runtime.CompilerServices.StrongBox<string?>> _historyFailure = new();
+
+    private async Task RecordHistoryAsync(Func<Task> save)
+    {
+        try { await save(); }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            if (_historyFailure.Value is { Value: null } box) box.Value = error.Message;
+        }
+    }
+
     public async Task<ProtocolResponse> ExecuteAsync(ProtocolRequest request, CancellationToken cancellationToken = default)
     {
+        _historyFailure.Value = new System.Runtime.CompilerServices.StrongBox<string?>();
         var readStarted = DateTimeOffset.UtcNow;
         if (!string.Equals(request.Version, "1.0", StringComparison.Ordinal))
         {
@@ -129,10 +141,11 @@ public sealed class ProtocolEngine : IProtocolEngine
                     var metricMetadata = new System.Text.Json.Nodes.JsonObject();
                     foreach (var entry in metadata) metricMetadata[entry.Key] = entry.Value?.DeepClone();
                     metricMetadata["EventOrigin"] = "internal-read";
-                    await _sessionStore.AddOperationMetricAsync(new OperationMetric(request.Operation.ToLowerInvariant().Replace('_', ' '),
-                        readStarted, DateTimeOffset.UtcNow - readStarted, true, session.Id.Value.ToString(), metricMetadata.ToJsonString(), request.AgentLabel), cancellationToken);
+                    await RecordHistoryAsync(() => _sessionStore.AddOperationMetricAsync(new OperationMetric(request.Operation.ToLowerInvariant().Replace('_', ' '),
+                        readStarted, DateTimeOffset.UtcNow - readStarted, true, session.Id.Value.ToString(), metricMetadata.ToJsonString(), request.AgentLabel), cancellationToken));
                 }
             }
+            if (response.Success && _historyFailure.Value?.Value is { } historyFailure) response = response with { Diagnostics = [.. response.Diagnostics, new ProtocolDiagnostic("HistoryNotRecorded", "history not recorded: " + historyFailure)] };
             return response;
         }
         catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
@@ -149,7 +162,7 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var result = await _searchService.SearchSymbolAsync(new SearchSymbolRequest(query), cancellationToken);
-        await _sessionStore.SaveSearchAsync(new SaveSearchRequest(session.Id, query), cancellationToken);
+        await RecordHistoryAsync(() => _sessionStore.SaveSearchAsync(new SaveSearchRequest(session.Id, query), cancellationToken));
         return Success(result);
     }
 
@@ -161,7 +174,7 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var result = await _searchService.SearchTextAsync(new SearchTextRequest(query), cancellationToken);
-        await _sessionStore.SaveSearchAsync(new SaveSearchRequest(session.Id, query), cancellationToken);
+        await RecordHistoryAsync(() => _sessionStore.SaveSearchAsync(new SaveSearchRequest(session.Id, query), cancellationToken));
         return Success(result);
     }
 
@@ -194,7 +207,7 @@ public sealed class ProtocolEngine : IProtocolEngine
             };
         }
 
-        await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, fileIdOrPath), cancellationToken);
+        await RecordHistoryAsync(() => _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, fileIdOrPath), cancellationToken));
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new FileSnapshotResponse(snapshot)), [], []);
     }
 
@@ -224,10 +237,10 @@ public sealed class ProtocolEngine : IProtocolEngine
 
         var selected = exactMatch is not null && methods.Count == 1 ? exactMatch : null;
         var workingSetItem = selected?.Id ?? methods[0].Id;
-        await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, workingSetItem), cancellationToken);
+        await RecordHistoryAsync(() => _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, workingSetItem), cancellationToken));
         if (selected is not null)
         {
-            await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, selected.Id), cancellationToken);
+            await RecordHistoryAsync(() => _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, selected.Id), cancellationToken));
         }
 
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new MethodSummaryResponse(query, matchKind, selected, methods)), [], []);
@@ -253,8 +266,8 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var method = methods[0];
-        await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, method.Id), cancellationToken);
-        await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, method.Id), cancellationToken);
+        await RecordHistoryAsync(() => _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, method.Id), cancellationToken));
+        await RecordHistoryAsync(() => _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, method.Id), cancellationToken));
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new MethodResponse(method)), [], []);
     }
 
@@ -278,8 +291,8 @@ public sealed class ProtocolEngine : IProtocolEngine
         }
 
         var type = types[0];
-        await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, type.Id), cancellationToken);
-        await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, type.Id), cancellationToken);
+        await RecordHistoryAsync(() => _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, type.Id), cancellationToken));
+        await RecordHistoryAsync(() => _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, type.Id), cancellationToken));
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new TypeResponse(type)), [], []);
     }
 
@@ -311,7 +324,7 @@ public sealed class ProtocolEngine : IProtocolEngine
 
         foreach (var caller in callers)
         {
-            await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, caller.CallerMethodId), cancellationToken);
+            await RecordHistoryAsync(() => _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, caller.CallerMethodId), cancellationToken));
         }
 
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new CallersResponse(new CallerSummaryResponse(query, target is null ? "Unknown" : "Exact", target, callers))), [], []);
@@ -381,7 +394,7 @@ public sealed class ProtocolEngine : IProtocolEngine
 
         foreach (var callee in callees)
         {
-            await _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, callee.CalleeMethodId), cancellationToken);
+            await RecordHistoryAsync(() => _sessionStore.AddWorkingSetItemAsync(new AddWorkingSetItemRequest(session.Id, callee.CalleeMethodId), cancellationToken));
         }
 
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(new CalleesResponse(new CalleeSummaryResponse(query, target is null ? "Unknown" : "Exact", target, callees))), [], []);
@@ -713,7 +726,7 @@ public sealed class ProtocolEngine : IProtocolEngine
                         }
                         var result = new SourceReadResponse(kind, symbolId, symbol.QualifiedName, symbol.FilePath!, symbol.StartLine.Value,
                             symbol.EndLine.Value, symbolTotalLines, symbolReturnedLines, symbolReturnedLines < symbol.EndLine.Value - symbol.StartLine.Value + 1, true, source, symbolMetadata);
-                        await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, symbolId), cancellationToken);
+                        await RecordHistoryAsync(() => _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, symbolId), cancellationToken));
                         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(result), [], []);
                     }
                 }
@@ -776,7 +789,7 @@ public sealed class ProtocolEngine : IProtocolEngine
             metadata = new { ResolvedVia = Guid.TryParse(query, out _) ? "exact" : "short-name" };
         }
         var response = new SourceReadResponse("method", method.Id, method.QualifiedName, method.FilePath, method.StartLine, method.EndLine, totalLines, returnedLines, returnedLines < method.EndLine - method.StartLine + 1, true, slice, metadata);
-        await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, method.Id), cancellationToken);
+        await RecordHistoryAsync(() => _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, method.Id), cancellationToken));
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
     }
 
@@ -842,6 +855,43 @@ public sealed class ProtocolEngine : IProtocolEngine
             Evidence = evidence
         };
 
+    // Member lines omit the path (always the header's file) to keep the outline small.
+    // Stored signatures may span lines (C# keeps the body braces); the outline shows the first line only.
+    private static string OutlineSignature(string? signature)
+    {
+        var first = (signature ?? "").Split('\n').Select(line => line.Trim()).FirstOrDefault(line => line.Length > 0) ?? "";
+        if (first.Length > 160) first = first[..160];
+        return first.Length == 0 ? "" : " " + first;
+    }
+
+    private async Task<(string Text, int Count)> BuildTypeOutlineAsync(string qualifiedName, string filePath, int startLine, int endLine, string[] fileLines, CancellationToken cancellationToken)
+    {
+        // Signature: the declaration line, extended while parentheses are open (multi-line Python bases)
+        // or until a line ends with ':' (Python). C#-style declarations stop after the first line.
+        var signature = new List<string>();
+        var depth = 0;
+        for (var i = startLine - 1; i < endLine && i < fileLines.Length; i++)
+        {
+            var line = fileLines[i];
+            signature.Add(line);
+            depth += line.Count(c => c is '(' or '[') - line.Count(c => c is ')' or ']');
+            if (depth <= 0) break;
+        }
+        var members = _repositoryStore is ISymbolStore symbols
+            ? (await symbols.FindSymbolsContainingAsync(qualifiedName, cancellationToken))
+                .Where(symbol => symbol.FilePath == filePath && symbol.StartLine > startLine && symbol.EndLine <= endLine && symbol.QualifiedName.StartsWith(qualifiedName + ".", StringComparison.Ordinal))
+                .OrderBy(symbol => symbol.StartLine).ToList()
+            : [];
+        var lines = new List<string>(signature);
+        foreach (var member in members)
+        {
+            var memberName = member.QualifiedName[(qualifiedName.Length + 1)..];
+            if (memberName.Contains('.')) continue;
+            lines.Add($"{member.Kind.ToLowerInvariant()} {memberName} {member.StartLine}-{member.EndLine}" + OutlineSignature(member.Signature));
+        }
+        return (string.Join('\n', lines), members.Count(member => !member.QualifiedName[(qualifiedName.Length + 1)..].Contains('.')));
+    }
+
     private async Task<ProtocolResponse> HandleReadTypeAsync(ProtocolRequest request, SessionState session, CancellationToken cancellationToken)
     {
         var query = GetReadQuery(request.Payload);
@@ -885,11 +935,13 @@ public sealed class ProtocolEngine : IProtocolEngine
             if (!RepositoryPathGuard.TryResolve(idRoot, typeSummary.FilePath, out var idAbsolute, out var idPathError)) return Fail("ValidationError", idPathError, id);
             if (!IOFile.Exists(idAbsolute)) return Fail("FileMissing", $"file missing: {typeSummary.FilePath}", id);
             var idLines = (await IOFile.ReadAllTextAsync(idAbsolute, cancellationToken)).Replace("\r\n", "\n").Split('\n');
-            var idEndLine = TryGetBoolean(request.Payload, "full") ? typeSummary.EndLine : Math.Min(typeSummary.EndLine, typeSummary.StartLine + 299);
+            var idEndLine = typeSummary.EndLine;
             var idSource = string.Join('\n', idLines[(typeSummary.StartLine - 1)..idEndLine]);
             var idReturned = idSource.Split('\n').Length;
-            var responseById = new SourceReadResponse("type", typeSummary.Id, typeSummary.QualifiedName, typeSummary.FilePath, typeSummary.StartLine, idEndLine, typeSummary.EndLine - typeSummary.StartLine + 1, idReturned, idReturned < typeSummary.EndLine - typeSummary.StartLine + 1, true, idSource, new { TypeName = typeSummary.Name, Namespace = typeSummary.Namespace, Project = typeSummary.Project, Kind = typeSummary.Kind, ResolvedVia = "exact" });
-            await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, typeSummary.Id), cancellationToken);
+            var (idOutline, idCount) = TryGetBoolean(request.Payload, "full") ? (idSource, 0) : await BuildTypeOutlineAsync(typeSummary.QualifiedName, typeSummary.FilePath, typeSummary.StartLine, typeSummary.EndLine, idLines, cancellationToken);
+            var idMetadata = TryGetBoolean(request.Payload, "full") ? (object)new { TypeName = typeSummary.Name, Namespace = typeSummary.Namespace, Project = typeSummary.Project, Kind = typeSummary.Kind, ResolvedVia = "exact" } : new { TypeName = typeSummary.Name, Namespace = typeSummary.Namespace, Project = typeSummary.Project, Kind = typeSummary.Kind, ResolvedVia = "exact", Outline = true, MemberCount = idCount, BodyLines = typeSummary.EndLine - typeSummary.StartLine + 1, Hint = "pass --full for the body" };
+            var responseById = new SourceReadResponse("type", typeSummary.Id, typeSummary.QualifiedName, typeSummary.FilePath, typeSummary.StartLine, typeSummary.EndLine, typeSummary.EndLine - typeSummary.StartLine + 1, idOutline.Split('\n').Length, false, true, idOutline, idMetadata);
+            await RecordHistoryAsync(() => _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, typeSummary.Id), cancellationToken));
             return new ProtocolResponse(true, JsonSerializer.SerializeToElement(responseById), [], []);
         }
 
@@ -920,13 +972,15 @@ public sealed class ProtocolEngine : IProtocolEngine
         var fileLines = (await IOFile.ReadAllTextAsync(absolute, cancellationToken)).Replace("\r\n", "\n").Split('\n');
         if (type.StartLine < 1 || type.EndLine > fileLines.Length) return Fail("StaleIndex", $"Indexed span is stale for {type.FilePath}; run devx index update.", query);
         var typeFull = TryGetBoolean(request.Payload, "full");
-        var typeEndLine = typeFull ? type.EndLine : Math.Min(type.EndLine, type.StartLine + 299);
-        var classSource = string.Join('\n', fileLines[(type.StartLine - 1)..typeEndLine]);
+        var typeEndLine = type.EndLine;
+        var bodySource = string.Join('\n', fileLines[(type.StartLine - 1)..typeEndLine]);
+        var (classSource, memberCount) = typeFull ? (bodySource, 0) : await BuildTypeOutlineAsync(type.QualifiedName, type.FilePath, type.StartLine, type.EndLine, fileLines, cancellationToken);
         var classLines = classSource.Split('\n').Length;
         var typeVia = typeResolution?.ResolvedVia ?? "exact";
         var requestedTypeLines = type.EndLine - type.StartLine + 1;
-        var response = new SourceReadResponse("type", type.Id, type.QualifiedName, type.FilePath, type.StartLine, typeEndLine, requestedTypeLines, classLines, classLines < requestedTypeLines, true, classSource, new { TypeName = type.Name, Namespace = type.Namespace, Project = type.Project, Kind = type.Kind, ResolvedVia = typeVia });
-        await _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, type.Id), cancellationToken);
+        var metadata = typeFull ? (object)new { TypeName = type.Name, Namespace = type.Namespace, Project = type.Project, Kind = type.Kind, ResolvedVia = typeVia } : new { TypeName = type.Name, Namespace = type.Namespace, Project = type.Project, Kind = type.Kind, ResolvedVia = typeVia, Outline = true, MemberCount = memberCount, BodyLines = requestedTypeLines, Hint = "pass --full for the body" };
+        var response = new SourceReadResponse("type", type.Id, type.QualifiedName, type.FilePath, type.StartLine, type.EndLine, requestedTypeLines, classLines, false, true, classSource, metadata);
+        await RecordHistoryAsync(() => _sessionStore.MarkSymbolExpandedAsync(new MarkSymbolExpandedRequest(session.Id, type.Id), cancellationToken));
         return new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []);
     }
 

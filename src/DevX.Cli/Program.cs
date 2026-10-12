@@ -689,10 +689,20 @@ static async Task<int> SearchAsync(string connectionString, string[] args, strin
         }
     }
 
-    await store.AddOperationMetricAsync(new OperationMetric($"search {searchKind}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, query), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric($"search {searchKind}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, query), GetAgentLabel(args)));
     WriteResponse(response, format, enclosingSymbols);
     if (autoRead is not null) Console.WriteLine(autoRead);
     return response.Success ? 0 : 1;
+}
+
+// Read/search history is best-effort: a read-only session database must not fail the command.
+static async Task RecordMetricAsync(ISessionStore store, OperationMetric metric)
+{
+    try { await store.AddOperationMetricAsync(metric); }
+    catch (Exception error) when (error is not OperationCanceledException)
+    {
+        Console.Error.WriteLine("history not recorded: " + error.Message);
+    }
 }
 
 static List<string> PositionalQueryParts(string[] args, int start)
@@ -1313,7 +1323,7 @@ static async Task<int> SnapshotAsync(string connectionString, string[] args, str
     var request = new ProtocolRequest("1.0", ProtocolOperations.GetFileSnapshot, sessionId, JsonSerializer.SerializeToElement(snapshotPayload));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric("snapshot", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, target), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric("snapshot", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, target), GetAgentLabel(args)));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -1347,7 +1357,7 @@ static async Task<int> MethodAsync(string connectionString, string[] args, strin
     var request = new ProtocolRequest("1.0", operation, sessionId, JsonSerializer.SerializeToElement(new { query = args[2] }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric($"method {action}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric($"method {action}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -1373,7 +1383,7 @@ static async Task<int> TypeAsync(string connectionString, string[] args, string 
     var request = new ProtocolRequest("1.0", ProtocolOperations.GetTypeOperation, sessionId, JsonSerializer.SerializeToElement(new { query = args[2] }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric("type get", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric("type get", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -1399,7 +1409,7 @@ static async Task<int> ReferencesAsync(string connectionString, string[] args, s
     var request = new ProtocolRequest("1.0", ProtocolOperations.GetReferences, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric("get references", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric("get references", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -1518,7 +1528,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     }
     if (args.Length < 3)
     {
-        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]");
+        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies, read type for a member outline, --full/full:true for a whole class.");
         return 1;
     }
 
@@ -1587,7 +1597,7 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
         }
 
         request = id is not null
-            ? new ProtocolRequest("1.0", "READ_TYPE", sessionId, JsonSerializer.SerializeToElement(new { id }), GetAgentLabel(args))
+            ? new ProtocolRequest("1.0", "READ_TYPE", sessionId, JsonSerializer.SerializeToElement(new { id, full = HasFlag(args, "--full") }), GetAgentLabel(args))
             : new ProtocolRequest("1.0", "READ_TYPE", sessionId, JsonSerializer.SerializeToElement(new { query, full = HasFlag(args, "--full") }), GetAgentLabel(args));
     }
     else if (action == "section")
@@ -1627,12 +1637,12 @@ static async Task<int> ReadAsync(string connectionString, string[] args, string 
     }
     else
     {
-        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]");
+        Console.Error.WriteLine("Usage: devx read <name|file#Heading|file> [<name> ...] [--session <id>] | devx read <file|method|type|section> <target> [--range start:end|--full]. target is a qualified name (e.g. sympy.core.symbol.Symbol) or a repo-relative path for kind=file; never a path for kind=method/type. A search hit already shows the class signature and bases; use read for bodies, read type for a member outline, --full/full:true for a whole class.");
         return 1;
     }
 
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric($"read {action}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric($"read {action}", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[2]), GetAgentLabel(args)));
     if (batchResponses is not null)
     {
         batchResponses.Add((args[2], response));
@@ -1765,7 +1775,7 @@ static async Task<int> CallersAsync(string connectionString, string[] args, stri
     var request = new ProtocolRequest("1.0", ProtocolOperations.GetCallers, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric("get callers", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric("get callers", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
@@ -1791,7 +1801,7 @@ static async Task<int> CalleesAsync(string connectionString, string[] args, stri
     var request = new ProtocolRequest("1.0", ProtocolOperations.GetCallees, sessionId, JsonSerializer.SerializeToElement(new { query = args[1] }));
     var started = DateTimeOffset.UtcNow;
     var response = await engine.ExecuteAsync(request);
-    await store.AddOperationMetricAsync(new OperationMetric("get callees", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
+    await RecordMetricAsync(store, new OperationMetric("get callees", started, DateTimeOffset.UtcNow - started, response.Success, sessionId, OperationMetadata(response, args[1]), GetAgentLabel(args)));
     WriteResponse(response, format);
     return response.Success ? 0 : 1;
 }
