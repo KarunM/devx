@@ -1,6 +1,6 @@
 # Packaging measurements
 
-Measurements supplied by the release orchestrator: **osx-arm64, .NET 10, 2026-10-07**. Commands below reproduce the measured operations.
+Measurements supplied by the maintainer: **osx-arm64, .NET 10, 2026-10-07**. Commands below reproduce the measured operations.
 
 ## .NET tool package
 

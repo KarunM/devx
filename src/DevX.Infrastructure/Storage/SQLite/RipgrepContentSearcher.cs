@@ -9,7 +9,7 @@ namespace DevX.Infrastructure.Storage.SQLite;
 /// either way -- path, line, and the matching line's text -- so nothing downstream, and no
 /// `--format json` payload, depends on which engine answered.
 ///
-/// ripgrep is used because it is the regex engine the owner asked for AND it respects
+/// ripgrep is used because it is a full regex engine AND it respects
 /// .gitignore, which the in-process scan cannot: that scan reads every indexed file from
 /// disk and matches a literal substring, which is why agents had to guess word after word
 /// (25 of 111 `search text` calls in the 1.6.11 transcripts came back empty).

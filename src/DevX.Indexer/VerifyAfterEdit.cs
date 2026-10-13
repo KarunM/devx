@@ -93,8 +93,8 @@ public sealed class VerifyAfterEdit
         => new("build", true, string.Empty, [], "skipped (--verify=test)");
 
     /// <summary>`--verify`, `--verify=build|test|both`, `--no-verify`, or no flag at all. Null
-    /// means the caller did not ask to verify, so an edit stays exactly as it was in 1.6.13
-    /// (brief OSS14 adjustment, 2026-10-09: verifying is opt-in on every edit). The last flag
+    /// means the caller did not ask to verify, so an edit does not build or run tests
+    /// (verifying is opt-in on every edit). The last flag
     /// on the line wins, so `--verify=build --no-verify` does not verify.</summary>
     public static VerifyMode? ParseVerifyFlag(IReadOnlyList<string> args)
     {
@@ -134,7 +134,7 @@ public sealed class VerifyAfterEdit
     }
 
     /// <summary>A successful verification answers in ONE line -- status, what ran, and where the
-    /// full log is (owner 2026-10-09: verifying after an edit must not cost five lines of reply).
+    /// full log is (verifying after an edit must not cost five lines of reply).
     /// A failure goes through <see cref="FormatVerifyLines"/> instead, which keeps the
     /// `path:line: message` lines.</summary>
     public static string FormatOneLine(string label, VerifyAfterEditResult verification)
@@ -227,8 +227,8 @@ public sealed class VerifyAfterEdit
         }
         // A support module under a test directory is not a test. pytest on `tests/conftest.py`
         // collects nothing and exits 5, which turned every verify on the click repository into a
-        // false failure -- measured 2026-10-09, when `devx replace --verify` on src/click/core.py
-        // reported "FAIL tests — 0 failed of 0" over five passing files and one conftest.
+        // false failure: `devx replace --verify` on src/click/core.py reported
+        // "FAIL tests — 0 failed of 0" over five passing files and one conftest.
         if (name.StartsWith("conftest", StringComparison.OrdinalIgnoreCase)
             || name.Equals("__init__.py", StringComparison.OrdinalIgnoreCase))
         {

@@ -47,7 +47,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
     private static readonly (string, string) PyDerived = ("pkg/derived.py", "from pkg.base import Base, Other\nimport pkg.base as basemod\n\n\nclass Derived(Base, basemod.Other, metaclass=type):\n    def run(self):\n        return 1\n");
 
     [Fact]
-    public async Task B1_PythonOutlineResolvesBasesToPathAndLines()
+    public async Task PythonOutlineResolvesBasesToPathAndLines()
     {
         var f = await Create(PyBase, PyDerived);
         var data = await ReadType(f, "pkg.derived.Derived");
@@ -59,7 +59,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
     }
 
     [Fact]
-    public async Task B1_UnresolvedBaseIsMarked()
+    public async Task UnresolvedBaseIsMarked()
     {
         var f = await Create(("pkg/m.py", "from typing import Generic, TypeVar\nT = TypeVar('T')\n\n\nclass Box(Generic[T], object, Missing):\n    pass\n"));
         var data = await ReadType(f, "pkg.m.Box");
@@ -67,7 +67,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
     }
 
     [Fact]
-    public async Task B1_CSharpOutlineResolvesBaseAndInterfaces()
+    public async Task CSharpOutlineResolvesBaseAndInterfaces()
     {
         var f = await Create(
             ("Sample.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"),
@@ -80,7 +80,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
     }
 
     [Fact]
-    public async Task B1_NoBasesNoLine()
+    public async Task TypeWithoutBasesHasNoBasesLine()
     {
         var f = await Create(PyBase);
         var data = await ReadType(f, "pkg.base.Base");
@@ -92,7 +92,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
     }
 
     [Fact]
-    public async Task B1_MetadataBasesPresent()
+    public async Task MetadataBasesPresent()
     {
         var f = await Create(PyBase, PyDerived);
         var data = await ReadType(f, "pkg.derived.Derived");
@@ -120,7 +120,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
         => [("pkg/t.py", Target), ("pkg/u.py", Callers(functions, callsEach))];
 
     [Fact]
-    public async Task B2_ManyCallSitesAreGroupedByEnclosingSymbol()
+    public async Task ManyCallSitesAreGroupedByEnclosingSymbol()
     {
         // heavy has 3 calls, user00..user11 have 1 each => 15 sites in 13 functions.
         var f = await Create(("pkg/t.py", Target), ("pkg/u.py", Callers(12) + "\n\ndef heavy():\n    target()\n    target()\n    target()\n"));
@@ -135,7 +135,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
     }
 
     [Fact]
-    public async Task B2_TenOrFewerSitesStayFlat()
+    public async Task CallersRemainFlatAtTenSites()
     {
         var f = await Create(ManyFixture(10));
         var response = await Run(f, ProtocolOperations.GetCallers, "target");
@@ -149,7 +149,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
     }
 
     [Fact]
-    public async Task B2_FullListsEverySite()
+    public async Task FullFlagListsEverySiteOfGroupedCallers()
     {
         var f = await Create(ManyFixture(12));
         var response = await Run(f, ProtocolOperations.GetCallers, "target", full: true);
@@ -161,7 +161,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
     }
 
     [Fact]
-    public async Task B2_JsonKeepsReferencesAndAddsGroups()
+    public async Task JsonKeepsReferencesAndAddsGroups()
     {
         var f = await Create(ManyFixture(60));
         var data = (await Run(f, ProtocolOperations.GetCallers, "target")).Data!.Value;
@@ -182,7 +182,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
     }
 
     [Fact]
-    public async Task B2_GroupLinesShowFiveNumbersThenEllipsis()
+    public async Task GroupLinesShowFiveNumbersThenEllipsis()
     {
         var f = await Create(("pkg/t.py", Target), ("pkg/u.py", "from pkg.t import target\n\n\ndef many():\n" + string.Join("\n", Enumerable.Range(0, 8).Select(_ => "    target()")) + "\n\n\ndef b1():\n    target()\n\n\ndef b2():\n    target()\n\n\ndef b3():\n    target()\n"));
         var text = TextReferences.Format((await Run(f, ProtocolOperations.GetCallers, "target")).Data!.Value)!;
@@ -190,7 +190,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
     }
 
     [Fact]
-    public async Task B2_CSharpCallersUnchanged()
+    public async Task CSharpCallersUnchanged()
     {
         var root = Directory.CreateTempSubdirectory("devx-bases-cs-").FullName;
         Directory.CreateDirectory(Path.Combine(root, "src", "Sample"));
@@ -210,7 +210,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
     }
 
     [Fact]
-    public async Task B3_GuidanceMentionsBasesAndGroupedCallersWithinCaps()
+    public async Task GuidanceMentionsBasesAndGroupedCallersWithinCaps()
     {
         var root = Directory.CreateTempSubdirectory("devx-bases-init-").FullName;
         await DevX.Cli.AgentRulesInitializer.InitializeAsync(root, ["codex"], global: false);
@@ -228,7 +228,7 @@ public sealed class OutlineBasesAndGroupedCallersTests
     }
 
     [Fact]
-    public async Task B2_McpCallersFullTrueListsEverySite()
+    public async Task McpCallersFullTrueListsEverySite()
     {
         var f = await Create(ManyFixture(12));
         var server = new McpReferenceServer(f.Engine, f.Store, f.Store, f.Session.Id.Value.ToString());

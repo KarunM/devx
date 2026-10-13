@@ -45,7 +45,7 @@ public sealed class ReadFamilyFixesTests
     }
 
     [Fact]
-    public async Task O1_TypeReadReturnsOutlineByDefault()
+    public async Task TypeReadReturnsOutlineByDefault()
     {
         var f = await Create("class Alpha(Base):\n    def run(self):\n        return 1\n");
         var response = await Read(f, "READ_TYPE", "Alpha");

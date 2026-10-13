@@ -42,7 +42,7 @@ public sealed class ReadOutlineTests
     }
 
     [Fact]
-    public async Task O1_TypeOutlineListsDirectMembersAndSignature()
+    public async Task TypeOutlineListsDirectMembersAndSignature()
     {
         var f = await Create(CSharpSource, "Greeter.cs");
         var data = await ReadType(f, full: false);
@@ -64,7 +64,7 @@ public sealed class ReadOutlineTests
     }
 
     [Fact]
-    public async Task O1_PythonMultiLineSignatureIsKeptWholeAndNestedMembersExcluded()
+    public async Task PythonMultiLineSignatureIsKeptWholeAndNestedMembersExcluded()
     {
         var f = await Create("class Alpha(\n    Base,\n    Other):\n    def run(self):\n        def inner():\n            return 1\n        return inner\n", "alpha.py");
         var response = await Run(f, "READ_TYPE", "Alpha");
@@ -79,7 +79,7 @@ public sealed class ReadOutlineTests
     }
 
     [Fact]
-    public async Task O1_TypeOutlineBytesAreSmallerThanBody()
+    public async Task TypeOutlineBytesAreSmallerThanBody()
     {
         var f = await Create(CSharpSource, "Greeter.cs");
         var outline = await ReadType(f, full: false);
@@ -88,7 +88,7 @@ public sealed class ReadOutlineTests
     }
 
     [Fact]
-    public async Task O1_FullReturnsWholeBodyUnchanged()
+    public async Task FullTypeReadPreservesBody()
     {
         var f = await Create(CSharpSource, "Greeter.cs");
         var body = await ReadType(f, full: true);
@@ -99,7 +99,7 @@ public sealed class ReadOutlineTests
     }
 
     [Fact]
-    public async Task O2_ReadToolDescriptionNamesQualifiedNameAndOutline()
+    public async Task ReadToolDescriptionNamesQualifiedNameAndOutline()
     {
         var f = await Create(CSharpSource, "Greeter.cs");
         var server = new McpReferenceServer(f.Engine, f.Store, f.Store, f.Session.Id.Value.ToString());
@@ -128,7 +128,7 @@ public sealed class ReadOutlineTests
     }
 
     [Fact]
-    public async Task O3_SearchSucceedsOnReadOnlySessionDbWithDiagnostic()
+    public async Task SearchSucceedsOnReadOnlySessionDbWithDiagnostic()
     {
         var f = await Create(CSharpSource, "Greeter.cs");
         await WithReadOnlyDb(f, async () =>
@@ -142,7 +142,7 @@ public sealed class ReadOutlineTests
     }
 
     [Fact]
-    public async Task O3_ReadMethodSucceedsOnReadOnlySessionDb()
+    public async Task ReadMethodSucceedsOnReadOnlySessionDb()
     {
         var f = await Create(CSharpSource, "Greeter.cs");
         await WithReadOnlyDb(f, async () =>
@@ -155,7 +155,7 @@ public sealed class ReadOutlineTests
     }
 
     [Fact]
-    public async Task O3_WritableDbRecordsHistoryWithoutDiagnostic()
+    public async Task WritableSessionDbRecordsHistoryWithoutDiagnostic()
     {
         var f = await Create(CSharpSource, "Greeter.cs");
         var response = await Run(f, ProtocolOperations.SearchSymbol, "Greeter");

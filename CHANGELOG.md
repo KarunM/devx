@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 1.8.0 — 2026-10-13
+
+### Changed
+
+- Internal restructuring: the entry point is split into per-command files, the storage and protocol engine are split into partial classes by concern, test names describe behaviour, and internal notes are removed from comments. No behaviour change; outputs are byte-identical to 1.7.2 on the captured query set.
+
 ## 1.7.2 — 2026-10-12
 
 ### Fixed
