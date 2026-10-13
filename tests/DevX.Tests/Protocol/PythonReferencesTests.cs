@@ -43,7 +43,7 @@ public sealed class PythonReferencesTests
     private static readonly (string, string) PkgB = ("pkg/b.py", "from pkg.a import helper\n\nx = helper()\n# helper() in a comment\n");
 
     [Fact]
-    public async Task P1_PythonReferencesReturnUsagesWithEnclosingSymbol()
+    public async Task PythonReferencesIncludeEnclosingSymbol()
     {
         var f = await Create(PkgA, PkgB);
         var data = Text(await Run(f, ProtocolOperations.GetReferences, "helper"));
@@ -60,7 +60,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task P1_ReferencesAgentFormatIsOneLinePerHitThenFooter()
+    public async Task ReferencesAgentFormatIsOneLinePerHitThenFooter()
     {
         var f = await Create(PkgA, PkgB);
         var response = await Run(f, ProtocolOperations.GetReferences, "helper");
@@ -72,7 +72,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task P1_ReferencesDistinguishCallUsageImport()
+    public async Task ReferencesDistinguishCallUsageImport()
     {
         var f = await Create(PkgA, ("pkg/c.py", "from pkg.a import helper\nfn = helper\nhelper ()\nprint('helper')\n\"\"\"helper docs\"\"\"\n"));
         var data = Text(await Run(f, ProtocolOperations.GetReferences, "helper"));
@@ -85,7 +85,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task P1_ReferencesCapAndRanking()
+    public async Task ReferencesCapAndRanking()
     {
         var usages = string.Join("\n", Enumerable.Range(0, 60).Select(i => $"v{i} = helper")) + "\nz = helper()\n";
         var f = await Create(PkgA, ("pkg/many.py", usages));
@@ -102,7 +102,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task P1_AmbiguousBareNameListsCandidates()
+    public async Task AmbiguousBareNameListsCandidates()
     {
         var f = await Create(("one/x.py", "def dup():\n    return 1\n"), ("two/y.py", "def dup():\n    return 2\n"));
         var response = await Run(f, ProtocolOperations.GetReferences, "dup");
@@ -114,7 +114,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task P2_PythonCallersReturnOnlyCallSites()
+    public async Task PythonCallersReturnOnlyCallSites()
     {
         var f = await Create(PkgA, PkgB, ("pkg/c.py", "from pkg.a import helper\nfn = helper\n"));
         var data = Text(await Run(f, ProtocolOperations.GetCallers, "helper"));
@@ -126,7 +126,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task P2_PythonCalleesStillUnsupportedWithHint()
+    public async Task PythonCalleesStillUnsupportedWithHint()
     {
         var f = await Create(PkgA, PkgB);
         var response = await Run(f, ProtocolOperations.GetCallees, "helper");
@@ -137,7 +137,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task P2_CSharpCallersUnchanged()
+    public async Task CSharpCallersUnchanged()
     {
         var root = Directory.CreateTempSubdirectory("devx-pyrefs-cs-").FullName;
         Directory.CreateDirectory(Path.Combine(root, "src", "Sample"));
@@ -170,7 +170,7 @@ public sealed class PythonReferencesTests
     private const string Lexical = "text-backed lexical candidates outside strings and comments; not a resolved call graph";
 
     [Fact]
-    public async Task D1_ModuleDocstringCallsAreExcludedGruntzPattern()
+    public async Task ModuleDocstringCallsAreExcludedGruntzPattern()
     {
         var source = "\"\"\"\nModule doc.\n    target(e, x)\n    target(e)\n    target(f, x)\n    target(g)\n\"\"\"\n" + Def + "def sign(e):\n    return target(e, 1)\n";
         var f = await Create(("g.py", source));
@@ -179,56 +179,56 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task D1_ClassAndFunctionDocstringsAreExcluded()
+    public async Task ClassAndFunctionDocstringsAreExcluded()
     {
         var source = Def + "class K:\n    \"\"\"K docs\n    target(1)\n    \"\"\"\n    def m(self):\n        \"\"\"\n        target(2)\n        \"\"\"\n        return target(3)\n";
         Assert.Equal(new[] { 11 }, await CallerLines(source));
     }
 
     [Fact]
-    public async Task D1_MultiLineAssignedStringIsExcluded()
+    public async Task MultiLineAssignedStringIsExcluded()
     {
         var source = Def + "TEXT = \"\"\"\nfirst target(1)\nsecond target(2)\n\"\"\"\nx = target(3)\n";
         Assert.Equal(new[] { 7 }, await CallerLines(source));
     }
 
     [Fact]
-    public async Task D1_HashCommentWithCallIsExcluded()
+    public async Task PythonReferencesIgnoreCallsInComments()
     {
         var source = Def + "# target(1)\nx = target(2)  # target(3)\n";
         Assert.Equal(new[] { 4 }, await CallerLines(source));
     }
 
     [Fact]
-    public async Task D1_HashInsideStringFollowedByRealCallOnSameLineIsKept()
+    public async Task HashInsideStringFollowedByRealCallOnSameLineIsKept()
     {
         var source = Def + "x = \"a # b\"; y = target(1)\n";
         Assert.Equal(new[] { 3 }, await CallerLines(source));
     }
 
     [Fact]
-    public async Task D1_RawAndFStringsContainingCallAreExcluded()
+    public async Task RawAndFStringsContainingCallAreExcluded()
     {
         var source = Def + "a = r\"target(1)\"\nb = f\"see target(2) {a}\"\nc = rb'target(3)'\nd = f\"{target(4)}\"\ne = \"it\\\"s target(5)\"\n";
         Assert.Equal(new[] { 6 }, await CallerLines(source));
     }
 
     [Fact]
-    public async Task D1_RealCallAfterSameLineDocstringCloseIsKept()
+    public async Task RealCallAfterSameLineDocstringCloseIsKept()
     {
         var source = Def + "\"\"\"doc target(1)\"\"\"; target(2)\n";
         Assert.Equal(new[] { 3 }, await CallerLines(source));
     }
 
     [Fact]
-    public async Task D1_ImplicitStringConcatenationAcrossLinesIsExcluded()
+    public async Task ImplicitStringConcatenationAcrossLinesIsExcluded()
     {
         var source = Def + "msg = (\"one target(1) \"\n       \"two target(2)\")\nz = target(3)\n";
         Assert.Equal(new[] { 5 }, await CallerLines(source));
     }
 
     [Fact]
-    public async Task D1_ReferencesDropStringHitsAndKeepImportAndUsage()
+    public async Task ReferencesDropStringHitsAndKeepImportAndUsage()
     {
         var f = await Create(("m.py", Def), ("n.py", "from m import target\nfn = target\ns = \"target\"\n'''\ntarget\n'''\n"));
         var data = Text(await Run(f, ProtocolOperations.GetReferences, "target"));
@@ -236,7 +236,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task D1_FooterAndNoteSayLexicalCandidates()
+    public async Task FooterAndNoteSayLexicalCandidates()
     {
         var f = await Create(("m.py", Def + "x = target()\n"));
         var callers = await Run(f, ProtocolOperations.GetCallers, "target");
@@ -247,7 +247,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task P3_UnindexedRipgrepHitIsNotCountedAsUnsafePath()
+    public async Task UnindexedRipgrepHitIsNotCountedAsUnsafePath()
     {
         var f = await Create(("a.py", "zzunindexedmarker = 1\n"), ("notes.rst", "zzunindexedmarker in prose\n"));
         var outcome = await f.Store.SearchFileContentsWithCoverageAsync("zzunindexedmarker");
@@ -259,7 +259,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task P3_RipgrepStopsAtTheScanCeilingInsteadOfWaitingOutTheTimeout()
+    public async Task RipgrepStopsAtTheScanCeilingInsteadOfWaitingOutTheTimeout()
     {
         var f = await Create(("big.py", string.Join("\n", Enumerable.Range(0, 6000).Select(i => $"zzceiling{i % 7} = {i}")) + "\n"));
         var started = DateTime.UtcNow;
@@ -272,7 +272,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task P2_PythonCallersWithNoCallSitesIsAnEmptySuccessNotAnError()
+    public async Task PythonCallersWithNoCallSitesIsAnEmptySuccessNotAnError()
     {
         var f = await Create(("solo.py", "def lonely():\n    return 1\n"));
         var response = await Run(f, ProtocolOperations.GetCallers, "lonely");
@@ -283,7 +283,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task P2_UnknownNameStillFailsNotFound()
+    public async Task PythonCallersUnknownNameStillFailsNotFound()
     {
         var f = await Create(PkgA);
         var response = await Run(f, ProtocolOperations.GetReferences, "nosuchthing");
@@ -293,7 +293,7 @@ public sealed class PythonReferencesTests
     }
 
     [Fact]
-    public async Task P3_AllIndexedHitsReportZeroUnindexed()
+    public async Task AllIndexedHitsReportZeroUnindexed()
     {
         var f = await Create(("a.py", "zzunindexedmarker = 1\n"));
         var outcome = await f.Store.SearchFileContentsWithCoverageAsync("zzunindexedmarker");

@@ -91,7 +91,7 @@ public sealed record DevXCommandConfig
 
     /// <summary>
     /// True when `command` is a whole command line (`cd tests &amp;&amp; ../.venv/bin/python
-    /// runtests.py`) rather than an executable name. The brief writes the config that way, so
+    /// runtests.py`) rather than an executable name. Configs are commonly written that way, so
     /// it has to work -- with no `args`, the string is split on whitespace unless it uses shell
     /// syntax, in which case it is run through `/bin/sh -c`.
     /// </summary>

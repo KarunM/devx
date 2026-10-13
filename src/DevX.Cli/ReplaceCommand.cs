@@ -81,7 +81,7 @@ public static class ReplaceCommand
         }
         else if (success)
         {
-            // The edit, then ONE line for the verification (brief OSS14 adjustment, 2026-10-09).
+            // The edit, then ONE line for the verification.
             Console.WriteLine(result.Message);
             if (result.Diff.Length > 0) Console.WriteLine(result.Diff);
             Console.WriteLine(VerifyAfterEdit.FormatOneLine("edit", verification));

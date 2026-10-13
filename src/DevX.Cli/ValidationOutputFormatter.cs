@@ -9,8 +9,8 @@ namespace DevX.Cli;
 public static class ValidationOutputFormatter
 {
     /// <summary>`devx verify`: one line when it passed -- status, what ran, and where the full log
-    /// is -- and the failing run's own `path:line: message` lines when it did not (brief OSS14
-    /// adjustment, 2026-10-09: a verify that passed must not add five lines to an edit's reply).</summary>
+    /// is -- and the failing run's own `path:line: message` lines when it did not. A verify that
+    /// passed must not add five lines to an edit's reply.</summary>
     public static string FormatVerify(ProtocolResponse response)
     {
         var payload = response.Data?.Deserialize<VerifyExecutionResponse>();

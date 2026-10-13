@@ -569,8 +569,7 @@ public sealed class McpReferenceServer
                 return new(true, JsonSerializer.SerializeToElement(new { error = "Edit applied, but index refresh was incomplete; indexed operations are blocked until reconciliation." }, JsonOptions));
         }
         if (!result.Success) return new(true, JsonSerializer.SerializeToElement(new { text = result.Message }, JsonOptions));
-        // Behaviour change in 1.6.14 (brief OSS14 adjustment, 2026-10-09): edit.replace no longer
-        // verifies by default. Verifying is opt-in on every edit, so an edit costs one call unless
+        // edit.replace does not verify by default. Verifying is opt-in on every edit, so an edit costs one call unless
         // the caller asks for the check; verify:true is build+tests, verify:"build" is the build
         // alone. Documented in the CHANGELOG.
         var verifyMode = ReadVerifyMode(arguments);

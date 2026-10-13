@@ -51,7 +51,7 @@ public sealed class CorrectnessFixesTests
     }
 
     [Fact]
-    public async Task C1_AbsoluteInRootPatchPathStoresRelativeDirtyMarker()
+    public async Task AbsoluteInRootPatchPathStoresRelativeDirtyMarker()
     {
         var f = await CreateAsync();
         var absolute = Path.Combine(f.Root, "src", "Alpha.cs");
@@ -68,7 +68,7 @@ public sealed class CorrectnessFixesTests
     }
 
     [Fact]
-    public async Task C1_AbsoluteInRootPatchWithAutoRefreshLeavesNoStaleMarker()
+    public async Task AbsoluteInRootPatchWithAutoRefreshLeavesNoStaleMarker()
     {
         var f = await CreateAsync(refreshAfterEdit: true);
         var absolute = Path.Combine(f.Root, "src", "Alpha.cs");
@@ -80,7 +80,7 @@ public sealed class CorrectnessFixesTests
     }
 
     [Fact]
-    public async Task C1_RelativePathDirtyRowUnchanged()
+    public async Task RelativePathDirtyRowUnchanged()
     {
         var f = await CreateAsync();
         var response = await f.Engine.ExecuteAsync(PatchRequest(f, ProtocolOperations.Patch, "src/Alpha.cs", "Before", "After"));
@@ -90,7 +90,7 @@ public sealed class CorrectnessFixesTests
     }
 
     [Fact]
-    public async Task C1_RollbackUsesSameNormalization()
+    public async Task RollbackUsesSamePathNormalization()
     {
         var f = await CreateAsync();
         var absolute = Path.Combine(f.Root, "src", "Alpha.cs");
@@ -108,7 +108,7 @@ public sealed class CorrectnessFixesTests
     }
 
     [Fact]
-    public async Task C1_StoreMapsAbsoluteInRootButKeepsOutsideRootPathsAsGiven()
+    public async Task StoreMapsAbsoluteInRootButKeepsOutsideRootPathsAsGiven()
     {
         var f = await CreateAsync();
         var outside = Path.Combine(Path.GetTempPath(), "elsewhere", "x.cs");
@@ -128,7 +128,7 @@ public sealed class CorrectnessFixesTests
     }
 
     [Fact]
-    public void C2_RipgrepArgvHasExplicitPathAfterPattern()
+    public void RipgrepArgvHasExplicitPathAfterPattern()
     {
         if (OperatingSystem.IsWindows()) return;
         var root = Directory.CreateTempSubdirectory("devx-oss21-argv").FullName;
@@ -142,7 +142,7 @@ public sealed class CorrectnessFixesTests
     }
 
     [Fact]
-    public void C2_RipgrepWithPipedStdinReturnsMatches()
+    public void RipgrepWithPipedStdinReturnsMatches()
     {
         if (OperatingSystem.IsWindows()) return;
         var root = Directory.CreateTempSubdirectory("devx-oss21-stdin").FullName;
@@ -157,7 +157,7 @@ public sealed class CorrectnessFixesTests
     }
 
     [Fact]
-    public void C2_DotSlashHitPathsAreStrippedToIndexedForm()
+    public void DotSlashHitPathsAreStrippedToIndexedForm()
     {
         if (OperatingSystem.IsWindows()) return;
         var root = Directory.CreateTempSubdirectory("devx-oss21-dot").FullName;
@@ -179,7 +179,7 @@ public sealed class CorrectnessFixesTests
     }
 
     [Fact]
-    public void C2_RealRipgrepHitPathsMatchIndexedPaths()
+    public void RealRipgrepHitPathsMatchIndexedPaths()
     {
         var rg = RealRipgrep();
         if (rg is null || OperatingSystem.IsWindows()) return; // skipped: no rg on PATH
@@ -205,7 +205,7 @@ public sealed class CorrectnessFixesTests
     }
 
     [Fact]
-    public async Task C3_McpTestPayloadForwardsTestFilesAsTargets()
+    public async Task McpTestPayloadForwardsTestFilesAsTargets()
     {
         var f = await CreateAsync();
         var engine = new CapturingEngine();
