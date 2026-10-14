@@ -1,4 +1,13 @@
 # Changelog
+## 1.8.3 — 2026-10-14
+
+### Fixed
+
+- `index update` removes indexed files missing from disk and reports the removal count.
+- `index .` and MCP refresh remove missing indexed files before reporting freshness.
+- `doctor` lists every missing indexed path and suggests `devx index .` to remove them.
+
+
 ## 1.8.2 — 2026-10-14
 
 ### Fixed

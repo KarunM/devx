@@ -57,6 +57,8 @@ Attributes:
 - Namespace(s)
 - Contained Types
 
+Whole-repository and file updates remove indexed paths missing on disk; doctor lists every such path and recommends `devx index .` to remove them.
+
 ## Namespace
 
 Logical grouping of types.

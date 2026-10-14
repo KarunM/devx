@@ -101,6 +101,9 @@ public sealed class SandboxRepositoryStore : IRepositoryStore, IRootScopedFileSn
     public Task<int> CountIndexedFilesAsync(RepositoryId repositoryId, CancellationToken cancellationToken = default)
         => _innerStore.CountIndexedFilesAsync(repositoryId, cancellationToken);
 
+    public Task<IReadOnlyList<string>> GetIndexedFilePathsAsync(string root, CancellationToken cancellationToken = default)
+        => _innerStore.GetIndexedFilePathsAsync(root, cancellationToken);
+
     /// <summary>
     /// Returns the sandbox root instead of the real repository root.
     /// </summary>

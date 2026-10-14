@@ -69,10 +69,10 @@ public sealed class RuntimeHealthService
         }
 
         var warnings = new List<string>();
-        var missing = (indexedPaths ?? []).Where(path => !System.IO.File.Exists(Path.Combine(normalizedRoot, path))).ToList();
+        var missing = (indexedPaths ?? []).Where(path => !System.IO.File.Exists(Path.Combine(normalizedRoot, path))).OrderBy(path => path, StringComparer.Ordinal).ToList();
         if (missing.Count > 0)
         {
-            var message = $"{missing.Count} indexed files missing on disk: {string.Join(", ", missing.Take(10))}";
+            var message = $"{missing.Count} indexed files missing on disk: {string.Join(", ", missing)}";
             warnings.Add(message);
             checks.Add(new RuntimeHealthCheck("index-files", "Degraded", message));
         }
@@ -95,6 +95,10 @@ public sealed class RuntimeHealthService
         if (!repositoryIndexed)
         {
             remediations.Add("Run `devx index <path>` before using runtime validation and discovery commands.");
+        }
+        if (missing.Count > 0)
+        {
+            remediations.Add("run 'devx index .' to remove them");
         }
 
         if (selectedProject is null)
