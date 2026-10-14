@@ -474,4 +474,59 @@ public sealed class BuildTestServiceTests
             File.SetUnixFileMode(executable, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return executable;
     }
+
+    [Fact]
+    public async Task G2_PythonTargetNeverReachesMsBuild()
+    {
+        var root = Directory.CreateTempSubdirectory("devx-python-no-msbuild").FullName;
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(root, "solution.csproj"), "<Project />");
+            var script = Path.Combine(root, "tests", "test_auth.py");
+            Directory.CreateDirectory(Path.GetDirectoryName(script)!);
+            await File.WriteAllTextAsync(script, "import sys\nsys.exit(7)\n");
+            var result = await new DotnetBuildTestService().RunTestsAsync(root, "tests/test_auth.py");
+            Assert.False(result.Success);
+            Assert.Contains("python", result.Command, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("dotnet", result.Command, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("7", result.Summary);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task G2_StandaloneScriptRunsUnderPython()
+    {
+        var root = Directory.CreateTempSubdirectory("devx-python-script").FullName;
+        try
+        {
+            var script = Path.Combine(root, "tests", "test_auth.py");
+            Directory.CreateDirectory(Path.GetDirectoryName(script)!);
+            await File.WriteAllTextAsync(script, "print('standalone ran')\n");
+            var result = await new DotnetBuildTestService().RunTestsAsync(root, ["tests/test_auth.py"], TimeSpan.FromSeconds(10));
+            Assert.True(result.Success, result.Summary);
+            Assert.Contains("PASS script", result.Summary);
+            Assert.Contains("test_auth.py", result.Command);
+            Assert.DoesNotContain("dotnet", result.Command, StringComparison.OrdinalIgnoreCase);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task G2_MixedTargetsGroupByRunner()
+    {
+        if (!HostPytestAvailable()) return;
+        var root = Directory.CreateTempSubdirectory("devx-mixed-runners").FullName;
+        try
+        {
+            await File.WriteAllTextAsync(Path.Combine(root, "test_unit.py"), "def test_ok():\n    assert True\n");
+            await File.WriteAllTextAsync(Path.Combine(root, "check.py"), "print('check ran')\n");
+            var result = await new DotnetBuildTestService().RunTestsAsync(root, ["test_unit.py", "check.py"], TimeSpan.FromSeconds(30));
+            Assert.Contains("PASS 2/2 files", result.Summary);
+            Assert.Contains("-m pytest", result.Command);
+            Assert.Contains("check.py", result.Command);
+            Assert.DoesNotContain("dotnet test", result.Command, StringComparison.OrdinalIgnoreCase);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
 }

@@ -1,4 +1,11 @@
 # Changelog
+## 1.8.2 — 2026-10-14
+
+### Fixed
+
+- Refresh indexed symbol locations after incremental updates so snapshots report current line numbers.
+- Route explicit Python test targets to pytest or the Python interpreter, including standalone scripts and mixed target lists.
+
 
 ## Unreleased
 

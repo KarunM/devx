@@ -21,6 +21,7 @@ public sealed class DotnetBuildTestService
     public Task<ExecutionRecord> RunTestsAsync(string root, string? selector, CancellationToken token = default)
         => DevXCommandConfig.TryRead(root, "test") is { } configured
             ? RunConfiguredAsync(root, configured, selector, Timeout.InfiniteTimeSpan, token, "test")
+            : selector?.EndsWith(".py", StringComparison.OrdinalIgnoreCase) == true ? RunTestsAsync(root, [selector], TimeSpan.FromSeconds(300), token)
             : IsDotnetProject(root, selector) ? RunAsync("dotnet", GetTestArguments(root, selector), root, token, "test") : RunPythonTestsAsync(root, selector, token);
 
     public async Task<ExecutionRecord> RunTestsAsync(

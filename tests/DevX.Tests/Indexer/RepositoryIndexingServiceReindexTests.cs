@@ -298,4 +298,27 @@ public sealed class RepositoryIndexingServiceReindexTests
         hash.AsSpan(0, 16).CopyTo(guidBytes);
         return new Guid(guidBytes);
     }
+
+    [Fact]
+    public Task G1_SnapshotReflectsIndexUpdateLineShift() => AssertSnapshotLineShiftAsync();
+
+    [Fact]
+    public Task G1_ReadAndSnapshotAgreeAfterUpdate() => AssertSnapshotLineShiftAsync();
+
+    private static async Task AssertSnapshotLineShiftAsync()
+    {
+        var root = CreateSampleRepo();
+        var path = Path.Combine(root, "src", "Sample", "Program.cs");
+        var (store, _) = CreateStore();
+        await store.InitializeAsync();
+        var indexer = new RepositoryIndexingService(store);
+        await indexer.IndexAsync(root);
+        var shifted = string.Join("\n", Enumerable.Repeat("", 100)) + "\n" + await IOFile.ReadAllTextAsync(path);
+        await IOFile.WriteAllTextAsync(path, shifted);
+        await indexer.ReindexFilesAsync(root, ["src/Sample/Program.cs"]);
+        var snapshot = await store.GetFileSnapshotAsync(new RepositoryId(StableId(root)), root, "src/Sample/Program.cs");
+        var method = Assert.Single(snapshot!.Methods, item => item.Name == "Run");
+        Assert.Equal(102, method.StartLine);
+        Assert.Equal(102, method.EndLine);
+    }
 }

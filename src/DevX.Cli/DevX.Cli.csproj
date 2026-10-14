@@ -8,7 +8,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>devx</ToolCommandName>
     <PackageId>DevX.Cli</PackageId>
-    <Version>1.8.1</Version>
+    <Version>1.8.2</Version>
     <Description>Code-aware CLI and MCP server for agents: symbol search, method reads, callers and callees.</Description>
   </PropertyGroup>
 
