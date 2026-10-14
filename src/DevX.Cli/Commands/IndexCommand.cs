@@ -172,7 +172,20 @@ static partial class Program
         var repositoryRoot = root ?? Environment.CurrentDirectory;
         var indexer = new RepositoryIndexingService(store);
         var started = DateTimeOffset.UtcNow;
-        var result = await indexer.ReindexChangedFilesAsync(repositoryRoot);
+        IndexRefreshResult result;
+        try
+        {
+            result = await indexer.ReindexChangedFilesAsync(repositoryRoot);
+        }
+        catch (InvalidOperationException exception) when (exception.Message.Contains("not a git repository", StringComparison.OrdinalIgnoreCase))
+        {
+            const string message = "index changed requires a git repository; use 'devx index <root>' instead.";
+            if (format == "json")
+                WriteResponse(new ProtocolResponse(false, JsonSerializer.SerializeToElement(new { Error = message }), [], []), format);
+            else
+                Console.Error.WriteLine(message);
+            return 1;
+        }
         await store.AddOperationMetricAsync(new OperationMetric("index changed", started, DateTimeOffset.UtcNow - started, true, sessionId, AgentLabel: GetAgentLabel(args)));
 
         if (format == "json")
@@ -201,7 +214,7 @@ static partial class Program
             var arg = args[index];
             if (arg.StartsWith("--", StringComparison.Ordinal))
             {
-                if (arg == "--session" || arg == "--format")
+                if (arg is "--session" or "--agent" or "--task" or "--format")
                 {
                     index++;
                 }
@@ -229,13 +242,16 @@ static partial class Program
         var repositoryRoot = Path.GetFullPath(repositoryPath);
         var repository = await store.GetRepositoryByRootPathAsync(repositoryRoot);
         var indexedFiles = repository is null ? 0 : await store.CountIndexedFilesAsync(repository.Id);
+        var dirty = await store.GetDirtyIndexRepositoryAsync(repositoryRoot);
+        var dirtyCount = dirty?.DirtyFiles.Count ?? 0;
+        var isDirty = dirty is not null;
         var response = new IndexStatusResponse(
             RepositoryIndexed: repository is not null,
             RepositoryRoot: repositoryRoot,
             IndexedFiles: indexedFiles,
             IndexExists: repository is not null,
-            Status: repository is null ? "Missing" : "Current",
-            Reason: repository is null ? "Repository has not been indexed yet." : "No obvious stale-index signal detected.");
+            Status: repository is null ? "Missing" : isDirty ? "Stale" : "Current",
+            Reason: repository is null ? "Repository has not been indexed yet." : isDirty ? $"{dirtyCount} dirty file(s) remain unreconciled." : "No obvious stale-index signal detected.");
 
         if (!string.IsNullOrWhiteSpace(sessionId))
         {

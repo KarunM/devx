@@ -12,7 +12,10 @@ using DevX.Protocol;
 using Microsoft.Data.Sqlite;
 using IOFile = System.IO.File;
 
+SqliteStorageInitializer.ClearHistoryFailure();
 var exitCode = await RunAsync(args);
+if (SqliteStorageInitializer.HistoryFailure is { } historyFailure)
+    Console.Error.WriteLine("warning: HistoryNotRecorded: history not recorded: " + historyFailure);
 return exitCode;
 
 static async Task<int> RunAsync(string[] args)

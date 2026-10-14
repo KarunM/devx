@@ -582,6 +582,15 @@ public sealed class RepositoryIndexingService
             }
             if (!System.IO.File.Exists(absolute))
             {
+                // A file the index holds that is gone from disk is a deletion: drop it. A path the index
+                // never held is a typo or a stale name: report it, but do not leave it marked dirty.
+                if (await _repositoryStore.GetFileSnapshotAsync(new FileId(StableId(absolute)).Value.ToString(), cancellationToken) is not null)
+                {
+                    await RemoveFileAsync(repositoryPath, path, cancellationToken);
+                    continue;
+                }
+                if (_repositoryStore is IIndexFreshnessStore missingFreshnessStore)
+                    await missingFreshnessStore.ClearDirtyIndexFilesAsync(repositoryPath, [path], cancellationToken);
                 skippedFiles.Add(new SkippedFile(path, "ERROR: file missing"));
                 continue;
             }
@@ -656,6 +665,7 @@ public sealed class RepositoryIndexingService
 
     public async Task<IndexRefreshResult> ReindexChangedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default)
     {
+        await ReconcileMissingDirtyFilesAsync(repositoryPath, cancellationToken);
         var changedFiles = await GetChangedFilesAsync(repositoryPath, cancellationToken);
         if (changedFiles.Count == 0)
         {
@@ -666,8 +676,19 @@ public sealed class RepositoryIndexingService
         return result with { Mode = "changed" };
     }
 
+    private async Task ReconcileMissingDirtyFilesAsync(string repositoryPath, CancellationToken cancellationToken)
+    {
+        if (_repositoryStore is not IIndexFreshnessStore freshnessStore) return;
+        var root = Path.GetFullPath(repositoryPath);
+        var dirty = await freshnessStore.GetDirtyIndexRepositoryAsync(root, cancellationToken);
+        if (dirty is null || dirty.RequiresFullReindex) return;
+        foreach (var file in dirty.DirtyFiles.Where(file => !System.IO.File.Exists(Path.Combine(root, file.Replace('/', Path.DirectorySeparatorChar)))))
+            await RemoveFileAsync(root, file, cancellationToken);
+    }
+
     public async Task<IReadOnlyList<string>> GetChangedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default)
     {
+        await ReconcileMissingDirtyFilesAsync(repositoryPath, cancellationToken);
         var rootPath = Path.GetFullPath(repositoryPath);
         var startInfo = new ProcessStartInfo("git", "status --porcelain")
         {

@@ -24,12 +24,39 @@ static partial class Program
         var repositoryRoot = Path.GetFullPath(Environment.CurrentDirectory);
         var repository = new Repository(new RepositoryId(StableId(repositoryRoot)), Path.GetFileName(repositoryRoot), repositoryRoot);
         await store.InitializeAsync();
-        await store.UpsertRepositoryAsync(repository);
         var started = DateTimeOffset.UtcNow;
-        var session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+        SessionState session;
+        try
+        {
+            await store.UpsertRepositoryAsync(repository);
+            session = await store.CreateSessionAsync(new CreateSessionRequest(repository.Id));
+        }
+        catch (SqliteException error) when (SqliteStorageInitializer.IsReadOnlyFailure(error))
+        {
+            // A read-only database cannot take a new session. Hand back the repository's existing
+            // automatic session (a real, readable one) with the warning, rather than crash.
+            var existing = await ReadExistingAutomaticSessionAsync(store, repositoryRoot);
+            if (existing is null)
+            {
+                Console.Error.WriteLine("The index database is read-only and holds no session for this repository; make .devx/devx.db writable to create one.");
+                return 1;
+            }
+
+            var warning = new ProtocolDiagnostic("HistoryNotRecorded", "history not recorded: " + error.Message + " Returned the existing automatic session.");
+            WriteResponse(new ProtocolResponse(true, JsonSerializer.SerializeToElement(new { sessionId = existing.Id.Value.ToString() }), [warning], []), format);
+            if (format != "json") Console.Error.WriteLine("warning: " + warning.Message);
+            return 0;
+        }
         await store.AddOperationMetricAsync(new OperationMetric("session create", started, DateTimeOffset.UtcNow - started, true, session.Id.Value.ToString(), AgentLabel: GetAgentLabel(args)));
         WriteResponse(new ProtocolResponse(true, JsonSerializer.SerializeToElement(new { sessionId = session.Id.Value.ToString() }), [], []), format);
         return 0;
+    }
+
+    static async Task<SessionState?> ReadExistingAutomaticSessionAsync(SqliteStorageInitializer store, string root)
+    {
+        var sessionFile = Path.Combine(root, ".devx", "auto-session");
+        if (!IOFile.Exists(sessionFile) || !Guid.TryParse((await IOFile.ReadAllTextAsync(sessionFile)).Trim(), out var id)) return null;
+        return await store.GetSessionAsync(new GetSessionRequest(new SessionId(id)));
     }
 
     static Guid StableId(string value)
