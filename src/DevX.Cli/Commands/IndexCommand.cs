@@ -43,6 +43,7 @@ static partial class Program
     /// </summary>
     static async Task<string?> CurrentIndexAsync(RepositoryIndexingService indexer, string repositoryPath)
     {
+        var removed = await indexer.ReconcileMissingIndexedFilesAsync(repositoryPath);
         IReadOnlyList<string> changed;
         try
         {
@@ -50,20 +51,24 @@ static partial class Program
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
         {
-            return null;
+            return removed > 0 ? $"re-indexed 0, removed {removed}." : null;
         }
 
         var indexed = await indexer.CountIndexedFilesAsync(repositoryPath);
 
         // Nothing is indexed yet, so there is nothing to bring up to date file by file.
-        if (indexed == 0) return null;
-        if (changed.Count == 0) return $"already current ({indexed} files).";
+        if (indexed == 0) return removed > 0 ? $"re-indexed 0, removed {removed}." : null;
+        if (changed.Count == 0) return removed > 0
+            ? $"re-indexed 0, removed {removed}."
+            : $"already current ({indexed} files).";
+        var refreshed = await indexer.ReindexChangedFilesAsync(repositoryPath, reconcileMissingFiles: false);
 
         // A repository that is already indexed and has a handful of edited files is the common
         // case an agent is in, and re-parsing its whole tree for those files is the expensive
         // mistake. Only the files git names are re-indexed.
-        var refreshed = await indexer.ReindexChangedFilesAsync(repositoryPath);
-        return $"Indexed {refreshed.UpdatedFiles} files (re-indexed the {changed.Count} files git reports as changed, out of {indexed}).";
+        return refreshed.RemovedFiles + removed > 0
+            ? $"re-indexed {refreshed.UpdatedFiles}, removed {refreshed.RemovedFiles + removed}."
+            : $"Indexed {refreshed.UpdatedFiles} files (re-indexed the {changed.Count} files git reports as changed, out of {indexed}).";
     }
 
     static async Task<int> IndexUpdateAsync(string connectionString, string[] args, string format)
@@ -126,20 +131,20 @@ static partial class Program
         var errorSkips = result.SkippedFilePaths.Where(file => file.Reason.StartsWith("ERROR:", StringComparison.Ordinal)).ToArray();
         var hasNonMissingError = errorSkips.Any(file => file.Reason != "ERROR: file missing");
         // Preserve partial success when at least one requested file refreshed and another is
-        // missing; the missing path remains fenced, so this does not claim the whole index is fresh.
+        // missing; its skipped result does not claim the requested file was refreshed.
         var updateSucceeded = !hasNonMissingError && (result.UpdatedFiles > 0 || errorSkips.Length == 0);
         await store.AddOperationMetricAsync(new OperationMetric("index update", started, DateTimeOffset.UtcNow - started, updateSucceeded, sessionId,
             JsonSerializer.Serialize(new { UnsupportedFilesSkipped = result.SkippedFilePaths.Count(f => f.Reason.StartsWith("Unsupported file type", StringComparison.Ordinal)) }), GetAgentLabel(args)));
 
         if (format == "json")
         {
-            Console.WriteLine(JsonSerializer.Serialize(new { Success = updateSucceeded, result.Mode, result.UpdatedFiles, result.SkippedFiles, result.RequestedFiles, result.PerformedFullReindex, result.SkippedFilePaths }));
+            Console.WriteLine(JsonSerializer.Serialize(new { Success = updateSucceeded, result.Mode, result.UpdatedFiles, result.RemovedFiles, result.SkippedFiles, result.RequestedFiles, result.PerformedFullReindex, result.SkippedFilePaths }));
         }
         else
         {
             Console.WriteLine(result.PerformedFullReindex
                 ? "Performed full repository re-index due to structural file changes."
-                : $"Updated file index. {result.UpdatedFiles} updated, {result.SkippedFiles} skipped.");
+                : $"Updated file index. {result.UpdatedFiles} updated, {result.RemovedFiles} removed, {result.SkippedFiles} skipped.");
 
             foreach (var skipped in result.SkippedFilePaths)
             {
@@ -190,7 +195,7 @@ static partial class Program
 
         if (format == "json")
         {
-            Console.WriteLine(JsonSerializer.Serialize(new { Success = true, result.Mode, result.UpdatedFiles, result.SkippedFiles, result.RequestedFiles, result.PerformedFullReindex }));
+            Console.WriteLine(JsonSerializer.Serialize(new { Success = true, result.Mode, result.UpdatedFiles, result.RemovedFiles, result.SkippedFiles, result.RequestedFiles, result.PerformedFullReindex }));
         }
         else
         {

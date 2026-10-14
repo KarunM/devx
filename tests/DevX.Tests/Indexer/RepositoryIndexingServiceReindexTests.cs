@@ -218,6 +218,20 @@ public sealed class RepositoryIndexingServiceReindexTests
     }
 
     [Fact]
+    public async Task OSS53_NeverIndexedMissingPathRemainsSkipped()
+    {
+        var (store, _) = CreateStore();
+        await store.InitializeAsync();
+        var root = Directory.CreateTempSubdirectory("devx-missing-never-indexed").FullName;
+        var result = await new RepositoryIndexingService(store).ReindexFilesAsync(root, ["does-not-exist.py"]);
+
+        Assert.Equal(0, result.RemovedFiles);
+        Assert.Equal(1, result.SkippedFiles);
+        Assert.Equal("ERROR: file missing", Assert.Single(result.SkippedFilePaths).Reason);
+        Assert.Empty(await store.GetIndexedFilePathsAsync(root));
+    }
+
+    [Fact]
     public async Task ReindexFilesAsync_UpdatesHtmlInsteadOfSkippingIt()
     {
         var repositoryRoot = Directory.CreateTempSubdirectory("devx-html-reindex").FullName;

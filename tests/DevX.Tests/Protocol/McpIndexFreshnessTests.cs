@@ -41,6 +41,33 @@ public sealed class McpIndexFreshnessTests
     }
 
     [Fact]
+    public async Task WholeRepositoryIndex_RemovesMissingUntrackedIndexedRowsAndReportsCount()
+    {
+        var f = await Fixture.CreateAsync(changedFiles: [], includeExtraFile: true);
+        System.IO.File.Delete(Path.Combine(f.Root, "src", "Sample", "Program.cs"));
+
+        var result = await f.Server.CallToolAsync("index", JsonSerializer.SerializeToElement(new { sessionId = f.SessionId }));
+
+        Assert.False(result.IsError);
+        Assert.Contains("re-indexed 0, removed 1", TextOf(result));
+        var indexedPaths = await f.Store.GetIndexedFilePathsAsync(f.Root);
+        Assert.DoesNotContain("src/Sample/Program.cs", indexedPaths);
+        Assert.Contains("src/Sample/Extra.cs", indexedPaths);
+    }
+
+    [Fact]
+    public async Task Initialize_RemovesMissingIndexedRowsBeforeRefreshingGitChanges()
+    {
+        var f = await Fixture.CreateAsync(changedFiles: []);
+        System.IO.File.Delete(Path.Combine(f.Root, "src", "Sample", "Program.cs"));
+
+        await f.Server.InitializeAsync();
+
+        Assert.DoesNotContain("src/Sample/Program.cs", await f.Store.GetIndexedFilePathsAsync(f.Root));
+        Assert.Equal(new[] { "src/Sample/Program.cs" }, Assert.Single(f.ReindexRequests));
+    }
+
+    [Fact]
     public async Task Initialize_RefreshesTheChangedFilesOnly()
     {
         var f = await Fixture.CreateAsync(changedFiles: ["src/Sample/Program.cs", "src/Sample/Extra.cs"]);
@@ -95,6 +122,8 @@ public sealed class McpIndexFreshnessTests
     {
         public required McpReferenceServer Server { get; init; }
         public required SessionState Session { get; init; }
+        public required string Root { get; init; }
+        public required SqliteStorageInitializer Store { get; init; }
         public required List<string[]> ReindexRequests { get; init; }
         public required List<string[]> FullReindexRequests { get; init; }
 
@@ -104,7 +133,7 @@ public sealed class McpIndexFreshnessTests
         public int FullIndexCalls => FullReindexRequests.Count;
 
         /// <summary>`changedFiles: null` means the repository cannot answer the question.</summary>
-        public static async Task<Fixture> CreateAsync(IReadOnlyList<string>? changedFiles)
+        public static async Task<Fixture> CreateAsync(IReadOnlyList<string>? changedFiles, bool includeExtraFile = false)
         {
             var root = Directory.CreateTempSubdirectory("devx-mcp-freshness").FullName;
             var projectDirectory = Path.Combine(root, "src", "Sample");
@@ -123,6 +152,11 @@ public sealed class McpIndexFreshnessTests
                     public static void Run() { }
                 }
                 """);
+
+            if (includeExtraFile)
+            {
+                await IOFile.WriteAllTextAsync(Path.Combine(projectDirectory, "Extra.cs"), "namespace Sample; public sealed class Extra { }\n");
+            }
 
             var connectionString = new SqliteConnectionStringBuilder { DataSource = Path.Combine(Path.GetTempPath(), $"devx-mcp-fresh-{Guid.NewGuid():N}.db") }.ToString();
             var store = new SqliteStorageInitializer(connectionString);
@@ -163,6 +197,8 @@ public sealed class McpIndexFreshnessTests
             {
                 Server = server,
                 Session = session,
+                Root = root,
+                Store = store,
                 ReindexRequests = reindexRequests,
                 FullReindexRequests = fullReindexRequests
             };

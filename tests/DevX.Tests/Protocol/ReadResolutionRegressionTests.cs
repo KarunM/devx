@@ -126,6 +126,23 @@ public sealed class ReadResolutionRegressionTests
     }
 
     [Fact]
+    public async Task OSS53_DoctorListsAllTwelveMissingIndexedFilesAndIndexHint()
+    {
+        var f = await Create();
+        var paths = Enumerable.Range(0, 12).Select(index => $"gone-{index:00}.py").ToArray();
+        foreach (var path in paths)
+            await System.IO.File.WriteAllTextAsync(Path.Combine(f.Root, path), "value = 1\n");
+        var indexer = new RepositoryIndexingService(f.Store);
+        await indexer.ReindexFilesAsync(f.Root, paths);
+        foreach (var path in paths) System.IO.File.Delete(Path.Combine(f.Root, path));
+
+        var health = await new RuntimeHealthService().EvaluateAsync(f.Root, true, 19, indexedPaths: await f.Store.GetIndexedFilePathsAsync(f.Root));
+        var finding = Assert.Single(new RuntimeHealthService().BuildDoctor(health).Findings, item => item.Summary.StartsWith("12 indexed files missing on disk:", StringComparison.Ordinal));
+        Assert.Equal(paths, finding.Summary.Split(": ", 2)[1].Split(", "));
+        Assert.Contains("run 'devx index .' to remove them", finding.Remediation, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task DeletedIndexedFile_IsReportedByDoctorAndBlockedByReadAndFlaggedBySearch()
     {
         var f = await Create(); System.IO.File.Delete(Path.Combine(f.Root, "auth.py"));

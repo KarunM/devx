@@ -570,6 +570,7 @@ public sealed class RepositoryIndexingService
         }
 
         var updated = 0;
+        var removed = 0;
         var full = false;
         var skippedFiles = new List<SkippedFile>();
         foreach (var path in normalized)
@@ -587,6 +588,7 @@ public sealed class RepositoryIndexingService
                 if (await _repositoryStore.GetFileSnapshotAsync(new FileId(StableId(absolute)).Value.ToString(), cancellationToken) is not null)
                 {
                     await RemoveFileAsync(repositoryPath, path, cancellationToken);
+                    removed++;
                     continue;
                 }
                 if (_repositoryStore is IIndexFreshnessStore missingFreshnessStore)
@@ -629,14 +631,12 @@ public sealed class RepositoryIndexingService
             }
         }
 
-        return new IndexRefreshResult("files", updated, skippedFiles.Count, normalized, full, skippedFiles);
+        return new IndexRefreshResult("files", updated, skippedFiles.Count, normalized, full, skippedFiles, removed);
     }
 
     /// <summary>
-    /// Drop a file that no longer exists from the index. <see cref="ReindexFilesAsync"/> cannot
-    /// do this: it reports a missing file as an error and leaves the index holding a file that is
-    /// gone, so a delete through a patch (`DeleteFile`) would leave `devx search` finding a
-    /// document that is not there. Symbols follow the file by ON DELETE CASCADE.
+    /// Drop a file that no longer exists from the index. Symbols, content-search entries, and
+    /// other file-owned rows follow it through ON DELETE CASCADE; freshness marks are cleared.
     /// </summary>
     public async Task RemoveFileAsync(string repositoryPath, string filePath, CancellationToken cancellationToken = default)
     {
@@ -663,32 +663,37 @@ public sealed class RepositoryIndexingService
     public Task<int> CountIndexedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default)
         => _repositoryStore.CountIndexedFilesAsync(new RepositoryId(StableId(Path.GetFullPath(repositoryPath))), cancellationToken);
 
-    public async Task<IndexRefreshResult> ReindexChangedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default)
+    public async Task<IndexRefreshResult> ReindexChangedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default, bool reconcileMissingFiles = true)
     {
-        await ReconcileMissingDirtyFilesAsync(repositoryPath, cancellationToken);
+        var removedFiles = reconcileMissingFiles ? await ReconcileMissingIndexedFilesAsync(repositoryPath, cancellationToken) : 0;
         var changedFiles = await GetChangedFilesAsync(repositoryPath, cancellationToken);
         if (changedFiles.Count == 0)
         {
-            return new IndexRefreshResult("changed", 0, 0, [], false);
+            return new IndexRefreshResult("changed", 0, 0, [], false, RemovedFiles: removedFiles);
         }
 
         var result = await ReindexFilesAsync(repositoryPath, changedFiles, cancellationToken);
-        return result with { Mode = "changed" };
+        return result with { Mode = "changed", RemovedFiles = result.RemovedFiles + removedFiles };
     }
 
-    private async Task ReconcileMissingDirtyFilesAsync(string repositoryPath, CancellationToken cancellationToken)
+    public async Task<int> ReconcileMissingIndexedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default)
     {
-        if (_repositoryStore is not IIndexFreshnessStore freshnessStore) return;
         var root = Path.GetFullPath(repositoryPath);
-        var dirty = await freshnessStore.GetDirtyIndexRepositoryAsync(root, cancellationToken);
-        if (dirty is null || dirty.RequiresFullReindex) return;
-        foreach (var file in dirty.DirtyFiles.Where(file => !System.IO.File.Exists(Path.Combine(root, file.Replace('/', Path.DirectorySeparatorChar)))))
+        var indexedPaths = await _repositoryStore.GetIndexedFilePathsAsync(root, cancellationToken);
+        var removed = 0;
+        foreach (var file in indexedPaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var absolute = Path.Combine(root, file.Replace('\\', Path.DirectorySeparatorChar));
+            if (System.IO.File.Exists(absolute)) continue;
             await RemoveFileAsync(root, file, cancellationToken);
+            removed++;
+        }
+        return removed;
     }
 
     public async Task<IReadOnlyList<string>> GetChangedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default)
     {
-        await ReconcileMissingDirtyFilesAsync(repositoryPath, cancellationToken);
         var rootPath = Path.GetFullPath(repositoryPath);
         var startInfo = new ProcessStartInfo("git", "status --porcelain")
         {
@@ -847,7 +852,8 @@ public sealed record IndexRefreshResult(
     int SkippedFiles,
     IReadOnlyList<string> RequestedFiles,
     bool PerformedFullReindex,
-    IReadOnlyList<SkippedFile>? SkippedFilePaths = null)
+    IReadOnlyList<SkippedFile>? SkippedFilePaths = null,
+    int RemovedFiles = 0)
 {
     public IReadOnlyList<SkippedFile> SkippedFilePaths { get; init; } = SkippedFilePaths ?? [];
 }

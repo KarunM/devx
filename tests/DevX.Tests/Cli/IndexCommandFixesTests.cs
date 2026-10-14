@@ -86,6 +86,74 @@ public sealed class IndexCommandFixesTests : CliHarness
     }
 
     [Fact]
+    public async Task OSS53_IndexUpdateRemovesIndexedUntrackedDeletionAndUnfencesPatchValidation()
+    {
+        var root = NewRoot("devx-oss53-update-");
+        await WithRoot(root, async directory =>
+        {
+            var id = await SeedAsync(directory);
+            var patchPath = Path.Combine(directory, "patch.json");
+            await File.WriteAllTextAsync(patchPath, JsonSerializer.Serialize(new
+            {
+                version = "1.0",
+                operations = new[] { new { operation = "ReplaceText", path = "B.py", oldText = "class Beta: pass", replacementText = "class Beta:\n    value = 1", beforeState = "class Beta: pass\n" } }
+            }));
+            await MarkDirtyAsync(directory, "A.py");
+            File.Delete(Path.Combine(directory, "A.py"));
+            var (blockedCode, blockedOutput) = await RunAsync(directory, "patch", "validate", patchPath, "--session", id, "--format", "json");
+            Assert.Equal(1, blockedCode);
+            Assert.Contains("IndexDirty", blockedOutput, StringComparison.Ordinal);
+
+            var (updateCode, updateOutput) = await RunAsync(directory, "index", "update", "A.py", "--session", id, "--format", "json");
+            Assert.Equal(0, updateCode);
+            using var update = JsonDocument.Parse(updateOutput);
+            Assert.Equal(1, update.RootElement.GetProperty("RemovedFiles").GetInt32());
+            Assert.Equal(0, update.RootElement.GetProperty("SkippedFiles").GetInt32());
+            Assert.Null(await GetDirtyAsync(directory));
+            var store = new SqliteStorageInitializer(ConnectionString(directory));
+            Assert.Empty(await store.FindSymbolsByNameAsync("Alpha"));
+
+            var (validateCode, validateOutput) = await RunAsync(directory, "patch", "validate", patchPath, "--session", id, "--format", "json");
+            Assert.True(validateCode == 0, validateOutput);
+            Assert.DoesNotContain("IndexDirty", validateOutput, StringComparison.Ordinal);
+        });
+    }
+
+    [Fact]
+    public async Task OSS53_IndexRootRemovesTwoDeletedUntrackedRowsAndKeepsLiveSymbolsStable()
+    {
+        var root = NewRoot("devx-oss53-root-");
+        await WithRoot(root, async directory =>
+        {
+            await File.WriteAllTextAsync(Path.Combine(directory, "A.py"), "class Alpha: pass\n");
+            await File.WriteAllTextAsync(Path.Combine(directory, "B.py"), "class Beta: pass\n");
+            await File.WriteAllTextAsync(Path.Combine(directory, "live.py"), "class Live:\n    def keep(self):\n        return 1\n");
+            InitializeGitRepo(directory);
+            var (indexCode, _) = await RunAsync(directory, "index", ".");
+            Assert.Equal(0, indexCode);
+            var id = await CreateSessionAsync(directory);
+            await File.WriteAllTextAsync(Path.Combine(directory, "temp-one.py"), "class TempOne: pass\n");
+            await File.WriteAllTextAsync(Path.Combine(directory, "temp-two.py"), "class TempTwo: pass\n");
+            var (updateCode, _) = await RunAsync(directory, "index", "update", "temp-one.py", "temp-two.py", "--session", id, "--format", "json");
+            Assert.Equal(0, updateCode);
+            File.Delete(Path.Combine(directory, "temp-one.py"));
+            File.Delete(Path.Combine(directory, "temp-two.py"));
+
+            var store = new SqliteStorageInitializer(ConnectionString(directory));
+            var lineBefore = Assert.Single(await store.FindMethodSourcesAsync("keep")).StartLine;
+            var (code, output) = await RunAsync(directory, "index", ".");
+            Assert.Equal(0, code);
+            Assert.Contains("removed 2", output, StringComparison.OrdinalIgnoreCase);
+            var paths = await store.GetIndexedFilePathsAsync(Real(directory));
+            Assert.Contains("live.py", paths);
+            Assert.DoesNotContain("temp-one.py", paths);
+            Assert.DoesNotContain("temp-two.py", paths);
+            var lineAfter = Assert.Single(await store.FindMethodSourcesAsync("keep")).StartLine;
+            Assert.Equal(lineBefore, lineAfter);
+        });
+    }
+
+    [Fact]
     public async Task F2_IndexUpdateOnMissingFileRemovesItAndClearsDirty()
     {
         var root = NewRoot("devx-oss51-f2a-");
@@ -272,6 +340,21 @@ public sealed class IndexCommandFixesTests : CliHarness
         var (_, sessionOutput) = await RunAsync(directory, "session", "create", "--format", "json");
         using var sessionJson = JsonDocument.Parse(sessionOutput);
         return sessionJson.RootElement.GetProperty("Data").GetProperty("sessionId").GetString()!;
+    }
+
+    private static void InitializeGitRepo(string directory)
+    {
+        var startInfo = new System.Diagnostics.ProcessStartInfo("git")
+        {
+            WorkingDirectory = directory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add("init");
+        startInfo.ArgumentList.Add("-q");
+        using var process = System.Diagnostics.Process.Start(startInfo)!;
+        process.WaitForExit();
+        Assert.Equal(0, process.ExitCode);
     }
 
     private static async Task<string> SeedAsync(string directory)

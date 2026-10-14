@@ -72,6 +72,9 @@ public sealed class McpReferenceServer
             if (session is null) return;
             var root = await _repositoryStore.GetRepositoryRootPathAsync(session.RepositoryId, cancellationToken);
             if (string.IsNullOrWhiteSpace(root)) return;
+            var indexedPaths = await _repositoryStore.GetIndexedFilePathsAsync(root, cancellationToken);
+            var missing = indexedPaths.Where(path => !System.IO.File.Exists(Path.Combine(root, path.Replace('\\', Path.DirectorySeparatorChar)))).ToArray();
+            if (missing.Length > 0) await _reindexFilesAsync(missing, cancellationToken);
             var changed = _changedFilesAsync is null ? [] : await _changedFilesAsync(root, cancellationToken);
             if (changed.Count > 0) await _reindexFilesAsync(changed.ToArray(), cancellationToken);
         }
@@ -513,8 +516,17 @@ public sealed class McpReferenceServer
         if (string.IsNullOrWhiteSpace(root)) return null;
         try
         {
+            var indexedPaths = await _repositoryStore.GetIndexedFilePathsAsync(root, cancellationToken);
+            var missing = indexedPaths.Where(path => !System.IO.File.Exists(Path.Combine(root, path.Replace('\\', Path.DirectorySeparatorChar)))).ToArray();
+            var removed = 0;
+            if (missing.Length > 0)
+            {
+                if (_reindexFilesAsync is null) return null;
+                removed = (await _reindexFilesAsync(missing, cancellationToken)).RemovedFiles;
+            }
             var changed = await _changedFilesAsync(root, cancellationToken);
             if (changed.Count > 0) return null;
+            if (removed > 0) return $"re-indexed 0, removed {removed}";
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
         {
