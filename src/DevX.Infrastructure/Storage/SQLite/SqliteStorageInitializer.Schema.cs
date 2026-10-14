@@ -18,6 +18,10 @@ public sealed partial class SqliteStorageInitializer
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
 
+        // CREATE IF NOT EXISTS and the column checks below still require a write lock on
+        // SQLite. Avoid running schema DDL at all when this database already has the current schema.
+        if (await IsSchemaCurrentAsync(connection, cancellationToken)) return;
+
         await using (var command = connection.CreateCommand())
         {
             command.CommandText = """
@@ -161,6 +165,33 @@ public sealed partial class SqliteStorageInitializer
 
         await EnsureReferenceColumnsAsync(connection, cancellationToken);
         await EnsureSymbolColumnsAsync(connection, cancellationToken);
+    }
+
+    private static async Task<bool> IsSchemaCurrentAsync(SqliteConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COUNT(*) FROM sqlite_master
+            WHERE type = 'table' AND name IN (
+                'repositories', 'dirty_index_repositories', 'dirty_index_files', 'projects', 'files',
+                'namespaces', 'file_index_observations', 'types', 'methods', 'properties', 'fields',
+                'symbols', 'references_table', 'diagnostics', 'tests', 'sessions'
+            );
+            """;
+        if (Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken)) != 16) return false;
+
+        return await HasColumnsAsync(connection, "references_table", ["caller_symbol_id", "call_site_line"], cancellationToken)
+            && await HasColumnsAsync(connection, "symbols", ["start_line", "end_line"], cancellationToken);
+    }
+
+    private static async Task<bool> HasColumnsAsync(SqliteConnection connection, string table, string[] required, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info({table});";
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken)) columns.Add(reader.GetString(1));
+        return required.All(columns.Contains);
     }
 
     public async Task<IReadOnlyList<DirtyIndexRepository>> GetDirtyIndexRepositoriesAsync(CancellationToken cancellationToken = default)

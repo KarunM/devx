@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 1.8.1 — 2026-10-14
+
+### Fixed
+
+- Index commands ignore values supplied to `--agent`, `--task`, `--session` and `--format` when resolving paths.
+- Missing indexed files are removed and their dirty markers cleared; index status reports remaining dirty files.
+- `index changed` outside Git returns a structured error with the `devx index <root>` fallback.
+- A read-only `.devx/devx.db` no longer crashes `session create` or sessionless reads: unchanged repository rows are not rewritten, skipped history writes are reported as `HistoryNotRecorded`, and `session create` returns the existing automatic session with that warning.
+
+
 ## 1.8.0 — 2026-10-13
 
 ### Changed

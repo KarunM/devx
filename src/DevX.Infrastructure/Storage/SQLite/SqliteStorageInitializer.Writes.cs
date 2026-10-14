@@ -17,6 +17,15 @@ public sealed partial class SqliteStorageInitializer
     {
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
+        // Nothing to write when the row is already current; a read-only database must still be readable.
+        await using (var existing = connection.CreateCommand())
+        {
+            existing.CommandText = "SELECT 1 FROM repositories WHERE root_path = $root_path AND name = $name;";
+            existing.Parameters.AddWithValue("$root_path", repository.RootPath);
+            existing.Parameters.AddWithValue("$name", repository.Name);
+            if (await existing.ExecuteScalarAsync(cancellationToken) is not null) return;
+        }
+
         await using var command = connection.CreateCommand();
         command.CommandText = """
             INSERT INTO repositories (id, name, root_path)
