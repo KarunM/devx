@@ -18,6 +18,8 @@ devx patch
 devx build
 devx test
 devx diagnostics
+An explicit `.py` test target runs with pytest when it contains pytest tests, or with the Python interpreter as a standalone script.
+
 
 # Principles
 

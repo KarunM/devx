@@ -158,7 +158,7 @@ public sealed partial class SqliteStorageInitializer
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "DELETE FROM files WHERE id = $id;";
+        command.CommandText = "PRAGMA foreign_keys = ON; DELETE FROM files WHERE id = $id;";
         command.Parameters.AddWithValue("$id", fileId.Value.ToString());
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
