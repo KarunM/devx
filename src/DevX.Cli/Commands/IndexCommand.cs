@@ -47,7 +47,9 @@ static partial class Program
         IReadOnlyList<string> changed;
         try
         {
-            changed = await indexer.GetChangedFilesAsync(repositoryPath);
+            // A repository-wide dirty fence only a full run lifts: do the work, do not say "current".
+            if (await indexer.RequiresFullReindexAsync(repositoryPath)) return null;
+            changed = await indexer.GetPendingFilesAsync(repositoryPath);
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
         {
@@ -68,7 +70,7 @@ static partial class Program
         // mistake. Only the files git names are re-indexed.
         return refreshed.RemovedFiles + removed > 0
             ? $"re-indexed {refreshed.UpdatedFiles}, removed {refreshed.RemovedFiles + removed}."
-            : $"Indexed {refreshed.UpdatedFiles} files (re-indexed the {changed.Count} files git reports as changed, out of {indexed}).";
+            : $"Indexed {refreshed.UpdatedFiles} files (re-indexed the {changed.Count} files git reports as changed or that arrived since the last index, out of {indexed}).";
     }
 
     static async Task<int> IndexUpdateAsync(string connectionString, string[] args, string format)
@@ -256,7 +258,8 @@ static partial class Program
             IndexedFiles: indexedFiles,
             IndexExists: repository is not null,
             Status: repository is null ? "Missing" : isDirty ? "Stale" : "Current",
-            Reason: repository is null ? "Repository has not been indexed yet." : isDirty ? $"{dirtyCount} dirty file(s) remain unreconciled." : "No obvious stale-index signal detected.");
+            Reason: repository is null ? "Repository has not been indexed yet." : isDirty ? DirtyReason(dirty!) : "No obvious stale-index signal detected.",
+            DirtyFiles: isDirty ? dirty!.DirtyFiles : null);
 
         if (!string.IsNullOrWhiteSpace(sessionId))
         {
@@ -265,6 +268,15 @@ static partial class Program
 
         WriteResponse(new ProtocolResponse(true, JsonSerializer.SerializeToElement(response), [], []), format);
         return 0;
+    }
+
+    static string DirtyReason(DirtyIndexRepository dirty)
+    {
+        var files = dirty.DirtyFiles.Count == 0 ? "" : $": {string.Join(", ", dirty.DirtyFiles)}";
+        var count = $"{dirty.DirtyFiles.Count} dirty file(s) remain unreconciled";
+        return dirty.RequiresFullReindex
+            ? $"{count}{files}. A full re-index is required; run 'devx index <root>'."
+            : $"{count}{files}. Run 'devx index changed --session <id>' or 'devx index <root>'.";
     }
 
     static async Task EnsureAutomaticIndexAsync()

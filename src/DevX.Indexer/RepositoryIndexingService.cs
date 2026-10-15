@@ -210,6 +210,7 @@ public sealed class RepositoryIndexingService
             }
             await freshnessStore.ClearDirtyIndexRepositoryAsync(rootPath, cancellationToken);
         }
+        await RecordIndexedHeadAsync(rootPath, cancellationToken);
         return new RepositoryIndexResult(indexable.Count, indexable.Count == 0
             ? considered.Count == 0 ? "no files with an indexable extension found" : "all files ignored"
             : null);
@@ -666,14 +667,132 @@ public sealed class RepositoryIndexingService
     public async Task<IndexRefreshResult> ReindexChangedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default, bool reconcileMissingFiles = true)
     {
         var removedFiles = reconcileMissingFiles ? await ReconcileMissingIndexedFilesAsync(repositoryPath, cancellationToken) : 0;
-        var changedFiles = await GetChangedFilesAsync(repositoryPath, cancellationToken);
+        if (await RequiresFullReindexAsync(repositoryPath, cancellationToken))
+        {
+            // A repository-wide dirty fence (an interrupted full index or an uncertain patch) is only
+            // cleared by a full run; per-file work cannot lift it.
+            var full = await IndexAsync(repositoryPath, cancellationToken);
+            return new IndexRefreshResult("changed", full.FilesIndexed, 0, [], true, RemovedFiles: removedFiles);
+        }
+
+        var changedFiles = await GetPendingFilesAsync(repositoryPath, cancellationToken);
         if (changedFiles.Count == 0)
         {
+            await RecordIndexedHeadAsync(Path.GetFullPath(repositoryPath), cancellationToken);
             return new IndexRefreshResult("changed", 0, 0, [], false, RemovedFiles: removedFiles);
         }
 
         var result = await ReindexFilesAsync(repositoryPath, changedFiles, cancellationToken);
+        if (!result.SkippedFilePaths.Any(skipped => skipped.Reason.StartsWith("ERROR:", StringComparison.Ordinal) && skipped.Reason != "ERROR: file missing"))
+        {
+            await RecordIndexedHeadAsync(Path.GetFullPath(repositoryPath), cancellationToken);
+        }
         return result with { Mode = "changed", RemovedFiles = result.RemovedFiles + removedFiles };
+    }
+
+    /// <summary>True when the repository carries a repository-wide dirty fence that only a full index clears.</summary>
+    public async Task<bool> RequiresFullReindexAsync(string repositoryPath, CancellationToken cancellationToken = default)
+        => _repositoryStore is IIndexFreshnessStore freshness
+            && (await freshness.GetDirtyIndexRepositoryAsync(Path.GetFullPath(repositoryPath), cancellationToken))?.RequiresFullReindex == true;
+
+    /// <summary>
+    /// Everything that needs re-indexing: files git shows as changed, files still fenced as dirty
+    /// (committed since, so git no longer shows them), and files that arrived since the last indexed
+    /// commit through pull, merge or checkout.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> GetPendingFilesAsync(string repositoryPath, CancellationToken cancellationToken = default)
+    {
+        var rootPath = Path.GetFullPath(repositoryPath);
+        var pending = new List<string>(await GetChangedFilesAsync(rootPath, cancellationToken));
+        if (_repositoryStore is IIndexFreshnessStore freshness
+            && await freshness.GetDirtyIndexRepositoryAsync(rootPath, cancellationToken) is { } dirty)
+        {
+            pending.AddRange(dirty.DirtyFiles);
+        }
+        pending.AddRange(await GetCommitDriftFilesAsync(rootPath, cancellationToken));
+        return pending.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static string IndexedHeadFile(string rootPath) => Path.Combine(rootPath, ".devx", "indexed-head");
+
+    private static async Task<string?> RunGitAsync(string rootPath, string arguments, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var startInfo = new ProcessStartInfo("git", arguments)
+            {
+                WorkingDirectory = rootPath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            using var process = Process.Start(startInfo);
+            if (process is null) return null;
+            var output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
+            await process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken);
+            return process.ExitCode == 0 ? output : null;
+        }
+        catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static async Task RecordIndexedHeadAsync(string rootPath, CancellationToken cancellationToken)
+    {
+        var head = (await RunGitAsync(rootPath, "rev-parse HEAD", cancellationToken))?.Trim();
+        if (string.IsNullOrEmpty(head)) return;
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(rootPath, ".devx"));
+            await System.IO.File.WriteAllTextAsync(IndexedHeadFile(rootPath), head, cancellationToken);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            // Read-only state directory: the next run simply reconciles again.
+        }
+    }
+
+    private static bool IsReindexableKind(string path)
+        => path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
+            || StructuredSymbolReader.CanParse(path)
+            || path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".sln", StringComparison.OrdinalIgnoreCase);
+
+    private async Task<IReadOnlyList<string>> GetCommitDriftFilesAsync(string rootPath, CancellationToken cancellationToken)
+    {
+        var head = (await RunGitAsync(rootPath, "rev-parse HEAD", cancellationToken))?.Trim();
+        if (string.IsNullOrEmpty(head)) return [];
+        var recorded = IndexedHeadFile(rootPath) is var file && System.IO.File.Exists(file)
+            ? (await System.IO.File.ReadAllTextAsync(file, cancellationToken)).Trim()
+            : null;
+        if (recorded == head) return [];
+
+        string? names;
+        if (!string.IsNullOrEmpty(recorded))
+        {
+            names = await RunGitAsync(rootPath, $"diff --name-only --no-renames -z {recorded} {head}", cancellationToken);
+            if (names is not null)
+            {
+                return names.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(path => path.Replace('\\', '/'))
+                    .Where(IsReindexableKind)
+                    .ToArray();
+            }
+        }
+
+        // No usable recorded commit (an index from before commits were recorded, or a commit that was
+        // rebased away): compare the working tree with the index by path instead.
+        names = await RunGitAsync(rootPath, "ls-files -z --cached --others --exclude-standard", cancellationToken);
+        if (names is null) return [];
+        var indexed = (await _repositoryStore.GetIndexedFilePathsAsync(rootPath, cancellationToken))
+            .Select(path => path.Replace('\\', '/')).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return names.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Select(path => path.Replace('\\', '/'))
+            .Where(path => IsReindexableKind(path) && !path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) && !path.EndsWith(".sln", StringComparison.OrdinalIgnoreCase))
+            .Where(path => !path.Split('/').Any(segment => IgnoredDirectories.Contains(segment)))
+            .Where(path => !indexed.Contains(path) && System.IO.File.Exists(Path.Combine(rootPath, path)))
+            .ToArray();
     }
 
     public async Task<int> ReconcileMissingIndexedFilesAsync(string repositoryPath, CancellationToken cancellationToken = default)

@@ -215,7 +215,8 @@ public sealed class IndexCommandFixesTests : CliHarness
             using var json = JsonDocument.Parse(output);
             var data = json.RootElement.GetProperty("Data");
             Assert.Equal("Stale", data.GetProperty("Status").GetString());
-            Assert.Equal("1 dirty file(s) remain unreconciled.", data.GetProperty("Reason").GetString());
+            Assert.StartsWith("1 dirty file(s) remain unreconciled: A.py.", data.GetProperty("Reason").GetString());
+            Assert.Equal("A.py", data.GetProperty("DirtyFiles")[0].GetString());
         });
     }
 

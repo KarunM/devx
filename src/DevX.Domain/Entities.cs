@@ -346,7 +346,8 @@ public sealed record IndexStatusResponse(
     int IndexedFiles,
     bool IndexExists,
     string Status,
-    string Reason);
+    string Reason,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? DirtyFiles = null);
 
 public interface ISearchService
 {

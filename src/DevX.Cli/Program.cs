@@ -65,6 +65,20 @@ static async Task<int> RunAsync(string[] args)
     var databasePath = ResolveDatabasePath();
     var connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
 
+    if (GetOption(args, "--session") is { } requestedSession && command is not ("session" or "mcp" or "artifact")
+        && !(command == "patch" && args.Length > 1 && args[1] == "create"))
+    {
+        var sessionStore = new SqliteStorageInitializer(connectionString);
+        await sessionStore.InitializeAsync();
+        if (!await SessionFederation.EnsureSessionAsync(sessionStore, databasePath, Environment.CurrentDirectory, FindRepositoryRoot(Environment.CurrentDirectory), requestedSession))
+        {
+            Console.Error.WriteLine(Guid.TryParse(requestedSession, out _)
+                ? $"Session '{requestedSession}' was not found. Run 'devx session create' in this repository."
+                : $"Session '{requestedSession}' is not a valid session id.");
+            return 1;
+        }
+    }
+
     switch (command)
     {
         case "index":
