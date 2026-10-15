@@ -311,7 +311,9 @@ public sealed partial class SqliteStorageInitializer
             .Select(path => Path.GetRelativePath(root, path).Replace('\\', '/'))
             .Where(path => !path.Split('/').Take(path.Split('/').Length - 1).Any(segment => SkippedDirectories.Contains(segment)))
             .ToList();
+        var nestedRepositories = NestedRepositoryGuard.Find(root);
         return files.Where(path => !path.Split('/').Any(segment => segment is ".git" or ".devx"))
+            .Where(path => !NestedRepositoryGuard.IsInside(path, nestedRepositories))
             .Where(path => System.IO.File.Exists(Path.Combine(root, path)))
             .OrderBy(path => path, StringComparer.Ordinal);
     }

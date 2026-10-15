@@ -98,6 +98,8 @@ public static class RepositoryPathGuard
                 if (IsLinkOrReparsePoint(entry)) continue;
                 if (Directory.Exists(entry))
                 {
+                    // Another worktree or repository nested below the root is not this repository's content.
+                    if (NestedRepositoryGuard.IsNestedRepositoryRoot(entry)) continue;
                     pending.Push(entry);
                     continue;
                 }

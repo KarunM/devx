@@ -574,10 +574,13 @@ public sealed class RepositoryIndexingService
 
     public async Task<IndexRefreshResult> ReindexFilesAsync(string repositoryPath, IReadOnlyList<string> filePaths, CancellationToken cancellationToken = default)
     {
+        var nestedRepositories = NestedRepositoryGuard.Find(Path.GetFullPath(repositoryPath));
         var normalized = filePaths
             .Where(path => !string.IsNullOrWhiteSpace(path))
             .SelectMany(path => path.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
             .Select(path => path.Replace('\\', '/'))
+            .Where(path => !NestedRepositoryGuard.IsInside(
+                Path.IsPathRooted(path) ? Path.GetRelativePath(Path.GetFullPath(repositoryPath), path).Replace('\\', '/') : path, nestedRepositories))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
@@ -795,8 +798,10 @@ public sealed class RepositoryIndexingService
             names = await RunGitAsync(rootPath, $"diff --name-only --no-renames -z {recorded} {head}", cancellationToken);
             if (names is not null)
             {
+                var nestedRepositories = NestedRepositoryGuard.Find(rootPath);
                 return names.Split('\0', StringSplitOptions.RemoveEmptyEntries)
                     .Select(path => path.Replace('\\', '/'))
+                    .Where(path => !NestedRepositoryGuard.IsInside(path, nestedRepositories))
                     .Where(IsReindexableKind)
                     .ToArray();
             }
@@ -806,12 +811,14 @@ public sealed class RepositoryIndexingService
         // rebased away): compare the working tree with the index by path instead.
         names = await RunGitAsync(rootPath, "ls-files -z --cached --others --exclude-standard", cancellationToken);
         if (names is null) return [];
+        var nested = NestedRepositoryGuard.Find(rootPath);
         var indexed = (await _repositoryStore.GetIndexedFilePathsAsync(rootPath, cancellationToken))
             .Select(path => path.Replace('\\', '/')).ToHashSet(StringComparer.OrdinalIgnoreCase);
         return names.Split('\0', StringSplitOptions.RemoveEmptyEntries)
             .Select(path => path.Replace('\\', '/'))
             .Where(path => IsReindexableKind(path) && !path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) && !path.EndsWith(".sln", StringComparison.OrdinalIgnoreCase))
             .Where(path => !path.Split('/').Any(segment => IgnoredDirectories.Contains(segment)))
+            .Where(path => !NestedRepositoryGuard.IsInside(path, nested))
             .Where(path => !indexed.Contains(path) && System.IO.File.Exists(Path.Combine(rootPath, path)))
             .ToArray();
     }
