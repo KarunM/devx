@@ -251,8 +251,7 @@ public sealed class PythonReferencesTests
     {
         var f = await Create(("a.py", "zzunindexedmarker = 1\n"), ("notes.rst", "zzunindexedmarker in prose\n"));
         var outcome = await f.Store.SearchFileContentsWithCoverageAsync("zzunindexedmarker");
-        if (outcome.Coverage.Engine != "ripgrep") return;   // no ripgrep on this PATH: the fallback never sees non-indexed files
-        Assert.Equal(["a.py"], outcome.Matches.Select(m => m.Path).ToArray());
+        Assert.Equal(["a.py", "notes.rst"], outcome.Matches.Select(m => m.Path).OrderBy(p => p, StringComparer.Ordinal).ToArray());
         Assert.Equal(1, outcome.Coverage.UnindexedHits);
         Assert.DoesNotContain(outcome.Coverage.Warnings, w => w.Contains("could not be searched safely"));
         Assert.Contains("\"UnindexedHits\":1", JsonSerializer.Serialize(outcome.Coverage));

@@ -233,16 +233,20 @@ public sealed class McpReferenceServer
                         : string.Empty;
                     if (warningText.Length > 0) note += $" Search coverage note: {warningText}";
                     else if (complete is null || capped) note += " Search coverage beyond these matches is unknown.";
-                    hits.Add(note);
+                    hits.Add(note + ScopeSuffix(coverage));
                 }
                 if (!truncated && (complete is null || capped))
                 {
                     var warningsText = TryGetPropertyIgnoreCase(coverage, "warnings", out var warnings) && warnings.ValueKind == JsonValueKind.Array
                         ? string.Join(" ", warnings.EnumerateArray().Select(item => item.GetString()).Where(item => !string.IsNullOrWhiteSpace(item)))
                         : string.Empty;
-                    hits.Add(warningsText.Length == 0
+                    hits.Add((warningsText.Length == 0
                         ? "Search coverage unknown; results may be incomplete."
-                        : $"Search coverage unknown; results may be incomplete. {warningsText}");
+                        : $"Search coverage unknown; results may be incomplete. {warningsText}") + ScopeSuffix(coverage));
+                }
+                else if (!truncated && Text(coverage, "scope").Length > 0)
+                {
+                    hits.Add($"Searched: {Text(coverage, "scope")}.");
                 }
             }
             return string.Join("\n", hits);
@@ -413,7 +417,7 @@ public sealed class McpReferenceServer
         var readKind = ReadKind(arguments);
         if (readKind == "section")
         {
-            var separator = target.LastIndexOf('#');
+            var separator = SectionTarget.SeparatorIndex(target);
             if (separator > 0 && separator < target.Length - 1)
                 return JsonSerializer.SerializeToElement(new { file = target[..separator], heading = target[(separator + 1)..] }, JsonOptions);
         }
@@ -693,6 +697,9 @@ public sealed class McpReferenceServer
     // and `read` answered "file missing: db.models.query.QuerySet.count". Only the bare
     // QuerySet.count worked later, once the agent gave up and went to grep. A name is a file
     // only when it looks like one.
+    private static string ScopeSuffix(JsonElement coverage)
+        => Text(coverage, "scope") is { Length: > 0 } scope ? $" Searched: {scope}." : string.Empty;
+
     private static bool LooksLikeFilePath(string target)
     {
         if (target.Length == 0) return false;

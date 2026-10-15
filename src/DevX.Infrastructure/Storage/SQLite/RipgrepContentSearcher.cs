@@ -88,6 +88,13 @@ public static class RipgrepContentSearcher
         start.ArgumentList.Add("--with-filename");
         start.ArgumentList.Add("--color=never");
         start.ArgumentList.Add("--no-messages");
+        // Hidden files (.github/workflows) are tracked source; DevX's own state and git
+        // internals are not.
+        start.ArgumentList.Add("--hidden");
+        start.ArgumentList.Add("--glob");
+        start.ArgumentList.Add("!.git");
+        start.ArgumentList.Add("--glob");
+        start.ArgumentList.Add("!.devx");
         start.ArgumentList.Add("--");                 // everything after this is the pattern
         start.ArgumentList.Add(query);
         start.ArgumentList.Add(".");

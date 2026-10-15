@@ -20,16 +20,22 @@ namespace DevX.Domain;
 /// </summary>
 public static class JavaScriptSymbolReader
 {
-    private static readonly string[] Extensions = [".js", ".mjs", ".cjs", ".jsx"];
+    private static readonly string[] Extensions = [".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"];
 
     private static readonly Regex FunctionDecl = new(
-        @"^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*(?<name>[\w$]+)\s*\(", RegexOptions.Compiled);
+        @"^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?function\s*\*?\s*(?<name>[\w$]+)\s*(?:<[^(]*>)?\s*\(", RegexOptions.Compiled);
     private static readonly Regex VarDecl = new(
-        @"^(?:export\s+)?(?<kw>const|let|var)\s+(?<name>[\w$]+)\s*=\s*", RegexOptions.Compiled);
+        @"^(?:export\s+)?(?:declare\s+)?(?<kw>const|let|var)\s+(?<name>[\w$]+)\s*(?::[^\n=]*?(?:=>[^\n=]*?)*)?=(?![=>])\s*", RegexOptions.Compiled);
+    private static readonly Regex TsInterfaceDecl = new(
+        @"^(?:export\s+)?(?:default\s+)?(?:declare\s+)?interface\s+(?<name>[\w$]+)", RegexOptions.Compiled);
+    private static readonly Regex TsEnumDecl = new(
+        @"^(?:export\s+)?(?:declare\s+)?(?:const\s+)?enum\s+(?<name>[\w$]+)", RegexOptions.Compiled);
+    private static readonly Regex TsTypeDecl = new(
+        @"^(?:export\s+)?(?:declare\s+)?type\s+(?<name>[\w$]+)\s*(?:<[^=]*>)?\s*=", RegexOptions.Compiled);
     private static readonly Regex ClassDecl = new(
-        @"^(?:export\s+)?(?:default\s+)?class\s+(?<name>[\w$]+)", RegexOptions.Compiled);
+        @"^(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?class\s+(?<name>[\w$]+)", RegexOptions.Compiled);
     private static readonly Regex MemberDecl = new(
-        @"^(?:static\s+)?(?:async\s+)?(?:(?:get|set)\s+)?\*?\s*(?<name>#?[\w$]+)\s*\(", RegexOptions.Compiled);
+        @"^(?:(?:public|private|protected|static|readonly|override|abstract|declare|async)\s+)*(?:(?:get|set)\s+)?\*?\s*(?<name>#?[\w$]+)\s*(?:<[^(]*>)?\s*\(", RegexOptions.Compiled);
     // `(function (..) {`, `;(function`, `(function(){`, `(() => {`, `(async () => {`, `!function(){`
     private static readonly Regex IifeOpen = new(
         @"^;?\s*(?:[!(]\s*)+(?:async\s+)?(?:function\b[^{]*|\([^)]*\)\s*=>\s*|[\w$]+\s*=>\s*)\{", RegexOptions.Compiled);
@@ -56,6 +62,20 @@ public static class JavaScriptSymbolReader
 
     public static ParsedFile Parse(string filePath, string sourceText)
     {
+        try
+        {
+            return ParseCore(filePath, sourceText);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or IndexOutOfRangeException)
+        {
+            // A half-written file must still index (with no symbols) rather than fail the run.
+            return new ParsedFile(filePath, NamespaceFromPath(filePath), []);
+        }
+    }
+
+    private static ParsedFile ParseCore(string filePath, string sourceText)
+    {
+        var isTs = Path.GetExtension(filePath).ToLowerInvariant() is ".ts" or ".tsx" or ".mts" or ".cts";
         var text = (sourceText ?? string.Empty).Replace("\r\n", "\n");
         var masked = Mask(text);
         var lineStarts = new List<int> { 0 };
@@ -133,6 +153,31 @@ public static class JavaScriptSymbolReader
                 var stop = BodyEnd(masked, start + m.Length - 1);
                 moduleMethods.Add(Method(m.Groups["name"].Value, lineText, line + 1, LineOf(lineStarts, stop)));
                 continue;
+            }
+
+            if (isTs)
+            {
+                var tm = TsInterfaceDecl.Match(lineText);
+                var tkind = "Interface";
+                if (!tm.Success) { tm = TsEnumDecl.Match(lineText); tkind = "Enum"; }
+                if (tm.Success)
+                {
+                    var open = masked.IndexOf('{', start + tm.Length);
+                    if (open >= 0)
+                    {
+                        classes.Add(new ParsedType(tm.Groups["name"].Value, tkind, @namespace, "public", line + 1,
+                            LineOf(lineStarts, MatchClose(masked, open)), [], [], []));
+                        continue;
+                    }
+                }
+
+                tm = TsTypeDecl.Match(lineText);
+                if (tm.Success)
+                {
+                    classes.Add(new ParsedType(tm.Groups["name"].Value, "TypeAlias", @namespace, "public", line + 1,
+                        LineOf(lineStarts, StatementEnd(masked, start + tm.Length)), [], [], []));
+                    continue;
+                }
             }
 
             m = ClassDecl.Match(lineText);
@@ -254,7 +299,16 @@ public static class JavaScriptSymbolReader
             return false;
         }
 
-        if (masked[pos] == '(')
+        if (pos < masked.Length && masked[pos] == '<')
+        {
+            var gt = masked.IndexOf('>', pos);
+            var line = masked.IndexOf('\n', pos);
+            if (gt < 0 || (line >= 0 && gt > line)) return false;
+            pos = gt + 1;
+            while (pos < masked.Length && char.IsWhiteSpace(masked[pos])) pos++;
+        }
+
+        if (pos < masked.Length && masked[pos] == '(')
         {
             var close = MatchClose(masked, pos);
             if (close >= masked.Length)
@@ -263,6 +317,15 @@ public static class JavaScriptSymbolReader
             }
 
             pos = close + 1;
+            var after = pos;
+            while (after < masked.Length && char.IsWhiteSpace(masked[after])) after++;
+            if (after < masked.Length && masked[after] == ':')
+            {
+                // TypeScript return type: `(x: T): R =>`.
+                var arrow = masked.IndexOf("=>", after, StringComparison.Ordinal);
+                var semi = arrow < 0 ? -1 : masked.IndexOf(';', after, arrow - after);
+                if (arrow > 0 && arrow - after < 200 && semi < 0) pos = arrow;
+            }
         }
         else
         {

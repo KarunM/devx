@@ -12,7 +12,7 @@ public sealed record RepositoryIndexResult(int FilesIndexed, string? Reason);
 
 public sealed class RepositoryIndexingService
 {
-    private static readonly string[] IgnoredDirectories = [".git", "bin", "obj", ".vs", ".idea", "node_modules", "dist", "build", "out", "coverage", ".venv", "venv", "__pycache__", "site-packages", ".mypy_cache", ".pytest_cache", ".eggs", ".tox", ".devx"];
+    private static readonly string[] IgnoredDirectories = [".git", "bin", "obj", ".vs", ".idea", "node_modules", "dist", "build", "out", "coverage", ".venv", "venv", "__pycache__", ".terraform", "site-packages", ".mypy_cache", ".pytest_cache", ".eggs", ".tox", ".devx"];
     private readonly IRepositoryStore _repositoryStore;
     private readonly ISymbolStore _symbolStore;
     private readonly ILanguageParser _languageParser;
@@ -197,6 +197,7 @@ public sealed class RepositoryIndexingService
         await IndexJavaScriptFilesAsync(rootPath, repository, cancellationToken);
         await IndexJsonFilesAsync(rootPath, repository, cancellationToken);
         await IndexHtmlFilesAsync(rootPath, repository, cancellationToken);
+        await IndexConfigFilesAsync(rootPath, repository, cancellationToken);
         if (freshnessStore is not null)
         {
             if (dirtyState is not null)
@@ -314,6 +315,25 @@ public sealed class RepositoryIndexingService
         await _repositoryStore.UpsertProjectAsync(project, cancellationToken);
 
         foreach (var filePath in jsonFiles)
+        {
+            await IndexPythonFileAsync(rootPath, repository.Id, project.Id, filePath, cancellationToken);
+        }
+    }
+
+    /// <summary>Terraform/HCL, YAML and TOML files, under one synthetic "&lt;config&gt;" project.</summary>
+    private async Task IndexConfigFilesAsync(string rootPath, Repository repository, CancellationToken cancellationToken)
+    {
+        var configFiles = RepositoryPathGuard.EnumerateFiles(rootPath, "*.*")
+            .Where(StructuredSymbolReader.ConfigFile)
+            .Where(path => IsNotIgnored(rootPath, path))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToList();
+        if (configFiles.Count == 0) return;
+
+        var projectPath = Path.Combine(rootPath, "<config>");
+        var project = new Project(new ProjectId(StableId(projectPath)), repository.Id, Path.GetFileName(rootPath), RelativePath(rootPath, rootPath));
+        await _repositoryStore.UpsertProjectAsync(project, cancellationToken);
+        foreach (var filePath in configFiles)
         {
             await IndexPythonFileAsync(rootPath, repository.Id, project.Id, filePath, cancellationToken);
         }
@@ -456,7 +476,8 @@ public sealed class RepositoryIndexingService
                 MarkdownSymbolReader.CanParse(absolutePath) ? "<markdown>"
                     : JavaScriptSymbolReader.CanParse(absolutePath) ? "<javascript>"
                     : JsonSymbolReader.CanParse(absolutePath) ? "<json>"
-                    : HtmlSymbolReader.CanParse(absolutePath) ? "<html>" : "<python>");
+                    : HtmlSymbolReader.CanParse(absolutePath) ? "<html>"
+                    : StructuredSymbolReader.ConfigFile(absolutePath) ? "<config>" : "<python>");
             projectId = new ProjectId(StableId(syntheticProjectPath));
             project = new Project(projectId, repositoryId, Path.GetFileName(rootPath), RelativePath(rootPath, rootPath));
             await _repositoryStore.UpsertProjectAsync(project, cancellationToken);
@@ -774,7 +795,8 @@ public sealed class RepositoryIndexingService
     private static bool IsIndexable(string path)
         => path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
             || PythonSymbolReader.CanParse(path) || MarkdownSymbolReader.CanParse(path)
-            || JavaScriptSymbolReader.CanParse(path) || JsonSymbolReader.CanParse(path) || HtmlSymbolReader.CanParse(path);
+            || JavaScriptSymbolReader.CanParse(path) || JsonSymbolReader.CanParse(path) || HtmlSymbolReader.CanParse(path)
+            || StructuredSymbolReader.ConfigFile(path);
 
     private static string RelativePath(string root, string fullPath)
         => Path.GetRelativePath(root, fullPath).Replace(Path.DirectorySeparatorChar, '/');
