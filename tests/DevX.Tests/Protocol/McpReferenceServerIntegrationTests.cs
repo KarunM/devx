@@ -196,18 +196,11 @@ public sealed class McpReferenceServerIntegrationTests
         {
             var text = result.Content.GetProperty("text").GetString()!;
             Assert.StartsWith("notes.md:1: UniquePreview phrase for text search.", text);
-            // Engine-independent coverage line: ripgrep cannot prove indexed-path coverage, the
-            // built-in scan can (complete=true, so no notice is rendered at all).
+            // Every engine now states what it searched; complete coverage adds no "unknown" notice.
             var lines = text.Split('\n');
-            if (RipgrepLocator.Locate(repositoryRoot).Executable is null)
-            {
-                Assert.Single(lines);
-            }
-            else
-            {
-                Assert.Equal(2, lines.Length);
-                Assert.Equal("Search coverage unknown; results may be incomplete. Ripgrep honors ignore and hidden-file rules, so indexed-path coverage is unknown.", lines[1]);
-            }
+            Assert.Equal(2, lines.Length);
+            Assert.StartsWith("Searched: ", lines[1]);
+            Assert.DoesNotContain("unknown", lines[1]);
         }
     }
 

@@ -16,7 +16,7 @@ public sealed class CompositeLanguageParser : ILanguageParser
     }
 
     public CompositeLanguageParser()
-        : this([new CSharpRoslynParser(), new PythonAstParser(), new MarkdownParser(), new JavaScriptParser(), new JsonParser(), new HtmlParser()])
+        : this([new CSharpRoslynParser(), new PythonAstParser(), new MarkdownParser(), new JavaScriptParser(), new JsonParser(), new HtmlParser(), new ConfigParser()])
     {
     }
 

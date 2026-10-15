@@ -97,15 +97,29 @@ public sealed partial class SqliteStorageInitializer
             .ToList();
         var warningCount = indexedFiles.Count - safeIndexedFiles.Count;
 
+        // Every repository root, not only those with indexed files: a file type DevX has no
+        // parser for (Terraform, YAML, TOML...) is still searchable text.
+        var roots = new List<string>();
+        await using (var rootCommand = connection.CreateCommand())
+        {
+            rootCommand.CommandText = "SELECT root_path FROM repositories ORDER BY root_path;";
+            await using var rootReader = await rootCommand.ExecuteReaderAsync(cancellationToken);
+            while (await rootReader.ReadAsync(cancellationToken)) roots.Add(Path.GetFullPath(rootReader.GetString(0)));
+        }
+        foreach (var indexedRoot in safeIndexedFiles.Select(file => Path.GetFullPath(file.Root)))
+            roots.Add(indexedRoot);
+        roots = roots.Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
+            .Where(Directory.Exists).ToList();
+
         // ripgrep -- the repository's configured copy, the one bundled with DevX, or the one on
         // PATH, in that order: it is the regex engine, and it reads the tree instead of
         // every indexed file, which is what makes `a|b` and a regex possible at all. The
         // in-process scan below stays as the fallback and its result set is the same shape, so
         // nothing downstream -- and no `--format json` payload -- depends on which one answered.
         var ripgrepHits = new List<(string Root, RipgrepContentSearcher.Hit Hit)>();
-        var ripgrepAnswered = safeIndexedFiles.Count > 0;
+        var ripgrepAnswered = roots.Count > 0;
         var scanCapped = false;
-        foreach (var root in safeIndexedFiles.Select(file => Path.GetFullPath(file.Root)).Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal))
+        foreach (var root in roots)
         {
             if (!RipgrepContentSearcher.TrySearch(root, query, out var found, out var rootScanCapped, cancellationToken))
             {
@@ -119,8 +133,8 @@ public sealed partial class SqliteStorageInitializer
 
         if (ripgrepAnswered)
         {
-            // Only files the index knows: a ContentSearchResult carries a FileId, and the
-            // in-process scan could only ever match indexed files either.
+            // Every readable text file ripgrep reaches is a result, indexed or not. A file the
+            // index never covered (Terraform, YAML, docs) carries an empty FileId.
             var indexedByIdentity = safeIndexedFiles.ToDictionary(
                 candidate => (Root: Path.GetFullPath(candidate.Root), Path: NormalizeContentPath(candidate.Path)),
                 candidate => candidate,
@@ -137,21 +151,22 @@ public sealed partial class SqliteStorageInitializer
                 }
                 if (!indexedByIdentity.TryGetValue((root, hitPath), out var file))
                 {
-                    // A file ripgrep can read but the index never covered (docs, config) is not an
-                    // unsafe indexed path: drop it and count it where JSON consumers can see it.
                     unindexedHits++;
+                    AddBoundedResult(results, (hitPath, hit.Line, new ContentSearchResult(string.Empty, hitPath, hit.Line, MatchColumn(hit.Text, query), hit.Text)), limit + 1);
                     continue;
                 }
                 AddBoundedResult(results, (hitPath, hit.Line, new ContentSearchResult(file.Id, hitPath, hit.Line, MatchColumn(hit.Text, query), hit.Text)), limit + 1);
             }
             var outputTruncated = results.Count > limit;
             var returned = results.Take(limit).Select(item => item.Result).ToList();
-            var warnings = new List<string> { "Ripgrep honors ignore and hidden-file rules, so indexed-path coverage is unknown." };
+            var warnings = new List<string>();
             if (scanCapped) warnings.Add("Ripgrep stopped at its 5,000-match scan ceiling for at least one root.");
             if (warningCount > 0) warnings.Add($"{warningCount} indexed path(s) could not be searched safely.");
-            bool? complete = outputTruncated ? false : null;
-            bool? reportedTruncation = outputTruncated ? true : null;
-            return new ContentSearchOutcome(returned, new ContentSearchCoverage(returned.Count, limit, reportedTruncation, complete, scanCapped, false, "ripgrep", warnings, unindexedHits));
+            bool? complete = outputTruncated ? false : (scanCapped || warningCount > 0 ? null : true);
+            bool? reportedTruncation = outputTruncated ? true : (complete == true ? false : null);
+            var scope = "every non-ignored text file under the repository root, indexed or not (ripgrep; .gitignore honored, hidden files included, binaries skipped)"
+                + (unindexedHits > 0 ? $"; {unindexedHits} match(es) are in files without a symbol index" : string.Empty);
+            return new ContentSearchOutcome(returned, new ContentSearchCoverage(returned.Count, limit, reportedTruncation, complete, scanCapped, false, "ripgrep", warnings, unindexedHits, scope));
         }
 
         // The fallback must not be a worse tool than the engine it stands in for, or the answer
@@ -179,7 +194,18 @@ public sealed partial class SqliteStorageInitializer
 
         var fallbackResults = new List<(string Path, int Line, ContentSearchResult Result)>();
         var fallbackWarnings = warningCount;
-        foreach (var file in safeIndexedFiles)
+        // Indexed files first, then every other tracked or unignored text file under each root.
+        var candidates = new List<(string Id, string Path, string Root)>(safeIndexedFiles);
+        var seen = new HashSet<(string, string)>(safeIndexedFiles.Select(f => (Path.GetFullPath(f.Root), NormalizeContentPath(f.Path))));
+        var scannedUnindexed = 0;
+        foreach (var root in roots)
+        {
+            foreach (var relative in EnumerateTextCandidates(root))
+            {
+                if (seen.Add((root, NormalizeContentPath(relative)))) candidates.Add((string.Empty, relative, root));
+            }
+        }
+        foreach (var file in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (!RepositoryPathGuard.TryResolve(file.Root, file.Path, out var fullPath, out _))
@@ -196,6 +222,11 @@ public sealed partial class SqliteStorageInitializer
             string[] lines;
             try
             {
+                if (file.Id.Length == 0)
+                {
+                    if (LooksBinary(fullPath)) continue;
+                    scannedUnindexed++;
+                }
                 lines = await System.IO.File.ReadAllLinesAsync(fullPath, cancellationToken);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or DecoderFallbackException)
@@ -241,7 +272,66 @@ public sealed partial class SqliteStorageInitializer
         var fallbackMessages = fallbackWarnings == 0 ? Array.Empty<string>() : new[] { $"{fallbackWarnings} indexed file(s) could not be searched completely." };
         bool? fallbackComplete = fallbackTruncated ? false : fallbackWarnings > 0 ? (bool?)null : true;
         bool? fallbackOutputTruncated = fallbackTruncated ? true : fallbackWarnings > 0 ? null : false;
-        return new ContentSearchOutcome(fallbackReturned, new ContentSearchCoverage(fallbackReturned.Count, limit, fallbackOutputTruncated, fallbackComplete, false, true, "fallback", fallbackMessages));
+        var fallbackUnindexedHits = fallbackReturned.Count(m => m.FileId.Length == 0);
+        var fallbackScope = $"{candidates.Count} files: every indexed file plus {scannedUnindexed} other tracked or unignored text file(s) (built-in scan; .gitignore honored, binaries skipped)"
+            + (fallbackUnindexedHits > 0 ? $"; {fallbackUnindexedHits} match(es) are in files without a symbol index" : string.Empty);
+        return new ContentSearchOutcome(fallbackReturned, new ContentSearchCoverage(fallbackReturned.Count, limit, fallbackOutputTruncated, fallbackComplete, false, true, "fallback", fallbackMessages, fallbackUnindexedHits, fallbackScope));
+    }
+
+    private static readonly string[] SkippedDirectories = [".git", ".devx", "bin", "obj", "node_modules", ".venv", "venv", "__pycache__"];
+
+    /// <summary>Tracked plus untracked-but-not-ignored files (git), or a directory walk when the
+    /// root is not a git checkout. Root-relative, '/'-separated.</summary>
+    private static IEnumerable<string> EnumerateTextCandidates(string root)
+    {
+        List<string>? files = null;
+        try
+        {
+            var start = new System.Diagnostics.ProcessStartInfo("git")
+            {
+                WorkingDirectory = root, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+            };
+            foreach (var arg in new[] { "ls-files", "-z", "--cached", "--others", "--exclude-standard" }) start.ArgumentList.Add(arg);
+            using var process = System.Diagnostics.Process.Start(start);
+            if (process is not null)
+            {
+                var error = process.StandardError.ReadToEndAsync();
+                var output = process.StandardOutput.ReadToEnd();
+                process.WaitForExit();
+                _ = error.GetAwaiter().GetResult();
+                if (process.ExitCode == 0)
+                    files = output.Split('\0', StringSplitOptions.RemoveEmptyEntries).ToList();
+            }
+        }
+        catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
+        {
+        }
+
+        files ??= RepositoryPathGuard.EnumerateFiles(root, "*")
+            .Select(path => Path.GetRelativePath(root, path).Replace('\\', '/'))
+            .Where(path => !path.Split('/').Take(path.Split('/').Length - 1).Any(segment => SkippedDirectories.Contains(segment)))
+            .ToList();
+        var nestedRepositories = NestedRepositoryGuard.Find(root);
+        return files.Where(path => !path.Split('/').Any(segment => segment is ".git" or ".devx"))
+            .Where(path => !NestedRepositoryGuard.IsInside(path, nestedRepositories))
+            .Where(path => System.IO.File.Exists(Path.Combine(root, path)))
+            .OrderBy(path => path, StringComparer.Ordinal);
+    }
+
+    private static bool LooksBinary(string fullPath)
+    {
+        try
+        {
+            using var stream = System.IO.File.OpenRead(fullPath);
+            if (stream.Length > 4_000_000) return true;
+            var buffer = new byte[8192];
+            var read = stream.Read(buffer, 0, buffer.Length);
+            return Array.IndexOf(buffer, (byte)0, 0, read) >= 0;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
     }
 
     private static void AddBoundedResult(List<(string Path, int Line, ContentSearchResult Result)> results,

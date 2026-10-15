@@ -71,6 +71,9 @@ public static class RipgrepContentSearcher
         return TryRun(executable, rootPath, ["-i", "-F"], query, hits, out scanCapped, processTimeout, cancellationToken);
     }
 
+    private static string GlobEscape(string path)
+        => System.Text.RegularExpressions.Regex.Replace(path, @"([\\*?\[\]{}!])", @"\$1");
+
     private static bool TryRun(string executable, string rootPath, string[] flags, string query, List<Hit> hits, out bool scanCapped, TimeSpan processTimeout, CancellationToken cancellationToken)
     {
         scanCapped = false;
@@ -88,6 +91,18 @@ public static class RipgrepContentSearcher
         start.ArgumentList.Add("--with-filename");
         start.ArgumentList.Add("--color=never");
         start.ArgumentList.Add("--no-messages");
+        // Hidden files (.github/workflows) are tracked source; DevX's own state and git
+        // internals are not.
+        start.ArgumentList.Add("--hidden");
+        start.ArgumentList.Add("--glob");
+        start.ArgumentList.Add("!.git");
+        start.ArgumentList.Add("--glob");
+        start.ArgumentList.Add("!.devx");
+        foreach (var nested in DevX.Domain.NestedRepositoryGuard.Find(rootPath))
+        {
+            start.ArgumentList.Add("--glob");
+            start.ArgumentList.Add("!" + GlobEscape(nested) + "/**");
+        }
         start.ArgumentList.Add("--");                 // everything after this is the pattern
         start.ArgumentList.Add(query);
         start.ArgumentList.Add(".");

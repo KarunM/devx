@@ -288,7 +288,7 @@ static partial class Program
         }
         else if (action == "section")
         {
-            var separator = args[2].LastIndexOf('#');
+            var separator = SectionTarget.SeparatorIndex(args[2]);
             if (separator <= 0)
             {
                 // 19 of 23 `read section` calls in the v2 arm-B transcripts failed on exactly

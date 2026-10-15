@@ -149,7 +149,8 @@ public sealed record ContentSearchCoverage(
     bool FallbackUsed,
     string Engine,
     IReadOnlyList<string> Warnings,
-    int UnindexedHits = 0);
+    int UnindexedHits = 0,
+    string? Scope = null);
 
 public sealed record ContentSearchOutcome(
     IReadOnlyList<ContentSearchResult> Matches,
@@ -346,7 +347,8 @@ public sealed record IndexStatusResponse(
     int IndexedFiles,
     bool IndexExists,
     string Status,
-    string Reason);
+    string Reason,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? DirtyFiles = null);
 
 public interface ISearchService
 {

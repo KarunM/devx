@@ -103,7 +103,7 @@ public sealed class ContentSearchCoverageTests
     }
 
     [Fact]
-    public async Task RipgrepDoesNotClaimCompleteCoverageForIgnoredIndexedFiles()
+    public async Task RipgrepStatesIgnoreRulesInScopeForIgnoredIndexedFiles()
     {
         if (OperatingSystem.IsWindows()) return;
         var root = await CreateRootAsync("secret.md", "needle\n", "#!/bin/sh\nexit 0\n");
@@ -115,8 +115,9 @@ public sealed class ContentSearchCoverageTests
         var result = await store.SearchFileContentsWithCoverageAsync("needle");
 
         Assert.Empty(result.Matches);
-        Assert.Null(result.Coverage.Complete);
-        Assert.Contains(result.Coverage.Warnings, warning => warning.Contains("ignore and hidden-file rules", StringComparison.Ordinal));
+        // Complete means "everything in scope was searched"; the scope says .gitignore is honored.
+        Assert.True(result.Coverage.Complete);
+        Assert.Contains(".gitignore honored", result.Coverage.Scope);
     }
 
     [Fact]
@@ -146,8 +147,7 @@ public sealed class ContentSearchCoverageTests
 
         var agent = await server.CallToolAsync("search", JsonSerializer.SerializeToElement(new { arguments.sessionId, arguments.kind, arguments.query, format = "agent" }));
         Assert.Contains("More matches exist", agent.Content.GetProperty("text").GetString());
-        Assert.Contains("Search coverage note", agent.Content.GetProperty("text").GetString());
-        Assert.Contains("ignore and hidden-file rules", agent.Content.GetProperty("text").GetString());
+        Assert.Contains("Searched: every non-ignored text file under the repository root", agent.Content.GetProperty("text").GetString());
     }
 
     [Fact]
