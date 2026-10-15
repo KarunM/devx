@@ -20,6 +20,9 @@ public static class ContentSearchCoverageFormatter
             ? string.Join(" ", warningArray.EnumerateArray().Select(item => item.GetString()).Where(item => !string.IsNullOrWhiteSpace(item)))
             : string.Empty;
 
+        var scope = PropertyText(coverage, "scope");
+        var searched = scope.Length > 0 ? $" Searched: {scope}." : string.Empty;
+
         if (truncated)
         {
             var note = $"More matches exist; showing {returned} results. Narrow the search.";
@@ -27,11 +30,11 @@ public static class ContentSearchCoverageFormatter
                 note += $" Search coverage note: {warnings}";
             else if (complete is null || scanCapped)
                 note += " Search coverage beyond these matches is unknown.";
-            return note;
+            return note + searched;
         }
         if (complete is null || scanCapped)
-            return warnings.Length == 0 ? "Search coverage unknown; results may be incomplete." : $"Search coverage unknown; results may be incomplete. {warnings}";
-        return null;
+            return (warnings.Length == 0 ? "Search coverage unknown; results may be incomplete." : $"Search coverage unknown; results may be incomplete. {warnings}") + searched;
+        return scope.Length > 0 ? $"Searched: {scope}." : null;
     }
 
     private static string PropertyText(JsonElement element, string name)
