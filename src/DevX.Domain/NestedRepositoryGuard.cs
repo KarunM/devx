@@ -73,7 +73,10 @@ public static class NestedRepositoryGuard
         {
             var start = new System.Diagnostics.ProcessStartInfo("git")
             {
-                WorkingDirectory = root, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+                WorkingDirectory = root,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
             };
             foreach (var arg in new[] { "worktree", "list", "--porcelain" }) start.ArgumentList.Add(arg);
             using var process = System.Diagnostics.Process.Start(start);

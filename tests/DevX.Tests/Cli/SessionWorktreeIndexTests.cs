@@ -112,7 +112,7 @@ public sealed class SessionWorktreeIndexTests : CliHarness
             Commit(directory, "A.py", "B.py");
             Git(directory, "checkout", "-q", "main");
             Git(directory, "merge", "-q", "--ff-only", "feat");
-            Assert.Empty(Git(directory, "status", "--porcelain").Split('\n', StringSplitOptions.RemoveEmptyEntries).Where(line => !line.Contains(".devx/")));
+            Assert.DoesNotContain(Git(directory, "status", "--porcelain").Split('\n', StringSplitOptions.RemoveEmptyEntries), line => !line.Contains(".devx/"));
 
             var (code, output) = await RunAsync(directory, "index", ".", "--session", id);
             Assert.True(code == 0, output);

@@ -289,7 +289,10 @@ public sealed partial class SqliteStorageInitializer
         {
             var start = new System.Diagnostics.ProcessStartInfo("git")
             {
-                WorkingDirectory = root, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false,
+                WorkingDirectory = root,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
             };
             foreach (var arg in new[] { "ls-files", "-z", "--cached", "--others", "--exclude-standard" }) start.ArgumentList.Add(arg);
             using var process = System.Diagnostics.Process.Start(start);
